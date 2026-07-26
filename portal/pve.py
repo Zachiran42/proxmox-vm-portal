@@ -51,8 +51,19 @@ class PVEClient:
         return any(item.get("volid") == f"{storage}:iso/{filename}" for item in content)
 
     def create_vm(self, request: dict[str, Any]) -> str:
+        vmid = self._request("/cluster/nextid")
+        if isinstance(vmid, bool) or not isinstance(vmid, (int, str)):
+            raise ValueError("Le VMID retourné par Proxmox est invalide.")
+        try:
+            vmid = int(vmid)
+        except ValueError as error:
+            raise ValueError("Le VMID retourné par Proxmox est invalide.") from error
+        if vmid <= 0:
+            raise ValueError("Le VMID retourné par Proxmox doit être positif.")
+
         # Le mapping minimal évite de transmettre des paramètres arbitraires du client.
         payload = {
+            "vmid": vmid,
             "name": request["name"], "cores": request["cpu"], "memory": request["ram_mb"],
             "scsihw": "virtio-scsi-pci", "scsi0": f"local-lvm:{request['disk_gb']}",
             "ide2": f"{request['iso']},media=cdrom",
