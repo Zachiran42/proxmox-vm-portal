@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from portal.pve import PVEClient, PVEHTTPError
+from portal.pve import PVEClient, PVEHTTPError, PVEProtocolError
 
 
 @pytest.fixture
@@ -70,6 +70,56 @@ def test_is_iso_available_uses_node_storage_content_endpoint(client):
 def test_is_iso_available_returns_false_when_iso_is_missing(client):
     with patch.object(client, "_request", return_value=[]):
         assert client.is_iso_available("pve-a", "local:iso/debian-12.iso") is False
+
+
+def test_list_nodes_returns_only_online_nodes_sorted(client):
+    data = [
+        {"node": "pve-b", "status": "online"},
+        {"node": "pve-offline", "status": "offline"},
+        {"node": "pve-a", "status": "online"},
+        {"node": "pve-a", "status": "online"},
+        {"status": "online"},
+    ]
+    with patch.object(client, "_request", return_value=data):
+        assert client.list_nodes() == ["pve-a", "pve-b"]
+
+
+def test_list_isos_discovers_enabled_iso_storages(client):
+    with patch.object(
+        client,
+        "_request",
+        side_effect=[
+            [{"storage": "local"}, {"storage": "shared"}],
+            [
+                {"volid": "local:iso/debian-12.iso"},
+                {"volid": "local:vztmpl/not-an-iso.tar.zst"},
+            ],
+            [{"volid": "shared:iso/ubuntu-24.04.iso"}],
+        ],
+    ) as request:
+        assert client.list_isos("pve-a") == [
+            "local:iso/debian-12.iso",
+            "shared:iso/ubuntu-24.04.iso",
+        ]
+
+    assert [call.args[0] for call in request.call_args_list] == [
+        "/nodes/pve-a/storage?content=iso&enabled=1",
+        "/nodes/pve-a/storage/local/content?content=iso",
+        "/nodes/pve-a/storage/shared/content?content=iso",
+    ]
+
+
+@pytest.mark.parametrize("method", ["list_nodes", "list_isos"])
+def test_inventory_rejects_invalid_pve_shapes(client, method):
+    with patch.object(client, "_request", return_value={"not": "a list"}):
+        with pytest.raises(PVEProtocolError, match="invalide"):
+            getattr(client, method)(*(["pve-a"] if method == "list_isos" else []))
+
+
+def test_iso_check_rejects_invalid_pve_shape(client):
+    with patch.object(client, "_request", return_value={"not": "a list"}):
+        with pytest.raises(PVEProtocolError, match="invalide"):
+            client.is_iso_available("pve-a", "local:iso/debian-12.iso")
 
 
 def test_create_vm_allocates_valid_vmid_and_uses_exact_payload(client):

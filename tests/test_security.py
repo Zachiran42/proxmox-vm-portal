@@ -34,7 +34,10 @@ def payload():
 
 
 def login(client):
-    return client.post("/login", json={"username": "admin", "password": "correct-horse-battery-staple"})
+    response = client.post("/login", json={"username": "admin", "password": "correct-horse-battery-staple"})
+    if response.status_code == 200:
+        client.environ_base["HTTP_X_CSRF_TOKEN"] = response.get_json()["csrf_token"]
+    return response
 
 
 def test_vm_creation_requires_local_login(app, pve_client):
@@ -47,6 +50,21 @@ def test_vm_creation_requires_local_login(app, pve_client):
     assert pve_client.requests == [payload()]
 
 
+def test_vm_creation_and_logout_require_csrf_token(app, pve_client):
+    client = app.test_client()
+    response = login(client)
+    csrf_token = response.get_json()["csrf_token"]
+    del client.environ_base["HTTP_X_CSRF_TOKEN"]
+
+    assert client.post("/api/vms", json=payload()).status_code == 403
+    assert client.post("/logout").status_code == 403
+    assert pve_client.requests == []
+
+    client.environ_base["HTTP_X_CSRF_TOKEN"] = csrf_token
+    assert client.post("/api/vms", json=payload()).status_code == 202
+    assert client.post("/logout").status_code == 200
+
+
 def test_invalid_login_and_session_security(app):
     response = app.test_client().post("/login", json={"username": "admin", "password": "invalid"})
     assert response.status_code == 401
@@ -54,6 +72,16 @@ def test_invalid_login_and_session_security(app):
     assert app.config["SESSION_COOKIE_HTTPONLY"] is True
     assert app.config["SESSION_COOKIE_SAMESITE"] == "Lax"
     assert app.config["SESSION_COOKIE_SECURE"] is True
+
+
+def test_security_headers_are_added(app):
+    response = app.test_client().get("/")
+
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+    assert response.headers["Referrer-Policy"] == "no-referrer"
+    assert response.headers["Cache-Control"] == "no-store"
+    assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"]
+    assert response.headers["Strict-Transport-Security"].startswith("max-age=")
 
 
 def test_missing_authentication_configuration_prevents_startup(pve_client):

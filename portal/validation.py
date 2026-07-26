@@ -16,6 +16,13 @@ class ValidationError(Exception):
         super().__init__("Requête VM invalide")
 
 
+def validate_node_name(node: Any) -> str:
+    """Valide un nom de nœud avant de l'insérer dans un chemin d'API PVE."""
+    if not isinstance(node, str) or not _NODE.fullmatch(node):
+        raise ValidationError({"node": "Nœud invalide."})
+    return node
+
+
 @dataclass(frozen=True)
 class VMRequest:
     name: str

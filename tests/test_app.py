@@ -30,6 +30,7 @@ def authenticated_client(app):
     client = app.test_client()
     response = client.post("/login", json={"username": "admin", "password": "correct-horse-battery-staple"})
     assert response.status_code == 200
+    client.environ_base["HTTP_X_CSRF_TOKEN"] = response.get_json()["csrf_token"]
     return client
 
 
@@ -45,6 +46,33 @@ def test_home_page_is_available(app):
 
     assert response.status_code == 200
     assert "Portail Proxmox" in response.get_data(as_text=True)
+
+
+def test_authenticated_user_can_list_nodes_and_isos(authenticated_client):
+    nodes = authenticated_client.get("/api/nodes")
+    isos = authenticated_client.get("/api/nodes/pve-a/isos")
+
+    assert nodes.status_code == 200
+    assert nodes.get_json() == {"nodes": ["pve-a"]}
+    assert isos.status_code == 200
+    assert isos.get_json() == {
+        "node": "pve-a",
+        "isos": ["local:iso/debian-12.iso"],
+    }
+
+
+def test_inventory_requires_authentication(app):
+    client = app.test_client()
+
+    assert client.get("/api/nodes").status_code == 401
+    assert client.get("/api/nodes/pve-a/isos").status_code == 401
+
+
+def test_inventory_rejects_invalid_node_name(authenticated_client):
+    response = authenticated_client.get("/api/nodes/INVALID/isos")
+
+    assert response.status_code == 400
+    assert response.get_json() == {"errors": {"node": "Nœud invalide."}}
 
 
 def test_valid_vm_request_is_accepted_and_sent_to_client(authenticated_client, pve_client):

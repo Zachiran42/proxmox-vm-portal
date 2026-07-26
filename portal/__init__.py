@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import os
+import secrets
+from datetime import timedelta
 from functools import wraps
+from hmac import compare_digest
 
 from flask import Flask, jsonify, request, session
 from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.security import check_password_hash
 
 from .pve import PVEClient, PVEHTTPError, PVEProtocolError, PVETransportError
-from .validation import ValidationError, VMRequest
+from .validation import ValidationError, VMRequest, validate_node_name
 
 
 def create_app(test_config: dict | None = None, *, pve_client=None) -> Flask:
@@ -20,6 +23,7 @@ def create_app(test_config: dict | None = None, *, pve_client=None) -> Flask:
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Lax",
         SESSION_COOKIE_SECURE=os.environ.get("PORTAL_SESSION_COOKIE_SECURE", "true").lower() not in {"0", "false", "no"},
+        PERMANENT_SESSION_LIFETIME=timedelta(minutes=30),
         PORTAL_ADMIN_USERNAME=os.environ.get("PORTAL_ADMIN_USERNAME", "").strip(),
         PORTAL_ADMIN_PASSWORD_HASH=os.environ.get("PORTAL_ADMIN_PASSWORD_HASH", "").strip(),
         PORTAL_SESSION_SECRET=os.environ.get("PORTAL_SESSION_SECRET", ""),
@@ -54,11 +58,37 @@ def create_app(test_config: dict | None = None, *, pve_client=None) -> Flask:
     def pve_upstream_failure(_error):
         return jsonify(error="pve_unavailable"), 502
 
+    @app.after_request
+    def add_security_headers(response):
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+        )
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
     def login_required(view):
         @wraps(view)
         def wrapped(*args, **kwargs):
             if session.get("authenticated") is not True:
                 return jsonify(error="authentication_required"), 401
+            return view(*args, **kwargs)
+        return wrapped
+
+    def csrf_protected(view):
+        @wraps(view)
+        def wrapped(*args, **kwargs):
+            expected = session.get("csrf_token")
+            supplied = request.headers.get("X-CSRF-Token", "")
+            if (
+                not isinstance(expected, str)
+                or not isinstance(supplied, str)
+                or not compare_digest(expected, supplied)
+            ):
+                return jsonify(error="csrf_validation_failed"), 403
             return view(*args, **kwargs)
         return wrapped
 
@@ -80,15 +110,34 @@ def create_app(test_config: dict | None = None, *, pve_client=None) -> Flask:
             return jsonify(error="invalid_credentials"), 401
         session.clear()
         session["authenticated"] = True
-        return jsonify(status="authenticated")
+        session["csrf_token"] = secrets.token_urlsafe(32)
+        session.permanent = True
+        return jsonify(status="authenticated", csrf_token=session["csrf_token"])
 
     @app.post("/logout")
+    @login_required
+    @csrf_protected
     def logout():
         session.clear()
         return jsonify(status="logged_out")
 
+    @app.get("/api/nodes")
+    @login_required
+    def list_nodes():
+        return jsonify(nodes=client.list_nodes())
+
+    @app.get("/api/nodes/<node>/isos")
+    @login_required
+    def list_isos(node: str):
+        try:
+            validate_node_name(node)
+        except ValidationError as error:
+            return jsonify(errors=error.errors), 400
+        return jsonify(node=node, isos=client.list_isos(node))
+
     @app.post("/api/vms")
     @login_required
+    @csrf_protected
     def request_vm():
         payload = request.get_json(silent=True)
         if not isinstance(payload, dict):

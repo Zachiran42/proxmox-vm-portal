@@ -88,8 +88,55 @@ class PVEClient:
 
     def is_iso_available(self, node: str, iso: str) -> bool:
         storage, filename = iso.split(":iso/", 1)
-        content = self._request(f"/nodes/{quote(node)}/storage/{quote(storage)}/content?content=iso")
-        return any(item.get("volid") == f"{storage}:iso/{filename}" for item in content)
+        content = self._request(
+            f"/nodes/{quote(node, safe='')}/storage/{quote(storage, safe='')}/content?content=iso"
+        )
+        if not isinstance(content, list):
+            raise PVEProtocolError("Le contenu du stockage PVE est invalide.")
+        return any(
+            isinstance(item, dict)
+            and item.get("volid") == f"{storage}:iso/{filename}"
+            for item in content
+        )
+
+    def list_nodes(self) -> list[str]:
+        """Retourne uniquement les nœuds PVE en ligne, triés et dédupliqués."""
+        nodes = self._request("/nodes")
+        if not isinstance(nodes, list):
+            raise PVEProtocolError("La liste des nœuds PVE est invalide.")
+        return sorted(
+            {
+                item["node"]
+                for item in nodes
+                if isinstance(item, dict)
+                and isinstance(item.get("node"), str)
+                and item.get("status") == "online"
+            }
+        )
+
+    def list_isos(self, node: str) -> list[str]:
+        """Inventorie les ISO réellement accessibles sur un nœud."""
+        storages = self._request(
+            f"/nodes/{quote(node, safe='')}/storage?content=iso&enabled=1"
+        )
+        if not isinstance(storages, list):
+            raise PVEProtocolError("La liste des stockages PVE est invalide.")
+
+        isos: set[str] = set()
+        for item in storages:
+            storage = item.get("storage") if isinstance(item, dict) else None
+            if not isinstance(storage, str) or not storage:
+                continue
+            content = self._request(
+                f"/nodes/{quote(node, safe='')}/storage/{quote(storage, safe='')}/content?content=iso"
+            )
+            if not isinstance(content, list):
+                raise PVEProtocolError("Le contenu du stockage PVE est invalide.")
+            for volume in content:
+                volid = volume.get("volid") if isinstance(volume, dict) else None
+                if isinstance(volid, str) and volid.startswith(f"{storage}:iso/"):
+                    isos.add(volid)
+        return sorted(isos)
 
     def create_vm(self, request: dict[str, Any]) -> str:
         # /cluster/nextid n'est pas une réservation atomique : trois collisions maximum.
@@ -103,7 +150,11 @@ class PVEClient:
                 "ide2": f"{request['iso']},media=cdrom",
             }
             try:
-                result = self._request(f"/nodes/{quote(request['node'])}/qemu", method="POST", payload=payload)
+                result = self._request(
+                    f"/nodes/{quote(request['node'], safe='')}/qemu",
+                    method="POST",
+                    payload=payload,
+                )
             except PVEHTTPError as error:
                 if retry < 3 and self._is_vmid_collision(error):
                     continue
@@ -138,6 +189,12 @@ class FakePVEClient:
 
     def is_iso_available(self, node: str, iso: str) -> bool:
         return iso in self.accessible_isos.get(node, set())
+
+    def list_nodes(self) -> list[str]:
+        return sorted(self.accessible_isos)
+
+    def list_isos(self, node: str) -> list[str]:
+        return sorted(self.accessible_isos.get(node, set()))
 
     def create_vm(self, request: dict[str, Any]) -> str:
         self.requests.append(request)

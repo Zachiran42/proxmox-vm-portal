@@ -39,7 +39,10 @@ Les tests n'appellent aucun PVE réel et n'utilisent aucun secret réel :
 .venv/bin/pytest -q
 ```
 
-Endpoints : `GET /healthz`, `GET /`, `POST /login`, `POST /logout`, `POST /api/vms`.
+Architecture cible et étapes de livraison : [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+Endpoints : `GET /healthz`, `GET /`, `POST /login`, `POST /logout`,
+`GET /api/nodes`, `GET /api/nodes/<node>/isos`, `POST /api/vms`.
 
 Exemple de connexion :
 
@@ -47,7 +50,10 @@ Exemple de connexion :
 {"username":"admin","password":"votre-mot-de-passe-local"}
 ```
 
-Exemple de demande authentifiée :
+La réponse contient un jeton CSRF à envoyer dans l'en-tête `X-CSRF-Token` pour
+`POST /api/vms` et `POST /logout`.
+
+Exemple de demande authentifiée (avec cet en-tête) :
 
 ```json
 {"name":"web-01","node":"pve-a","iso":"local:iso/debian-12.iso","cpu":2,"ram_mb":4096,"disk_gb":40}
