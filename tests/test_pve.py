@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from portal.pve import PVEClient
+from portal.pve import PVEClient, PVEHTTPError
 
 
 @pytest.fixture
@@ -39,12 +39,21 @@ def test_request_sends_token_auth_header_and_json_payload(client):
     assert urlopen.call_args.kwargs == {"timeout": 10}
 
 
-def test_request_propagates_http_errors(client):
-    error = HTTPError("https://pve.example/api2/json/cluster/nextid", 401, "Unauthorized", {}, None)
+def test_request_wraps_http_errors_with_status_and_pve_message(client):
+    error = HTTPError(
+        "https://pve.example/api2/json/cluster/nextid",
+        409,
+        "Conflict",
+        {},
+        io.BytesIO(b'{"errors": {"vmid": "VMID 101 already exists"}}'),
+    )
 
     with patch("portal.pve.urlopen", side_effect=error):
-        with pytest.raises(HTTPError, match="Unauthorized"):
+        with pytest.raises(PVEHTTPError, match="already exists") as caught:
             client._request("/cluster/nextid")
+
+    assert caught.value.status == 409
+    assert caught.value.message == "VMID 101 already exists"
 
 
 def test_is_iso_available_uses_node_storage_content_endpoint(client):
@@ -88,6 +97,46 @@ def test_create_vm_allocates_valid_vmid_and_uses_exact_payload(client):
     assert request.call_args_list[0].kwargs == {}
     assert request.call_args_list[1].args == ("/nodes/pve-a/qemu",)
     assert request.call_args_list[1].kwargs == {"method": "POST", "payload": expected_payload}
+
+
+@pytest.mark.parametrize("status", [400, 409])
+def test_create_vm_reallocates_vmid_after_a_specific_collision(client, status):
+    vm_request = {"name": "web-prod-01", "node": "pve-a", "iso": "local:iso/debian-12.iso", "cpu": 2, "ram_mb": 4096, "disk_gb": 40}
+    collision = PVEHTTPError(status, "VMID 101 already exists")
+
+    with patch.object(client, "_request", side_effect=[101, collision, 102, "UPID:pve:0002"]) as request:
+        assert client.create_vm(vm_request) == "UPID:pve:0002"
+
+    assert request.call_args_list[0].args == ("/cluster/nextid",)
+    assert request.call_args_list[1].kwargs["payload"]["vmid"] == 101
+    assert request.call_args_list[2].args == ("/cluster/nextid",)
+    assert request.call_args_list[3].kwargs["payload"]["vmid"] == 102
+    assert request.call_count == 4
+
+
+def test_create_vm_stops_after_three_vmid_collision_retries(client):
+    vm_request = {"name": "web-prod-01", "node": "pve-a", "iso": "local:iso/debian-12.iso", "cpu": 2, "ram_mb": 4096, "disk_gb": 40}
+    collision = PVEHTTPError(409, "VMID already used")
+
+    with patch.object(client, "_request", side_effect=[101, collision, 102, collision, 103, collision, 104, collision]) as request:
+        with pytest.raises(PVEHTTPError, match="already used"):
+            client.create_vm(vm_request)
+
+    assert [call.args[0] for call in request.call_args_list] == [
+        "/cluster/nextid", "/nodes/pve-a/qemu", "/cluster/nextid", "/nodes/pve-a/qemu",
+        "/cluster/nextid", "/nodes/pve-a/qemu", "/cluster/nextid", "/nodes/pve-a/qemu",
+    ]
+
+
+def test_create_vm_does_not_retry_non_collision_http_errors(client):
+    vm_request = {"name": "web-prod-01", "node": "pve-a", "iso": "local:iso/debian-12.iso", "cpu": 2, "ram_mb": 4096, "disk_gb": 40}
+    error = PVEHTTPError(409, "ISO storage is unavailable")
+
+    with patch.object(client, "_request", side_effect=[101, error]) as request:
+        with pytest.raises(PVEHTTPError, match="storage is unavailable"):
+            client.create_vm(vm_request)
+
+    assert request.call_count == 2
 
 
 @pytest.mark.parametrize("vmid", [None, "", "abc", "100.5", 0, -1, True])

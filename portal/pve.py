@@ -4,8 +4,17 @@ import json
 import os
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
+
+
+class PVEHTTPError(HTTPError):
+    """Erreur HTTP PVE conservant explicitement le statut et le message."""
+
+    def __init__(self, status: int, message: str, url: str = ""):
+        super().__init__(url, status, message, hdrs=None, fp=None)
+        self.message = message
 
 
 @dataclass
@@ -42,8 +51,26 @@ class PVEClient:
             method=method,
             headers={"Authorization": self.authorization_header, "Content-Type": "application/json"},
         )
-        with urlopen(request, timeout=10) as response:  # nosec B310: URL is admin-controlled configuration
-            return json.load(response).get("data")
+        try:
+            with urlopen(request, timeout=10) as response:  # nosec B310: URL is admin-controlled configuration
+                return json.load(response).get("data")
+        except HTTPError as error:
+            raise PVEHTTPError(error.code, self._http_error_message(error), error.url) from error
+
+    @staticmethod
+    def _http_error_message(error: HTTPError) -> str:
+        """Extrait le détail PVE, sans perdre la raison HTTP en cas de corps invalide."""
+        message = str(error.reason)
+        try:
+            response = json.loads(error.read().decode())
+        except (AttributeError, UnicodeDecodeError, json.JSONDecodeError):
+            return message
+        errors = response.get("errors") if isinstance(response, dict) else None
+        if isinstance(errors, dict):
+            details = "; ".join(str(detail) for detail in errors.values())
+            if details:
+                return details
+        return message
 
     def is_iso_available(self, node: str, iso: str) -> bool:
         storage, filename = iso.split(":iso/", 1)
@@ -51,7 +78,27 @@ class PVEClient:
         return any(item.get("volid") == f"{storage}:iso/{filename}" for item in content)
 
     def create_vm(self, request: dict[str, Any]) -> str:
-        vmid = self._request("/cluster/nextid")
+        # /cluster/nextid n'est pas une réservation atomique : trois collisions maximum.
+        for retry in range(4):
+            vmid = self._valid_vmid(self._request("/cluster/nextid"))
+            # Le mapping minimal évite de transmettre des paramètres arbitraires du client.
+            payload = {
+                "vmid": vmid,
+                "name": request["name"], "cores": request["cpu"], "memory": request["ram_mb"],
+                "scsihw": "virtio-scsi-pci", "scsi0": f"local-lvm:{request['disk_gb']}",
+                "ide2": f"{request['iso']},media=cdrom",
+            }
+            try:
+                result = self._request(f"/nodes/{quote(request['node'])}/qemu", method="POST", payload=payload)
+            except PVEHTTPError as error:
+                if retry < 3 and self._is_vmid_collision(error):
+                    continue
+                raise
+            return str(result)
+        raise RuntimeError("Tentatives d'allocation VMID épuisées.")  # pragma: no cover
+
+    @staticmethod
+    def _valid_vmid(vmid: Any) -> int:
         if isinstance(vmid, bool) or not isinstance(vmid, (int, str)):
             raise ValueError("Le VMID retourné par Proxmox est invalide.")
         try:
@@ -60,16 +107,14 @@ class PVEClient:
             raise ValueError("Le VMID retourné par Proxmox est invalide.") from error
         if vmid <= 0:
             raise ValueError("Le VMID retourné par Proxmox doit être positif.")
+        return vmid
 
-        # Le mapping minimal évite de transmettre des paramètres arbitraires du client.
-        payload = {
-            "vmid": vmid,
-            "name": request["name"], "cores": request["cpu"], "memory": request["ram_mb"],
-            "scsihw": "virtio-scsi-pci", "scsi0": f"local-lvm:{request['disk_gb']}",
-            "ide2": f"{request['iso']},media=cdrom",
-        }
-        result = self._request(f"/nodes/{quote(request['node'])}/qemu", method="POST", payload=payload)
-        return str(result)
+    @staticmethod
+    def _is_vmid_collision(error: PVEHTTPError) -> bool:
+        message = error.message.lower()
+        mentions_vm = "vmid" in message or "vm " in message
+        indicates_collision = "already exists" in message or "already used" in message or "already in use" in message
+        return error.status in (400, 409) and mentions_vm and indicates_collision
 
 
 @dataclass
