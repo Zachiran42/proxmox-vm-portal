@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from werkzeug.security import generate_password_hash
 
 from portal import create_app
 from portal.pve import FakePVEClient, PVEClient
@@ -13,8 +14,23 @@ def pve_client():
 
 @pytest.fixture
 def app(pve_client):
-    app = create_app({"TESTING": True}, pve_client=pve_client)
-    return app
+    return create_app(
+        {
+            "TESTING": True,
+            "PORTAL_ADMIN_USERNAME": "admin",
+            "PORTAL_ADMIN_PASSWORD_HASH": generate_password_hash("correct-horse-battery-staple"),
+            "PORTAL_SESSION_SECRET": "test-session-secret-that-is-long-enough",
+        },
+        pve_client=pve_client,
+    )
+
+
+@pytest.fixture
+def authenticated_client(app):
+    client = app.test_client()
+    response = client.post("/login", json={"username": "admin", "password": "correct-horse-battery-staple"})
+    assert response.status_code == 200
+    return client
 
 
 def test_healthz_returns_ok(app):
@@ -31,8 +47,8 @@ def test_home_page_is_available(app):
     assert "Portail Proxmox" in response.get_data(as_text=True)
 
 
-def test_valid_vm_request_is_accepted_and_sent_to_client(app, pve_client):
-    response = app.test_client().post(
+def test_valid_vm_request_is_accepted_and_sent_to_client(authenticated_client, pve_client):
+    response = authenticated_client.post(
         "/api/vms",
         json={
             "name": "web-prod-01",
@@ -69,14 +85,14 @@ def test_valid_vm_request_is_accepted_and_sent_to_client(app, pve_client):
         ({"name": "web-01", "node": "pve-a", "iso": "../debian.iso", "cpu": 2, "ram_mb": 4096, "disk_gb": 40}, "iso"),
     ],
 )
-def test_invalid_vm_request_is_rejected(app, payload, field):
-    response = app.test_client().post("/api/vms", json=payload)
+def test_invalid_vm_request_is_rejected(authenticated_client, payload, field):
+    response = authenticated_client.post("/api/vms", json=payload)
 
     assert response.status_code == 400
     assert field in response.get_json()["errors"]
 
 
-def test_unknown_fields_are_rejected(app):
+def test_unknown_fields_are_rejected(authenticated_client):
     payload = {
         "name": "web-01",
         "node": "pve-a",
@@ -87,14 +103,14 @@ def test_unknown_fields_are_rejected(app):
         "vmid": 100,
     }
 
-    response = app.test_client().post("/api/vms", json=payload)
+    response = authenticated_client.post("/api/vms", json=payload)
 
     assert response.status_code == 400
     assert "unknown" in response.get_json()["errors"]
 
 
-def test_iso_must_be_available_on_selected_node(app, pve_client):
-    response = app.test_client().post(
+def test_iso_must_be_available_on_selected_node(authenticated_client, pve_client):
+    response = authenticated_client.post(
         "/api/vms",
         json={
             "name": "web-01",
@@ -111,8 +127,8 @@ def test_iso_must_be_available_on_selected_node(app, pve_client):
     assert pve_client.requests == []
 
 
-def test_missing_json_is_rejected(app):
-    response = app.test_client().post("/api/vms")
+def test_missing_json_is_rejected(authenticated_client):
+    response = authenticated_client.post("/api/vms")
 
     assert response.status_code == 400
     assert response.get_json()["errors"] == {"body": "Un objet JSON est requis."}

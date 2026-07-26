@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import socket
+import ssl
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
@@ -15,6 +17,14 @@ class PVEHTTPError(HTTPError):
     def __init__(self, status: int, message: str, url: str = ""):
         super().__init__(url, status, message, hdrs=None, fp=None)
         self.message = message
+
+
+class PVETransportError(RuntimeError):
+    """Échec réseau ou TLS vers PVE."""
+
+
+class PVEProtocolError(RuntimeError):
+    """Réponse PVE invalide ou inattendue."""
 
 
 @dataclass
@@ -56,6 +66,10 @@ class PVEClient:
                 return json.load(response).get("data")
         except HTTPError as error:
             raise PVEHTTPError(error.code, self._http_error_message(error), error.url) from error
+        except (URLError, socket.timeout, ssl.SSLError) as error:
+            raise PVETransportError("La connexion à PVE a échoué.") from error
+        except (UnicodeDecodeError, json.JSONDecodeError, AttributeError) as error:
+            raise PVEProtocolError("La réponse PVE est invalide.") from error
 
     @staticmethod
     def _http_error_message(error: HTTPError) -> str:
