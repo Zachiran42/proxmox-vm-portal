@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
-import os
 import ssl
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
+
+from .config import environment_value
 
 
 class PVEHTTPError(HTTPError):
@@ -42,7 +43,10 @@ class PVEClient:
 
     @classmethod
     def from_environment(cls) -> PVEClient:
-        values = {key: os.environ.get(key, "").strip() for key in ("PVE_API_URL", "PVE_TOKEN_ID", "PVE_TOKEN_SECRET")}
+        values = {
+            key: environment_value(key)
+            for key in ("PVE_API_URL", "PVE_TOKEN_ID", "PVE_TOKEN_SECRET")
+        }
         missing = [key for key, value in values.items() if not value]
         if missing:
             raise ValueError("Variables d'environnement manquantes: " + ", ".join(missing))

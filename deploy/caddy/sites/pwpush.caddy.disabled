@@ -1,0 +1,5 @@
+{$PWPUSH_DOMAIN} {
+    header -Server
+    reverse_proxy pwpush:5100
+    log
+}

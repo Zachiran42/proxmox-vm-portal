@@ -10,6 +10,9 @@ dépôt.
 - Le mot de passe administrateur est fourni uniquement sous forme de hash Werkzeug (`PORTAL_ADMIN_PASSWORD_HASH`) ; aucun mot de passe clair n'est accepté en configuration.
 - Le cookie de session est `Secure` par défaut. `PORTAL_SESSION_COOKIE_SECURE=false` est réservé au développement HTTP local isolé.
 - La configuration PVE et les secrets d'authentification sont lus depuis l'environnement. L'application refuse de démarrer s'il manque un secret d'authentification.
+- En conteneur, les valeurs sensibles sont montées comme secrets et lues via
+  les variantes `*_FILE`; elles ne figurent ni dans Git ni dans l'environnement
+  inspectable du conteneur.
 - Taille maximale des requêtes : 64 KiB.
 - Les erreurs de transport, TLS, JSON invalide et HTTP PVE sont converties en JSON 502/503 sans détail PVE ni traceback.
 - Authentification PVE par API token dédié : les tokens `root@…` sont explicitement refusés ; HTTPS est obligatoire.
@@ -50,6 +53,21 @@ flask --app 'portal:create_app' worker
 ```
 
 En production, servez l'application derrière TLS avec un serveur WSGI et conservez `PORTAL_SESSION_COOKIE_SECURE=true`. N'activez pas le mode debug.
+
+## Déploiement Debian avec Docker
+
+La stack de production fournit PostgreSQL 17, un service de migration, l'API
+Gunicorn non-root, le worker et Caddy. Keycloak et Password Pusher sont des
+profils Compose optionnels. Après configuration de `.env.production` :
+
+```bash
+sudo bash deploy/scripts/install-debian.sh
+sudo deploy/scripts/compose.sh ps
+```
+
+Guide complet : [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md). Sauvegarde,
+restauration et mises à jour :
+[`docs/BACKUP_RESTORE.md`](docs/BACKUP_RESTORE.md).
 
 ## Tests
 

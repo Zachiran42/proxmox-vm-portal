@@ -1,0 +1,5 @@
+{$KEYCLOAK_DOMAIN} {
+    header -Server
+    reverse_proxy keycloak:8080
+    log
+}

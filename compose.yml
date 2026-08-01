@@ -1,0 +1,231 @@
+name: ${COMPOSE_PROJECT_NAME:-proxmox-vm-portal}
+
+x-portal-environment: &portal-environment
+  PORTAL_DATABASE_URL_FILE: /run/secrets/portal_database_url
+  PORTAL_SESSION_SECRET_FILE: /run/secrets/portal_session_secret
+  PORTAL_ADMIN_PASSWORD_HASH_FILE: /run/secrets/portal_admin_password_hash
+  PVE_TOKEN_SECRET_FILE: /run/secrets/pve_token_secret
+  PORTAL_OIDC_CLIENT_SECRET_FILE: /run/secrets/portal_oidc_client_secret
+  PORTAL_PWPUSH_API_TOKEN_FILE: /run/secrets/portal_pwpush_api_token
+  PVE_API_URL: ${PVE_API_URL:?PVE_API_URL est requis}
+  PVE_TOKEN_ID: ${PVE_TOKEN_ID:?PVE_TOKEN_ID est requis}
+  PORTAL_ADMIN_USERNAME: ${PORTAL_ADMIN_USERNAME:-admin}
+  PORTAL_LOCAL_AUTH_ENABLED: ${PORTAL_LOCAL_AUTH_ENABLED:-true}
+  PORTAL_OIDC_ISSUER: ${PORTAL_OIDC_ISSUER:-}
+  PORTAL_OIDC_CLIENT_ID: ${PORTAL_OIDC_CLIENT_ID:-}
+  PORTAL_OIDC_REDIRECT_URI: ${PORTAL_OIDC_REDIRECT_URI:-}
+  PORTAL_OIDC_ROLE_ADMIN: ${PORTAL_OIDC_ROLE_ADMIN:-portal-admin}
+  PORTAL_OIDC_ROLE_OPERATOR: ${PORTAL_OIDC_ROLE_OPERATOR:-portal-operator}
+  PORTAL_OIDC_ROLE_USER: ${PORTAL_OIDC_ROLE_USER:-portal-user}
+  PORTAL_PWPUSH_URL: ${PORTAL_PWPUSH_URL:-}
+  PORTAL_PWPUSH_EXPIRE_DAYS: ${PORTAL_PWPUSH_EXPIRE_DAYS:-1}
+  PORTAL_PWPUSH_EXPIRE_VIEWS: ${PORTAL_PWPUSH_EXPIRE_VIEWS:-1}
+  PORTAL_JOB_POLL_SECONDS: ${PORTAL_JOB_POLL_SECONDS:-5}
+  PORTAL_JOB_LEASE_SECONDS: ${PORTAL_JOB_LEASE_SECONDS:-300}
+  PORTAL_SESSION_COOKIE_SECURE: "true"
+
+x-portal-service: &portal-service
+  image: ${PORTAL_IMAGE:-proxmox-vm-portal:0.6.0}
+  build:
+    context: .
+  restart: unless-stopped
+  init: true
+  read_only: true
+  user: "10001:10001"
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  tmpfs:
+    - /tmp:size=32m,mode=1777
+  environment: *portal-environment
+  secrets:
+    - portal_database_url
+    - portal_session_secret
+    - portal_admin_password_hash
+    - pve_token_secret
+    - portal_oidc_client_secret
+    - portal_pwpush_api_token
+  networks: [backend, edge]
+  logging:
+    driver: json-file
+    options: {max-size: 10m, max-file: "3"}
+
+services:
+  db:
+    image: postgres:17.10-bookworm@sha256:4f736ae292687621d4dbe0d499ffd024a36bd2ee7d8ca6f2ccd4c800f047b394
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: portal
+      POSTGRES_USER: portal
+      POSTGRES_PASSWORD_FILE: /run/secrets/portal_db_password
+    secrets: [portal_db_password]
+    volumes: [portal_db:/var/lib/postgresql/data]
+    networks: [backend]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U portal -d portal"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    security_opt: [no-new-privileges:true]
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}
+
+  migrate:
+    <<: *portal-service
+    restart: "no"
+    command: ["flask", "--app", "portal:create_app", "db", "upgrade"]
+    depends_on:
+      db: {condition: service_healthy}
+
+  api:
+    <<: *portal-service
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  worker:
+    <<: *portal-service
+    command: ["flask", "--app", "portal:create_app", "worker"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+
+  proxy:
+    image: caddy:2.11.3-alpine@sha256:86deaf5e3d3408a6ccec08fbb79989783dd26e206ae10bcf78a801dc8c9ab794
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      PORTAL_DOMAIN: ${PORTAL_DOMAIN:-localhost}
+      KEYCLOAK_DOMAIN: ${KEYCLOAK_DOMAIN:-id.example.invalid}
+      PWPUSH_DOMAIN: ${PWPUSH_DOMAIN:-pwpush.example.invalid}
+      ACME_EMAIL: ${ACME_EMAIL:-admin@example.invalid}
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./deploy/caddy/sites:/etc/caddy/sites:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [edge]
+    depends_on:
+      api: {condition: service_healthy}
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: [no-new-privileges:true]
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}
+
+  keycloak-db:
+    image: postgres:17.10-bookworm@sha256:4f736ae292687621d4dbe0d499ffd024a36bd2ee7d8ca6f2ccd4c800f047b394
+    profiles: [keycloak]
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD_FILE: /run/secrets/keycloak_db_password
+    secrets: [keycloak_db_password]
+    volumes: [keycloak_db:/var/lib/postgresql/data]
+    networks: [identity]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U keycloak -d keycloak"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    security_opt: [no-new-privileges:true]
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.7.0@sha256:2eb3cd316835c990e69e26ade292ffa78f6fb0db7d5fc6377463c162e1979ac0
+    profiles: [keycloak]
+    restart: unless-stopped
+    entrypoint: ["/bin/bash", "-ec"]
+    command:
+      - |
+        export KC_DB_PASSWORD="$$(cat /run/secrets/keycloak_db_password)"
+        export KC_BOOTSTRAP_ADMIN_PASSWORD="$$(cat /run/secrets/keycloak_admin_password)"
+        export PORTAL_OIDC_CLIENT_SECRET="$$(cat /run/secrets/portal_oidc_client_secret)"
+        exec /opt/keycloak/bin/kc.sh start --import-realm
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://keycloak-db:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USERNAME:-portal-admin}
+      KC_HOSTNAME: https://${KEYCLOAK_DOMAIN:-id.example.invalid}
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded
+      KC_HEALTH_ENABLED: "true"
+      PORTAL_OIDC_REDIRECT_URI: ${PORTAL_OIDC_REDIRECT_URI:-https://portal.example.invalid/auth/oidc/callback}
+      PORTAL_PUBLIC_ORIGIN: https://${PORTAL_DOMAIN:-portal.example.invalid}
+    secrets: [keycloak_db_password, keycloak_admin_password, portal_oidc_client_secret]
+    volumes:
+      - ./deploy/keycloak/proxmox-portal-realm.json:/opt/keycloak/data/import/proxmox-portal-realm.json:ro
+      - ./deploy/keycloak/healthcheck.sh:/opt/portal/healthcheck.sh:ro
+    networks: [identity, edge]
+    depends_on:
+      keycloak-db: {condition: service_healthy}
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: [CMD, /bin/bash, /opt/portal/healthcheck.sh]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  pwpush:
+    image: pglombardo/pwpush:2.9.0@sha256:904e939bcb5d1e3d138962acd416f23234cfce15271acbfeaebecbcdf062eceb
+    platform: linux/amd64
+    profiles: [pwpush]
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/portal/pwpush-entrypoint.sh"]
+    environment:
+      PWP__HOST_DOMAIN: ${PWPUSH_DOMAIN:-pwpush.example.invalid}
+      PWP__HOST_PROTOCOL: https
+      PWP__SECURE_COOKIES: "true"
+      PWP__NOINDEX: "true"
+      PWP__ALLOW_ANONYMOUS: "false"
+      PWP__DISABLE_SIGNUPS: "false"
+      PWP__PW__EXPIRE_AFTER_DAYS_DEFAULT: "1"
+      PWP__PW__EXPIRE_AFTER_VIEWS_DEFAULT: "1"
+    secrets: [pwpush_master_key, pwpush_secret_key_base]
+    volumes:
+      - pwpush_data:/opt/PasswordPusher/storage
+      - ./deploy/password-pusher/entrypoint.sh:/portal/pwpush-entrypoint.sh:ro
+    networks: [edge]
+    healthcheck:
+      test: [CMD, curl, -fsS, http://localhost:5100/up]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 45s
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+
+networks:
+  edge: {}
+  backend: {internal: true}
+  identity: {internal: true}
+
+volumes:
+  portal_db: {}
+  keycloak_db: {}
+  pwpush_data: {}
+  caddy_data: {}
+  caddy_config: {}
+
+secrets:
+  portal_db_password: {file: "${SECRETS_DIR:-./deploy/secrets}/portal_db_password"}
+  portal_database_url: {file: "${SECRETS_DIR:-./deploy/secrets}/portal_database_url"}
+  portal_session_secret: {file: "${SECRETS_DIR:-./deploy/secrets}/portal_session_secret"}
+  portal_admin_password_hash: {file: "${SECRETS_DIR:-./deploy/secrets}/portal_admin_password_hash"}
+  pve_token_secret: {file: "${SECRETS_DIR:-./deploy/secrets}/pve_token_secret"}
+  portal_oidc_client_secret: {file: "${SECRETS_DIR:-./deploy/secrets}/portal_oidc_client_secret"}
+  portal_pwpush_api_token: {file: "${SECRETS_DIR:-./deploy/secrets}/portal_pwpush_api_token"}
+  keycloak_db_password: {file: "${SECRETS_DIR:-./deploy/secrets}/keycloak_db_password"}
+  keycloak_admin_password: {file: "${SECRETS_DIR:-./deploy/secrets}/keycloak_admin_password"}
+  pwpush_master_key: {file: "${SECRETS_DIR:-./deploy/secrets}/pwpush_master_key"}
+  pwpush_secret_key_base: {file: "${SECRETS_DIR:-./deploy/secrets}/pwpush_secret_key_base"}

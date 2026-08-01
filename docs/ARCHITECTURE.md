@@ -100,6 +100,7 @@ d'administrateur, jamais une URL libre fournie par un utilisateur.
 5. Ajouter la création du compte sudo et Password Pusher. **Livré pour les
    templates cloud-init prévalidés, avec remise réservée au propriétaire.**
 6. Livrer Docker Compose, reverse proxy TLS, script d'installation Debian,
-   sauvegardes et procédure de mise à jour.
+   sauvegardes et procédure de mise à jour. **Livré avec services optionnels
+   Keycloak et Password Pusher, secrets par fichiers et restauration chiffrée.**
 7. Réaliser une revue de menace et un test d'installation sur Debian vierge
    avant la première version publique.

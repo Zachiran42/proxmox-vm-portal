@@ -21,6 +21,7 @@ from sqlalchemy.exc import IntegrityError
 from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.security import check_password_hash, generate_password_hash
 
+from .config import environment_value
 from .jobs import process_next_job
 from .models import (
     ACTIVE_VM_STATUSES,
@@ -74,18 +75,14 @@ def create_app(
         ),
         PERMANENT_SESSION_LIFETIME=timedelta(minutes=30),
         PORTAL_ADMIN_USERNAME=os.environ.get("PORTAL_ADMIN_USERNAME", "").strip(),
-        PORTAL_ADMIN_PASSWORD_HASH=os.environ.get(
-            "PORTAL_ADMIN_PASSWORD_HASH", ""
-        ).strip(),
-        PORTAL_SESSION_SECRET=os.environ.get("PORTAL_SESSION_SECRET", ""),
+        PORTAL_ADMIN_PASSWORD_HASH=environment_value("PORTAL_ADMIN_PASSWORD_HASH"),
+        PORTAL_SESSION_SECRET=environment_value("PORTAL_SESSION_SECRET", strip=False),
         PORTAL_LOCAL_AUTH_ENABLED=_bool_environment(
             "PORTAL_LOCAL_AUTH_ENABLED", True
         ),
         PORTAL_OIDC_ISSUER=os.environ.get("PORTAL_OIDC_ISSUER", "").rstrip("/"),
         PORTAL_OIDC_CLIENT_ID=os.environ.get("PORTAL_OIDC_CLIENT_ID", "").strip(),
-        PORTAL_OIDC_CLIENT_SECRET=os.environ.get(
-            "PORTAL_OIDC_CLIENT_SECRET", ""
-        ).strip(),
+        PORTAL_OIDC_CLIENT_SECRET=environment_value("PORTAL_OIDC_CLIENT_SECRET"),
         PORTAL_OIDC_REDIRECT_URI=os.environ.get(
             "PORTAL_OIDC_REDIRECT_URI", ""
         ).strip(),
@@ -115,9 +112,7 @@ def create_app(
             os.environ.get("PORTAL_JOB_LEASE_SECONDS", "300")
         ),
         PORTAL_PWPUSH_URL=os.environ.get("PORTAL_PWPUSH_URL", "").strip(),
-        PORTAL_PWPUSH_API_TOKEN=os.environ.get(
-            "PORTAL_PWPUSH_API_TOKEN", ""
-        ).strip(),
+        PORTAL_PWPUSH_API_TOKEN=environment_value("PORTAL_PWPUSH_API_TOKEN"),
         PORTAL_PWPUSH_CA_BUNDLE=os.environ.get(
             "PORTAL_PWPUSH_CA_BUNDLE", ""
         ).strip(),
@@ -130,7 +125,7 @@ def create_app(
         PORTAL_DUMMY_PASSWORD_HASH=generate_password_hash(
             secrets.token_urlsafe(32), method="scrypt"
         ),
-        SQLALCHEMY_DATABASE_URI=os.environ.get(
+        SQLALCHEMY_DATABASE_URI=environment_value(
             "PORTAL_DATABASE_URL", "sqlite:///portal.db"
         ),
         SQLALCHEMY_TRACK_MODIFICATIONS=False,
