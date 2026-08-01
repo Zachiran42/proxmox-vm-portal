@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import io
-from urllib.error import HTTPError
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 import pytest
 
@@ -147,6 +147,38 @@ def test_create_vm_allocates_valid_vmid_and_uses_exact_payload(client):
     assert request.call_args_list[0].kwargs == {}
     assert request.call_args_list[1].args == ("/nodes/pve-a/qemu",)
     assert request.call_args_list[1].kwargs == {"method": "POST", "payload": expected_payload}
+
+
+def test_create_vm_rejects_response_without_upid(client):
+    vm_request = {"name": "web-01", "node": "pve-a", "iso": "local:iso/debian-12.iso", "cpu": 1, "ram_mb": 512, "disk_gb": 8}
+
+    with patch.object(client, "_request", side_effect=[101, None]):
+        with pytest.raises(PVEProtocolError, match="tâche"):
+            client.create_vm(vm_request)
+
+
+@pytest.mark.parametrize(
+    ("response", "expected"),
+    [
+        ({"status": "running"}, {"status": "running"}),
+        ({"status": "stopped", "exitstatus": "OK"}, {"status": "stopped", "exitstatus": "OK"}),
+    ],
+)
+def test_get_task_status_encodes_upid_and_validates_response(client, response, expected):
+    upid = "UPID:pve-a:00000001:00000002:00000003:qmcreate:101:portal@pve:"
+    with patch.object(client, "_request", return_value=response) as request:
+        assert client.get_task_status("pve-a", upid) == expected
+
+    request.assert_called_once_with(
+        "/nodes/pve-a/tasks/UPID%3Apve-a%3A00000001%3A00000002%3A00000003%3Aqmcreate%3A101%3Aportal%40pve%3A/status"
+    )
+
+
+@pytest.mark.parametrize("response", [{}, {"status": "unknown"}, {"status": "stopped"}, {"status": "stopped", "exitstatus": 1}])
+def test_get_task_status_rejects_invalid_response(client, response):
+    with patch.object(client, "_request", return_value=response):
+        with pytest.raises(PVEProtocolError, match="tâche"):
+            client.get_task_status("pve-a", "UPID:pve-a:1")
 
 
 @pytest.mark.parametrize("status", [400, 409])

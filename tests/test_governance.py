@@ -7,7 +7,8 @@ from sqlalchemy import inspect, select
 from werkzeug.security import generate_password_hash
 
 from portal import create_app
-from portal.models import AuditEvent, User, VMAllocation, db
+from portal.jobs import process_next_job
+from portal.models import AuditEvent, ProvisioningJob, User, VMAllocation, db
 from portal.pve import FakePVEClient
 
 ADMIN_PASSWORD = "correct-horse-battery-staple"
@@ -57,7 +58,7 @@ def vm_payload(name="vm-alice-01"):
     return {
         "name": name,
         "node": "pve-a",
-        "iso": "local:iso/debian-12.iso",
+        "profile": "debian-12",
         "cpu": 2,
         "ram_mb": 4096,
         "disk_gb": 40,
@@ -155,7 +156,7 @@ def test_quota_is_reserved_before_second_proxmox_request(app, pve_client):
     assert second.status_code == 409
     assert second.get_json()["error"] == "quota_exceeded"
     assert set(second.get_json()["errors"]) == {"vms", "cpu", "ram_mb", "disk_gb"}
-    assert len(pve_client.requests) == 1
+    assert len(pve_client.requests) == 0
     assert client.get("/api/me").get_json()["usage"] == {
         "vms": 1, "cpu": 2, "ram_mb": 4096, "disk_gb": 40
     }
@@ -170,10 +171,10 @@ def test_duplicate_vm_name_has_a_distinct_conflict_error(app, pve_client):
 
     assert duplicate.status_code == 409
     assert duplicate.get_json()["error"] == "name_conflict"
-    assert len(pve_client.requests) == 1
+    assert len(pve_client.requests) == 0
 
 
-def test_failed_pve_request_releases_quota_and_is_audited(app):
+def test_ambiguous_pve_submission_requires_attention_and_is_audited(app):
     from portal.pve import PVETransportError
 
     client = app.test_client()
@@ -182,14 +183,21 @@ def test_failed_pve_request_releases_quota_and_is_audited(app):
         PVETransportError("secret upstream detail")
     )
     response = client.post("/api/vms", json=vm_payload())
+    assert response.status_code == 202
+    with app.app_context():
+        assert process_next_job(
+            app.extensions["pve_client"], worker_id="test-worker", poll_seconds=1
+        ) is True
 
-    assert response.status_code == 503
     with app.app_context():
         allocation = db.session.scalar(select(VMAllocation))
+        job = db.session.scalar(select(ProvisioningJob))
         event = db.session.scalars(
-            select(AuditEvent).where(AuditEvent.action == "vm.create").order_by(AuditEvent.created_at.desc())
+            select(AuditEvent).where(AuditEvent.action == "vm.provision").order_by(AuditEvent.created_at.desc())
         ).first()
-        assert allocation.status == "failed"
+        assert allocation.status == "provisioning"
+        assert job.status == "attention"
+        assert job.error_code == "pve_submission_unknown"
         assert event.outcome == "failure"
         assert "secret" not in json.dumps(event.details)
 

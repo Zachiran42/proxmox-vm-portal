@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import socket
 import ssl
 from dataclasses import dataclass, field
 from typing import Any
@@ -36,7 +35,7 @@ class PVEClient:
     token_secret: str
 
     @classmethod
-    def from_environment(cls) -> "PVEClient":
+    def from_environment(cls) -> PVEClient:
         values = {key: os.environ.get(key, "").strip() for key in ("PVE_API_URL", "PVE_TOKEN_ID", "PVE_TOKEN_SECRET")}
         missing = [key for key, value in values.items() if not value]
         if missing:
@@ -66,7 +65,7 @@ class PVEClient:
                 return json.load(response).get("data")
         except HTTPError as error:
             raise PVEHTTPError(error.code, self._http_error_message(error), error.url) from error
-        except (URLError, socket.timeout, ssl.SSLError) as error:
+        except (TimeoutError, URLError, ssl.SSLError) as error:
             raise PVETransportError("La connexion à PVE a échoué.") from error
         except (UnicodeDecodeError, json.JSONDecodeError, AttributeError) as error:
             raise PVEProtocolError("La réponse PVE est invalide.") from error
@@ -159,7 +158,9 @@ class PVEClient:
                 if retry < 3 and self._is_vmid_collision(error):
                     continue
                 raise
-            return str(result)
+            if not isinstance(result, str) or not result.startswith("UPID:"):
+                raise PVEProtocolError("L'identifiant de tâche PVE est invalide.")
+            return result
         raise RuntimeError("Tentatives d'allocation VMID épuisées.")  # pragma: no cover
 
     @staticmethod
@@ -181,11 +182,31 @@ class PVEClient:
         indicates_collision = "already exists" in message or "already used" in message or "already in use" in message
         return error.status in (400, 409) and mentions_vm and indicates_collision
 
+    def get_task_status(self, node: str, upid: str) -> dict[str, str]:
+        if not isinstance(upid, str) or not upid.startswith("UPID:"):
+            raise PVEProtocolError("L'identifiant de tâche PVE est invalide.")
+        result = self._request(
+            f"/nodes/{quote(node, safe='')}/tasks/{quote(upid, safe='')}/status"
+        )
+        if not isinstance(result, dict) or result.get("status") not in {
+            "running",
+            "stopped",
+        }:
+            raise PVEProtocolError("Le statut de tâche PVE est invalide.")
+        status = result["status"]
+        exitstatus = result.get("exitstatus")
+        if status == "stopped" and not isinstance(exitstatus, str):
+            raise PVEProtocolError("Le résultat de tâche PVE est invalide.")
+        return {"status": status, **({"exitstatus": exitstatus} if exitstatus else {})}
+
 
 @dataclass
 class FakePVEClient:
     accessible_isos: dict[str, set[str]]
     requests: list[dict[str, Any]] = field(default_factory=list)
+    task_statuses: list[dict[str, str]] = field(
+        default_factory=lambda: [{"status": "stopped", "exitstatus": "OK"}]
+    )
 
     def is_iso_available(self, node: str, iso: str) -> bool:
         return iso in self.accessible_isos.get(node, set())
@@ -198,4 +219,9 @@ class FakePVEClient:
 
     def create_vm(self, request: dict[str, Any]) -> str:
         self.requests.append(request)
-        return f"req-{len(self.requests)}"
+        return f"UPID:fake:{len(self.requests)}"
+
+    def get_task_status(self, node: str, upid: str) -> dict[str, str]:
+        if len(self.task_statuses) > 1:
+            return self.task_statuses.pop(0)
+        return self.task_statuses[0]

@@ -11,7 +11,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 db = SQLAlchemy()
 
 ROLES = ("admin", "operator", "user")
-ACTIVE_VM_STATUSES = ("provisioning", "accepted", "running")
+ACTIVE_VM_STATUSES = ("queued", "provisioning", "accepted", "running")
 
 
 def utcnow() -> datetime:
@@ -77,11 +77,37 @@ class User(db.Model):
         }
 
 
+class ImageProfile(db.Model):
+    __tablename__ = "image_profiles"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    slug: Mapped[str] = mapped_column(db.String(63), unique=True, nullable=False)
+    label: Mapped[str] = mapped_column(db.String(100), nullable=False)
+    description: Mapped[str] = mapped_column(db.String(500), nullable=False, default="")
+    iso: Mapped[str] = mapped_column(db.String(255), nullable=False)
+    enabled: Mapped[bool] = mapped_column(nullable=False, default=True)
+    created_by_id: Mapped[int | None] = mapped_column(
+        db.ForeignKey("users.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        db.DateTime(timezone=True), nullable=False, default=utcnow
+    )
+
+    def public_dict(self) -> dict[str, Any]:
+        return {
+            "slug": self.slug,
+            "label": self.label,
+            "description": self.description,
+            "iso": self.iso,
+            "enabled": self.enabled,
+        }
+
+
 class VMAllocation(db.Model):
     __tablename__ = "vm_allocations"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('provisioning', 'accepted', 'running', 'failed', 'deleted')",
+            "status IN ('queued', 'provisioning', 'accepted', 'running', 'failed', 'deleted')",
             name="ck_vm_allocations_status",
         ),
         UniqueConstraint("owner_id", "name", name="uq_vm_allocations_owner_name"),
@@ -94,15 +120,16 @@ class VMAllocation(db.Model):
     owner_id: Mapped[int] = mapped_column(
         db.ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
     )
+    profile_id: Mapped[int | None] = mapped_column(
+        db.ForeignKey("image_profiles.id", ondelete="SET NULL")
+    )
     name: Mapped[str] = mapped_column(db.String(63), nullable=False)
     node: Mapped[str] = mapped_column(db.String(63), nullable=False)
     iso: Mapped[str] = mapped_column(db.String(255), nullable=False)
     cpu: Mapped[int] = mapped_column(nullable=False)
     ram_mb: Mapped[int] = mapped_column(nullable=False)
     disk_gb: Mapped[int] = mapped_column(nullable=False)
-    status: Mapped[str] = mapped_column(
-        db.String(16), nullable=False, default="provisioning"
-    )
+    status: Mapped[str] = mapped_column(db.String(16), nullable=False, default="queued")
     upstream_request_id: Mapped[str | None] = mapped_column(db.String(255))
     created_at: Mapped[datetime] = mapped_column(
         db.DateTime(timezone=True), nullable=False, default=utcnow
@@ -112,6 +139,57 @@ class VMAllocation(db.Model):
     )
 
     owner: Mapped[User] = relationship(back_populates="allocations")
+    profile: Mapped[ImageProfile | None] = relationship()
+    job: Mapped[ProvisioningJob | None] = relationship(
+        back_populates="allocation", uselist=False
+    )
+
+
+class ProvisioningJob(db.Model):
+    __tablename__ = "provisioning_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('queued', 'validating', 'submitting', 'submitted', 'polling', 'succeeded', 'failed', 'attention')",
+            name="ck_provisioning_jobs_status",
+        ),
+        Index("ix_provisioning_jobs_status_available", "status", "available_at"),
+    )
+
+    id: Mapped[str] = mapped_column(
+        db.String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    allocation_id: Mapped[str] = mapped_column(
+        db.ForeignKey("vm_allocations.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    status: Mapped[str] = mapped_column(db.String(16), nullable=False, default="queued")
+    attempts: Mapped[int] = mapped_column(nullable=False, default=0)
+    available_at: Mapped[datetime] = mapped_column(
+        db.DateTime(timezone=True), nullable=False, default=utcnow
+    )
+    locked_at: Mapped[datetime | None] = mapped_column(db.DateTime(timezone=True))
+    locked_by: Mapped[str | None] = mapped_column(db.String(128))
+    error_code: Mapped[str | None] = mapped_column(db.String(80))
+    created_at: Mapped[datetime] = mapped_column(
+        db.DateTime(timezone=True), nullable=False, default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        db.DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(db.DateTime(timezone=True))
+
+    allocation: Mapped[VMAllocation] = relationship(back_populates="job")
+
+    def public_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "vm_id": self.allocation_id,
+            "status": self.status,
+            "error_code": self.error_code,
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+        }
 
 
 class AuditEvent(db.Model):

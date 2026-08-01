@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import socket
 import ssl
 from urllib.error import URLError
 
@@ -36,7 +35,7 @@ def app(pve_client):
 
 
 def payload():
-    return {"name": "web-01", "node": "pve-a", "iso": "local:iso/debian-12.iso", "cpu": 2, "ram_mb": 4096, "disk_gb": 40}
+    return {"name": "web-01", "node": "pve-a", "profile": "debian-12", "cpu": 2, "ram_mb": 4096, "disk_gb": 40}
 
 
 def login(client):
@@ -53,7 +52,7 @@ def test_vm_creation_requires_local_login(app, pve_client):
     assert client.post("/api/vms", json=payload()).status_code == 202
     assert client.post("/logout").status_code == 200
     assert client.post("/api/vms", json=payload()).status_code == 401
-    assert pve_client.requests == [payload()]
+    assert pve_client.requests == []
 
 
 def test_vm_creation_and_logout_require_csrf_token(app, pve_client):
@@ -99,8 +98,8 @@ def test_missing_authentication_configuration_prevents_startup(pve_client):
 def test_pve_errors_are_sanitized(app, error, status):
     client = app.test_client()
     login(client)
-    app.extensions["pve_client"].is_iso_available = lambda node, iso: (_ for _ in ()).throw(error)
-    response = client.post("/api/vms", json=payload())
+    app.extensions["pve_client"].list_nodes = lambda: (_ for _ in ()).throw(error)
+    response = client.get("/api/nodes")
     assert response.status_code == status
     assert response.get_json() == {"error": "pve_unavailable"}
     assert "secret" not in response.get_data(as_text=True)
@@ -112,9 +111,10 @@ def test_body_over_64_kib_is_json_413(app):
     assert response.get_json() == {"error": "payload_too_large"}
 
 
-@pytest.mark.parametrize("error", [URLError("refused"), socket.timeout(), ssl.SSLError("TLS")])
+@pytest.mark.parametrize("error", [URLError("refused"), TimeoutError(), ssl.SSLError("TLS")])
 def test_pve_transport_exceptions_are_wrapped(error):
     from unittest.mock import patch
+
     from portal.pve import PVEClient
     client = PVEClient("https://pve.example/api2/json", "portal@pve!token", "not-a-real-secret")
     with patch("portal.pve.urlopen", side_effect=error):
@@ -124,6 +124,7 @@ def test_pve_transport_exceptions_are_wrapped(error):
 
 def test_invalid_pve_json_is_wrapped_as_protocol_error():
     from unittest.mock import MagicMock, patch
+
     from portal.pve import PVEClient
     client = PVEClient("https://pve.example/api2/json", "portal@pve!token", "not-a-real-secret")
     response = MagicMock()

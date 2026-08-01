@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import secrets
+import socket
+import time
 import uuid
 from datetime import timedelta
 from functools import wraps
@@ -19,7 +21,16 @@ from sqlalchemy.exc import IntegrityError
 from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from .models import ACTIVE_VM_STATUSES, AuditEvent, User, VMAllocation, db
+from .jobs import process_next_job
+from .models import (
+    ACTIVE_VM_STATUSES,
+    AuditEvent,
+    ImageProfile,
+    ProvisioningJob,
+    User,
+    VMAllocation,
+    db,
+)
 from .oidc import (
     OIDCIdentity,
     OIDCIdentityError,
@@ -28,6 +39,7 @@ from .oidc import (
 )
 from .pve import PVEClient, PVEHTTPError, PVEProtocolError, PVETransportError
 from .validation import (
+    ImageProfileCreateRequest,
     UserCreateRequest,
     ValidationError,
     VMRequest,
@@ -93,6 +105,10 @@ def create_app(
         PORTAL_OIDC_DEFAULT_QUOTA_DISK_GB=int(
             os.environ.get("PORTAL_OIDC_DEFAULT_QUOTA_DISK_GB", "200")
         ),
+        PORTAL_JOB_POLL_SECONDS=int(os.environ.get("PORTAL_JOB_POLL_SECONDS", "5")),
+        PORTAL_JOB_LEASE_SECONDS=int(
+            os.environ.get("PORTAL_JOB_LEASE_SECONDS", "300")
+        ),
         PORTAL_DUMMY_PASSWORD_HASH=generate_password_hash(
             secrets.token_urlsafe(32), method="scrypt"
         ),
@@ -113,6 +129,7 @@ def create_app(
         )
     app.secret_key = app.config["PORTAL_SESSION_SECRET"]
     _validate_identity_configuration(app)
+    _validate_job_configuration(app)
 
     db.init_app(app)
     Migrate(app, db)
@@ -251,6 +268,23 @@ def create_app(
         )
         db.session.commit()
         click.echo(f"Administrateur {username!r} créé.")
+
+    @app.cli.command("worker")
+    @click.option("--once", is_flag=True, help="Traite une seule étape puis quitte.")
+    def worker_command(once: bool):
+        """Exécute le worker de provisionnement PostgreSQL."""
+        worker_id = f"{socket.gethostname()}:{os.getpid()}"
+        while True:
+            processed = process_next_job(
+                client,
+                worker_id=worker_id,
+                poll_seconds=app.config["PORTAL_JOB_POLL_SECONDS"],
+                lease_seconds=app.config["PORTAL_JOB_LEASE_SECONDS"],
+            )
+            if once:
+                return
+            if not processed:
+                time.sleep(app.config["PORTAL_JOB_POLL_SECONDS"])
 
     @app.get("/healthz")
     def healthz():
@@ -451,6 +485,85 @@ def create_app(
             return jsonify(errors=error.errors), 400
         return jsonify(node=node, isos=client.list_isos(node))
 
+    @app.get("/api/image-profiles")
+    @login_required
+    def list_image_profiles():
+        profiles = db.session.scalars(
+            select(ImageProfile)
+            .where(ImageProfile.enabled.is_(True))
+            .order_by(ImageProfile.label)
+        ).all()
+        return jsonify(profiles=[profile.public_dict() for profile in profiles])
+
+    @app.get("/api/admin/image-profiles")
+    @login_required
+    @role_required("admin")
+    def admin_list_image_profiles():
+        profiles = db.session.scalars(
+            select(ImageProfile).order_by(ImageProfile.label)
+        ).all()
+        return jsonify(profiles=[profile.public_dict() for profile in profiles])
+
+    @app.post("/api/admin/image-profiles")
+    @login_required
+    @role_required("admin")
+    @csrf_protected
+    def create_image_profile():
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify(errors={"body": "Un objet JSON est requis."}), 400
+        try:
+            profile_request = ImageProfileCreateRequest.from_dict(payload)
+        except ValidationError as error:
+            return jsonify(errors=error.errors), 400
+        profile = ImageProfile(
+            slug=profile_request.slug,
+            label=profile_request.label,
+            description=profile_request.description,
+            iso=profile_request.iso,
+            created_by_id=g.current_user.id,
+        )
+        db.session.add(profile)
+        try:
+            db.session.flush()
+        except IntegrityError:
+            db.session.rollback()
+            return jsonify(errors={"slug": "Identifiant déjà utilisé."}), 409
+        _add_audit(
+            action="image_profile.create",
+            target_type="image_profile",
+            target_id=profile.slug,
+            outcome="success",
+            actor_user_id=g.current_user.id,
+        )
+        db.session.commit()
+        return jsonify(profile=profile.public_dict()), 201
+
+    @app.patch("/api/admin/image-profiles/<slug>")
+    @login_required
+    @role_required("admin")
+    @csrf_protected
+    def update_image_profile(slug: str):
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict) or set(payload) != {"enabled"} or type(payload.get("enabled")) is not bool:
+            return jsonify(errors={"enabled": "Booléen requis."}), 400
+        profile = db.session.scalar(
+            select(ImageProfile).where(ImageProfile.slug == slug)
+        )
+        if profile is None:
+            return jsonify(error="not_found"), 404
+        profile.enabled = payload["enabled"]
+        _add_audit(
+            action="image_profile.update",
+            target_type="image_profile",
+            target_id=profile.slug,
+            outcome="success",
+            actor_user_id=g.current_user.id,
+            details={"enabled": profile.enabled},
+        )
+        db.session.commit()
+        return jsonify(profile=profile.public_dict())
+
     @app.get("/api/admin/users")
     @login_required
     @role_required("admin")
@@ -518,6 +631,19 @@ def create_app(
         ).all()
         return jsonify(events=[event.public_dict() for event in events])
 
+    @app.get("/api/jobs/<job_id>")
+    @login_required
+    def get_job(job_id: str):
+        job = db.session.get(ProvisioningJob, job_id)
+        if job is None:
+            return jsonify(error="not_found"), 404
+        if job.allocation.owner_id != g.current_user.id and g.current_user.role not in {
+            "admin",
+            "operator",
+        }:
+            return jsonify(error="forbidden"), 403
+        return jsonify(job=job.public_dict())
+
     @app.post("/api/vms")
     @login_required
     @csrf_protected
@@ -530,76 +656,40 @@ def create_app(
         except ValidationError as error:
             return jsonify(errors=error.errors), 400
 
-        try:
-            iso_available = client.is_iso_available(vm_request.node, vm_request.iso)
-        except (PVETransportError, PVEProtocolError, PVEHTTPError):
-            _add_audit(
-                action="vm.create",
-                target_type="vm",
-                target_id=vm_request.name,
-                outcome="failure",
-                actor_user_id=g.current_user.id,
-                details={"reason": "pve_inventory_failure"},
+        profile = db.session.scalar(
+            select(ImageProfile).where(
+                ImageProfile.slug == vm_request.profile,
+                ImageProfile.enabled.is_(True),
             )
-            db.session.commit()
-            raise
+        )
+        if profile is None:
+            return jsonify(errors={"profile": "Profil indisponible."}), 400
 
-        if not iso_available:
-            _add_audit(
-                action="vm.create",
-                target_type="vm",
-                target_id=vm_request.name,
-                outcome="denied",
-                actor_user_id=g.current_user.id,
-                details={"reason": "iso_unavailable"},
-            )
-            db.session.commit()
-            return (
-                jsonify(
-                    errors={"iso": "ISO inaccessible sur le nœud sélectionné."}
-                ),
-                400,
-            )
-
-        allocation, reservation_error = _reserve_allocation(
-            g.current_user.id, vm_request
+        allocation, job, reservation_error = _reserve_allocation(
+            g.current_user.id, vm_request, profile
         )
         if reservation_error:
             error_code, errors = reservation_error
             return jsonify(error=error_code, errors=errors), 409
-        assert allocation is not None
-
-        try:
-            request_id = client.create_vm(vm_request.as_dict())
-        except (PVETransportError, PVEProtocolError, PVEHTTPError):
-            allocation.status = "failed"
-            _add_audit(
-                action="vm.create",
-                target_type="vm",
-                target_id=allocation.id,
-                outcome="failure",
-                actor_user_id=g.current_user.id,
-                details={"reason": "pve_failure"},
-            )
-            db.session.commit()
-            raise
-
-        allocation.status = "accepted"
-        allocation.upstream_request_id = request_id
+        assert allocation is not None and job is not None
         _add_audit(
-            action="vm.create",
+            action="vm.enqueue",
             target_type="vm",
             target_id=allocation.id,
             outcome="success",
             actor_user_id=g.current_user.id,
-            details={"name": allocation.name},
+            details={"job_id": job.id, "profile": profile.slug},
         )
         db.session.commit()
-        return jsonify(status="accepted", request_id=request_id), 202
+        return jsonify(status="queued", job_id=job.id, vm_id=allocation.id), 202
 
     def _reserve_allocation(
-        user_id: int, vm_request: VMRequest
-    ) -> tuple[VMAllocation | None, tuple[str, dict[str, str]] | None]:
+        user_id: int, vm_request: VMRequest, profile: ImageProfile
+    ) -> tuple[
+        VMAllocation | None,
+        ProvisioningJob | None,
+        tuple[str, dict[str, str]] | None,
+    ]:
         user = db.session.scalar(
             select(User).where(User.id == user_id).with_for_update()
         )
@@ -633,10 +723,22 @@ def create_app(
                 details={"reason": "quota_exceeded", "fields": sorted(exceeded)},
             )
             db.session.commit()
-            return None, ("quota_exceeded", exceeded)
+            return None, None, ("quota_exceeded", exceeded)
 
-        allocation = VMAllocation(owner_id=user.id, **vm_request.as_dict())
+        allocation = VMAllocation(
+            owner_id=user.id,
+            profile_id=profile.id,
+            name=vm_request.name,
+            node=vm_request.node,
+            iso=profile.iso,
+            cpu=vm_request.cpu,
+            ram_mb=vm_request.ram_mb,
+            disk_gb=vm_request.disk_gb,
+            status="queued",
+        )
+        job = ProvisioningJob(allocation=allocation)
         db.session.add(allocation)
+        db.session.add(job)
         try:
             db.session.commit()
         except IntegrityError:
@@ -650,11 +752,11 @@ def create_app(
                 details={"reason": "name_conflict"},
             )
             db.session.commit()
-            return None, (
+            return None, None, (
                 "name_conflict",
                 {"name": "Ce nom de VM a déjà été utilisé pour ce compte."},
             )
-        return allocation, None
+        return allocation, job, None
 
     return app
 
@@ -714,6 +816,16 @@ def _validate_identity_configuration(app: Flask) -> None:
     ):
         value = app.config[key]
         if type(value) is not int or not 0 <= value <= maximum:
+            raise ValueError(f"{key} est invalide.")
+
+
+def _validate_job_configuration(app: Flask) -> None:
+    for key, maximum in (
+        ("PORTAL_JOB_POLL_SECONDS", 300),
+        ("PORTAL_JOB_LEASE_SECONDS", 3600),
+    ):
+        value = app.config[key]
+        if type(value) is not int or not 1 <= value <= maximum:
             raise ValueError(f"{key} est invalide.")
 
 
@@ -809,4 +921,12 @@ def _initialize_test_database(app: Flask) -> None:
                     quota_disk_gb=102400,
                 )
             )
-            db.session.commit()
+        db.session.add(
+            ImageProfile(
+                slug="debian-12",
+                label="Debian 12",
+                description="Profil de test",
+                iso="local:iso/debian-12.iso",
+            )
+        )
+        db.session.commit()

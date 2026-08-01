@@ -87,7 +87,7 @@ def test_valid_vm_request_is_accepted_and_sent_to_client(authenticated_client, p
         json={
             "name": "web-prod-01",
             "node": "pve-a",
-            "iso": "local:iso/debian-12.iso",
+            "profile": "debian-12",
             "cpu": 2,
             "ram_mb": 4096,
             "disk_gb": 40,
@@ -95,28 +95,21 @@ def test_valid_vm_request_is_accepted_and_sent_to_client(authenticated_client, p
     )
 
     assert response.status_code == 202
-    assert response.get_json() == {"status": "accepted", "request_id": "req-1"}
-    assert pve_client.requests == [
-        {
-            "name": "web-prod-01",
-            "node": "pve-a",
-            "iso": "local:iso/debian-12.iso",
-            "cpu": 2,
-            "ram_mb": 4096,
-            "disk_gb": 40,
-        }
-    ]
+    assert response.get_json()["status"] == "queued"
+    assert response.get_json()["job_id"]
+    assert response.get_json()["vm_id"]
+    assert pve_client.requests == []
 
 
 @pytest.mark.parametrize(
     ("payload", "field"),
     [
-        ({"name": "UPPERCASE", "node": "pve-a", "iso": "local:iso/debian-12.iso", "cpu": 2, "ram_mb": 4096, "disk_gb": 40}, "name"),
-        ({"name": "web-01", "node": "PVE-A", "iso": "local:iso/debian-12.iso", "cpu": 2, "ram_mb": 4096, "disk_gb": 40}, "node"),
-        ({"name": "web-01", "node": "pve-a", "iso": "local:iso/debian-12.iso", "cpu": 0, "ram_mb": 4096, "disk_gb": 40}, "cpu"),
-        ({"name": "web-01", "node": "pve-a", "iso": "local:iso/debian-12.iso", "cpu": 2, "ram_mb": 257, "disk_gb": 40}, "ram_mb"),
-        ({"name": "web-01", "node": "pve-a", "iso": "local:iso/debian-12.iso", "cpu": 2, "ram_mb": 4096, "disk_gb": 0}, "disk_gb"),
-        ({"name": "web-01", "node": "pve-a", "iso": "../debian.iso", "cpu": 2, "ram_mb": 4096, "disk_gb": 40}, "iso"),
+        ({"name": "UPPERCASE", "node": "pve-a", "profile": "debian-12", "cpu": 2, "ram_mb": 4096, "disk_gb": 40}, "name"),
+        ({"name": "web-01", "node": "PVE-A", "profile": "debian-12", "cpu": 2, "ram_mb": 4096, "disk_gb": 40}, "node"),
+        ({"name": "web-01", "node": "pve-a", "profile": "debian-12", "cpu": 0, "ram_mb": 4096, "disk_gb": 40}, "cpu"),
+        ({"name": "web-01", "node": "pve-a", "profile": "debian-12", "cpu": 2, "ram_mb": 257, "disk_gb": 40}, "ram_mb"),
+        ({"name": "web-01", "node": "pve-a", "profile": "debian-12", "cpu": 2, "ram_mb": 4096, "disk_gb": 0}, "disk_gb"),
+        ({"name": "web-01", "node": "pve-a", "profile": "../debian", "cpu": 2, "ram_mb": 4096, "disk_gb": 40}, "profile"),
     ],
 )
 def test_invalid_vm_request_is_rejected(authenticated_client, payload, field):
@@ -130,7 +123,7 @@ def test_unknown_fields_are_rejected(authenticated_client):
     payload = {
         "name": "web-01",
         "node": "pve-a",
-        "iso": "local:iso/debian-12.iso",
+        "profile": "debian-12",
         "cpu": 2,
         "ram_mb": 4096,
         "disk_gb": 40,
@@ -143,13 +136,13 @@ def test_unknown_fields_are_rejected(authenticated_client):
     assert "unknown" in response.get_json()["errors"]
 
 
-def test_iso_must_be_available_on_selected_node(authenticated_client, pve_client):
+def test_profile_must_be_enabled(authenticated_client, pve_client):
     response = authenticated_client.post(
         "/api/vms",
         json={
             "name": "web-01",
-            "node": "pve-b",
-            "iso": "local:iso/debian-12.iso",
+            "node": "pve-a",
+            "profile": "missing-profile",
             "cpu": 2,
             "ram_mb": 4096,
             "disk_gb": 40,
@@ -157,7 +150,7 @@ def test_iso_must_be_available_on_selected_node(authenticated_client, pve_client
     )
 
     assert response.status_code == 400
-    assert response.get_json()["errors"] == {"iso": "ISO inaccessible sur le nœud sélectionné."}
+    assert response.get_json()["errors"] == {"profile": "Profil indisponible."}
     assert pve_client.requests == []
 
 

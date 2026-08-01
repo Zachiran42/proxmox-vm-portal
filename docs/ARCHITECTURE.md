@@ -95,6 +95,9 @@ d'administrateur, jamais une URL libre fournie par un utilisateur.
 3. Ajouter Keycloak/OIDC puis la fédération LDAP/LDAPS. **Intégration OIDC et
    guide de fédération livrés ; déploiement Keycloak à venir.**
 4. Introduire la file de travaux, le suivi Proxmox et les profils d'images.
+   **Livré pour les profils adossés à une ISO, la file PostgreSQL et le suivi
+   UPID ; les modèles cloud-init et installations sans assistance restent à
+   ajouter.**
 5. Ajouter la création du compte sudo et Password Pusher.
 6. Livrer Docker Compose, reverse proxy TLS, script d'installation Debian,
    sauvegardes et procédure de mise à jour.

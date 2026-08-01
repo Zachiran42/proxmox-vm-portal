@@ -7,9 +7,10 @@ from typing import Any
 _NAME = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 _NODE = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 _ISO = re.compile(r"^[a-z][a-z0-9_-]*:iso/[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}\.iso$")
-_FIELDS = {"name", "node", "iso", "cpu", "ram_mb", "disk_gb"}
+_FIELDS = {"name", "node", "profile", "cpu", "ram_mb", "disk_gb"}
 _USER_FIELDS = {"username", "password", "role", "quota"}
 _QUOTA_FIELDS = {"vms", "cpu", "ram_mb", "disk_gb"}
+_PROFILE_FIELDS = {"slug", "label", "description", "iso"}
 
 
 class ValidationError(Exception):
@@ -29,7 +30,7 @@ def validate_node_name(node: Any) -> str:
 class VMRequest:
     name: str
     node: str
-    iso: str
+    profile: str
     cpu: int
     ram_mb: int
     disk_gb: int
@@ -44,13 +45,15 @@ class VMRequest:
         for field in sorted(missing):
             errors[field] = "Champ requis."
 
-        name, node, iso = data.get("name"), data.get("node"), data.get("iso")
+        name, node, profile = data.get("name"), data.get("node"), data.get("profile")
         if name is not None and (not isinstance(name, str) or not _NAME.fullmatch(name)):
             errors["name"] = "Nom invalide (minuscules, chiffres et tirets; 1-63 caractères)."
         if node is not None and (not isinstance(node, str) or not _NODE.fullmatch(node)):
             errors["node"] = "Nœud invalide."
-        if iso is not None and (not isinstance(iso, str) or not _ISO.fullmatch(iso)):
-            errors["iso"] = "ISO invalide; format attendu stockage:iso/fichier.iso."
+        if profile is not None and (
+            not isinstance(profile, str) or not _NAME.fullmatch(profile)
+        ):
+            errors["profile"] = "Profil d'image invalide."
 
         for field, minimum, maximum, multiple in (
             ("cpu", 1, 32, 1),
@@ -69,11 +72,47 @@ class VMRequest:
         return {
             "name": self.name,
             "node": self.node,
-            "iso": self.iso,
+            "profile": self.profile,
             "cpu": self.cpu,
             "ram_mb": self.ram_mb,
             "disk_gb": self.disk_gb,
         }
+
+
+@dataclass(frozen=True)
+class ImageProfileCreateRequest:
+    slug: str
+    label: str
+    description: str
+    iso: str
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ImageProfileCreateRequest:
+        errors: dict[str, str] = {}
+        unknown = set(data) - _PROFILE_FIELDS
+        if unknown:
+            errors["unknown"] = "Champs non autorisés: " + ", ".join(sorted(unknown))
+        for field in sorted(_PROFILE_FIELDS - set(data)):
+            errors[field] = "Champ requis."
+        slug = data.get("slug")
+        label = data.get("label")
+        description = data.get("description")
+        iso = data.get("iso")
+        if not isinstance(slug, str) or not _NAME.fullmatch(slug):
+            errors["slug"] = "Identifiant de profil invalide."
+        if not isinstance(label, str) or not 1 <= len(label.strip()) <= 100:
+            errors["label"] = "Libellé requis (1 à 100 caractères)."
+        if not isinstance(description, str) or len(description) > 500:
+            errors["description"] = "Description invalide (500 caractères maximum)."
+        if not isinstance(iso, str) or not _ISO.fullmatch(iso):
+            errors["iso"] = "ISO invalide; format attendu stockage:iso/fichier.iso."
+        if errors:
+            raise ValidationError(errors)
+        assert isinstance(slug, str)
+        assert isinstance(label, str)
+        assert isinstance(description, str)
+        assert isinstance(iso, str)
+        return cls(slug=slug, label=label.strip(), description=description, iso=iso)
 
 
 @dataclass(frozen=True)
@@ -129,6 +168,9 @@ class UserCreateRequest:
 
         if errors:
             raise ValidationError(errors)
+        assert isinstance(username, str)
+        assert isinstance(password, str)
+        assert isinstance(role, str)
         return cls(
             username=username,
             password=password,
