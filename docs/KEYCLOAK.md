@@ -43,6 +43,28 @@ jetons avec Authlib, exige l'émetteur configuré et ne persiste ni access token
 ni refresh token, ni ID token. Le mode local peut rester actif pendant une
 migration, puis doit être désactivé si Keycloak devient l'autorité unique.
 
+## MFA obligatoire
+
+Avant la préproduction, dupliquer le flux navigateur intégré au lieu de le
+modifier directement, rendre le sous-flux de second facteur obligatoire, puis
+choisir l'une de ces politiques :
+
+- `OTP Form` requis, avec l'action requise `Configure OTP` activée par défaut ;
+- `WebAuthn Authenticator` requis et `Webauthn Register` activé par défaut ;
+- OTP et WebAuthn alternatifs dans un sous-flux requis, avec OTP imposé lorsqu'un
+  utilisateur n'a encore enregistré aucun second facteur.
+
+Lier ensuite ce flux comme `Browser flow`. Pour l'OTP, préférer TOTP, SHA-256 ou
+SHA-512, six chiffres au minimum, période de 30 secondes, fenêtre de tolérance
+de 1 et codes non réutilisables. Tester un nouvel utilisateur sans facteur, un
+utilisateur déjà inscrit, la perte du facteur, les codes de récupération et la
+révocation de session.
+
+La simple présence de `kc_action=CONFIGURE_TOTP` dans une requête du portail ne
+prouve pas que le facteur a été configuré : l'obligation doit être portée par
+le flux Keycloak. Le compte local du portail doit ensuite être désactivé, sauf
+procédure de secours hors ligne documentée et surveillée.
+
 ## Fédération LDAP/LDAPS
 
 La fédération est configurée dans Keycloak, jamais directement dans le portail.

@@ -106,3 +106,6 @@ d'administrateur, jamais une URL libre fournie par un utilisateur.
    avant la première version publique. **Revue interne et banc Debian 13
    conteneurisé livrés ; validation sur VM systemd, ACL Proxmox et pentest
    indépendant encore requis avant publication.**
+8. Qualifier l'environnement réel avant publication. **Outillage de contrôle
+   Debian 13, politique ACL Proxmox et recette MFA livrés ; leur exécution sur
+   la préproduction et le pentest indépendant restent requis.**

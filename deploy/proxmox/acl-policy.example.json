@@ -1,0 +1,32 @@
+{
+  "allowed_paths": {
+    "/": ["Sys.Audit"],
+    "/pool/portal-vms": [
+      "VM.Allocate",
+      "VM.Audit",
+      "VM.Clone",
+      "VM.Config.CDROM",
+      "VM.Config.Cloudinit",
+      "VM.Config.CPU",
+      "VM.Config.Disk",
+      "VM.Config.Memory",
+      "VM.Config.Options",
+      "VM.PowerMgmt"
+    ],
+    "/storage/portal-iso": ["Datastore.Audit"],
+    "/storage/portal-vm": ["Datastore.AllocateSpace", "Datastore.Audit"]
+  },
+  "required_paths": {
+    "/pool/portal-vms": ["VM.Allocate", "VM.Audit"],
+    "/storage/portal-iso": ["Datastore.Audit"],
+    "/storage/portal-vm": ["Datastore.AllocateSpace"]
+  },
+  "forbidden_privileges": [
+    "Datastore.AllocateTemplate",
+    "Permissions.Modify",
+    "Pool.Allocate",
+    "Sys.Modify",
+    "Sys.PowerMgmt",
+    "User.Modify"
+  ]
+}

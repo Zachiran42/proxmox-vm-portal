@@ -36,6 +36,8 @@ jobs:
           mypy portal
           bandit -q -r portal
           pip-audit -r requirements.lock
+          bash -n deploy/scripts/*.sh deploy/testing/*.sh deploy/keycloak/*.sh deploy/password-pusher/*.sh
+          python -m json.tool deploy/proxmox/acl-policy.example.json >/dev/null
       - name: Build the production image
         run: docker build --tag proxmox-vm-portal:${{ github.sha }} .
 
