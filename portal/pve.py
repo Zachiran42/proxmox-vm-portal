@@ -165,13 +165,13 @@ class PVEClient:
     @staticmethod
     def _valid_vmid(vmid: Any) -> int:
         if isinstance(vmid, bool) or not isinstance(vmid, (int, str)):
-            raise ValueError("Le VMID retourné par Proxmox est invalide.")
+            raise PVEProtocolError("Le VMID retourné par Proxmox est invalide.")
         try:
             vmid = int(vmid)
         except ValueError as error:
-            raise ValueError("Le VMID retourné par Proxmox est invalide.") from error
+            raise PVEProtocolError("Le VMID retourné par Proxmox est invalide.") from error
         if vmid <= 0:
-            raise ValueError("Le VMID retourné par Proxmox doit être positif.")
+            raise PVEProtocolError("Le VMID retourné par Proxmox doit être positif.")
         return vmid
 
     @staticmethod

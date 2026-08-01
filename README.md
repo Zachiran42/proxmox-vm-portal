@@ -1,6 +1,8 @@
 # Portail Proxmox VM
 
-MVP Flask de demande de provisionnement de VM Proxmox, avec comptes locaux. Aucun secret n'est stocké dans le dépôt.
+MVP Flask de demande de provisionnement de VM Proxmox, avec comptes locaux,
+rôles, quotas et journal d'audit PostgreSQL. Aucun secret n'est stocké dans le
+dépôt.
 
 ## Sécurité intégrée
 
@@ -13,6 +15,12 @@ MVP Flask de demande de provisionnement de VM Proxmox, avec comptes locaux. Aucu
 - Authentification PVE par API token dédié : les tokens `root@…` sont explicitement refusés ; HTTPS est obligatoire.
 - Validation stricte en liste blanche : nom, nœud, ISO, CPU (1–32), RAM (512–131072 MiB, pas de 256), disque (8–2048 GiB).
 - Avant toute création, l'ISO est interrogée dans le stockage du nœud choisi.
+- Les rôles `admin`, `operator` et `user` ainsi que les quotas CPU, RAM, disque
+  et nombre de VM sont appliqués côté serveur.
+- Une réservation en base précède l'appel Proxmox afin de rendre les quotas sûrs
+  face aux demandes concurrentes.
+- Les connexions, refus d'autorisation, créations d'utilisateurs et demandes de
+  VM alimentent un journal d'audit sans mot de passe ni secret Proxmox.
 
 Le token de service PVE doit être limité par ACL aux nœuds, stockages et opérations requis. N'utilisez jamais `root@pam`.
 
@@ -26,6 +34,8 @@ pip install -e '.[dev]'
 cp .env.example .env
 # Renseigner uniquement .env local, non versionné, puis générer hash et secret selon les commandes commentées.
 set -a; . ./.env; set +a
+flask --app 'portal:create_app' db upgrade
+flask --app 'portal:create_app' bootstrap-admin  # uniquement sur une base vide
 flask --app 'portal:create_app' run
 ```
 
@@ -42,7 +52,8 @@ Les tests n'appellent aucun PVE réel et n'utilisent aucun secret réel :
 Architecture cible et étapes de livraison : [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 Endpoints : `GET /healthz`, `GET /`, `POST /login`, `POST /logout`,
-`GET /api/nodes`, `GET /api/nodes/<node>/isos`, `POST /api/vms`.
+`GET /api/me`, `GET /api/nodes`, `GET /api/nodes/<node>/isos`, `POST /api/vms`,
+`GET|POST /api/admin/users` et `GET /api/admin/audit-events`.
 
 Exemple de connexion :
 

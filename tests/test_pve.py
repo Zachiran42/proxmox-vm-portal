@@ -192,7 +192,7 @@ def test_create_vm_does_not_retry_non_collision_http_errors(client):
 @pytest.mark.parametrize("vmid", [None, "", "abc", "100.5", 0, -1, True])
 def test_create_vm_rejects_invalid_vmid(client, vmid):
     with patch.object(client, "_request", return_value=vmid) as request:
-        with pytest.raises(ValueError, match="VMID"):
+        with pytest.raises(PVEProtocolError, match="VMID"):
             client.create_vm({"name": "web-01", "node": "pve-a", "iso": "local:iso/debian-12.iso", "cpu": 1, "ram_mb": 512, "disk_gb": 8})
 
     request.assert_called_once_with("/cluster/nextid")

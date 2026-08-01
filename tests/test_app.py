@@ -14,7 +14,7 @@ def pve_client():
 
 @pytest.fixture
 def app(pve_client):
-    return create_app(
+    app = create_app(
         {
             "TESTING": True,
             "PORTAL_ADMIN_USERNAME": "admin",
@@ -23,6 +23,12 @@ def app(pve_client):
         },
         pve_client=pve_client,
     )
+    yield app
+    with app.app_context():
+        from portal.models import db
+
+        db.session.remove()
+        db.engine.dispose()
 
 
 @pytest.fixture

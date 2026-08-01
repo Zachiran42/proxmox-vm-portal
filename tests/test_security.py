@@ -18,7 +18,7 @@ def pve_client():
 
 @pytest.fixture
 def app(pve_client):
-    return create_app(
+    app = create_app(
         {
             "TESTING": True,
             "PORTAL_ADMIN_USERNAME": "admin",
@@ -27,6 +27,12 @@ def app(pve_client):
         },
         pve_client=pve_client,
     )
+    yield app
+    with app.app_context():
+        from portal.models import db
+
+        db.session.remove()
+        db.engine.dispose()
 
 
 def payload():
@@ -85,7 +91,7 @@ def test_security_headers_are_added(app):
 
 
 def test_missing_authentication_configuration_prevents_startup(pve_client):
-    with pytest.raises(ValueError, match="PORTAL_ADMIN"):
+    with pytest.raises(ValueError, match="PORTAL_SESSION_SECRET"):
         create_app({"TESTING": True}, pve_client=pve_client)
 
 

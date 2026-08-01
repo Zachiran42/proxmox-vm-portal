@@ -46,7 +46,8 @@ permet d'éviter de stocker les mots de passe d'entreprise dans le portail. Les
 rôles applicatifs minimaux sont `admin`, `operator` et `user`.
 
 Un mode local de secours peut exister pour une installation autonome, avec mots
-de passe Argon2id, MFA administrateur, verrouillage progressif et sessions
+de passe utilisant une fonction de dérivation mémoire-dure, MFA administrateur,
+verrouillage progressif et sessions
 révocables. Il ne doit pas être activé simultanément par défaut avec OIDC.
 
 Chaque VM appartient à un utilisateur ou à un projet. Les quotas de CPU, RAM,
@@ -90,7 +91,7 @@ d'administrateur, jamais une URL libre fournie par un utilisateur.
 ## Phases de livraison
 
 1. Durcir l'API existante et exposer l'inventaire Proxmox en lecture seule.
-2. Ajouter PostgreSQL, migrations, utilisateurs, rôles, quotas et audit.
+2. Ajouter PostgreSQL, migrations, utilisateurs, rôles, quotas et audit. **Livré.**
 3. Ajouter Keycloak/OIDC puis la fédération LDAP/LDAPS.
 4. Introduire la file de travaux, le suivi Proxmox et les profils d'images.
 5. Ajouter la création du compte sudo et Password Pusher.

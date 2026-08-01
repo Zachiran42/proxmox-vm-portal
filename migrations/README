@@ -1,0 +1,7 @@
+Configuration Alembic gérée par Flask-Migrate.
+
+En production :
+
+    flask --app 'portal:create_app' db upgrade
+
+Ne lancez pas `db.create_all()` : les migrations sont la source de vérité.
