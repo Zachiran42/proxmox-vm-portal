@@ -1,0 +1,55 @@
+{
+  "realm": "proxmox-portal",
+  "enabled": true,
+  "displayName": "Proxmox VM Portal",
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "resetPasswordAllowed": true,
+  "rememberMe": false,
+  "bruteForceProtected": true,
+  "roles": {
+    "realm": [
+      { "name": "portal-admin", "description": "Administration du portail" },
+      { "name": "portal-operator", "description": "Exploitation du portail" },
+      { "name": "portal-user", "description": "Provisionnement en libre-service" }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "proxmox-vm-portal",
+      "name": "Proxmox VM Portal",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${PORTAL_OIDC_CLIENT_SECRET}",
+      "publicClient": false,
+      "bearerOnly": false,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "frontchannelLogout": true,
+      "redirectUris": ["${PORTAL_OIDC_REDIRECT_URI}"],
+      "webOrigins": ["${PORTAL_PUBLIC_ORIGIN}"],
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      },
+      "protocolMappers": [
+        {
+          "name": "portal realm roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "multivalued": "true",
+            "userinfo.token.claim": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "realm_access.roles",
+            "jsonType.label": "String"
+          }
+        }
+      ]
+    }
+  ]
+}

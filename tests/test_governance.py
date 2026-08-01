@@ -80,6 +80,7 @@ def test_admin_can_create_and_list_users_without_exposing_password(app):
         "id": 2,
         "username": "alice",
         "role": "user",
+        "authentication": "local",
         "is_active": True,
         "quota": {"vms": 2, "cpu": 4, "ram_mb": 8192, "disk_gb": 100},
     }

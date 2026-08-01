@@ -26,11 +26,29 @@ class User(db.Model):
         CheckConstraint("quota_cpu >= 0", name="ck_users_quota_cpu"),
         CheckConstraint("quota_ram_mb >= 0", name="ck_users_quota_ram"),
         CheckConstraint("quota_disk_gb >= 0", name="ck_users_quota_disk"),
+        CheckConstraint(
+            "auth_provider IN ('local', 'oidc')", name="ck_users_auth_provider"
+        ),
+        CheckConstraint(
+            "(auth_provider = 'local' AND password_hash IS NOT NULL "
+            "AND external_issuer IS NULL AND external_subject IS NULL) OR "
+            "(auth_provider = 'oidc' AND password_hash IS NULL "
+            "AND external_issuer IS NOT NULL AND external_subject IS NOT NULL)",
+            name="ck_users_auth_identity",
+        ),
+        UniqueConstraint(
+            "external_issuer", "external_subject", name="uq_users_external_identity"
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    username: Mapped[str] = mapped_column(db.String(63), unique=True, nullable=False)
-    password_hash: Mapped[str] = mapped_column(db.String(512), nullable=False)
+    username: Mapped[str] = mapped_column(db.String(128), unique=True, nullable=False)
+    password_hash: Mapped[str | None] = mapped_column(db.String(512))
+    auth_provider: Mapped[str] = mapped_column(
+        db.String(16), nullable=False, default="local"
+    )
+    external_issuer: Mapped[str | None] = mapped_column(db.String(255))
+    external_subject: Mapped[str | None] = mapped_column(db.String(255))
     role: Mapped[str] = mapped_column(db.String(16), nullable=False, default="user")
     is_active: Mapped[bool] = mapped_column(nullable=False, default=True)
     quota_vms: Mapped[int] = mapped_column(nullable=False, default=3)
@@ -48,6 +66,7 @@ class User(db.Model):
             "id": self.id,
             "username": self.username,
             "role": self.role,
+            "authentication": self.auth_provider,
             "is_active": self.is_active,
             "quota": {
                 "vms": self.quota_vms,

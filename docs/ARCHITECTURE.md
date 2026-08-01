@@ -92,7 +92,8 @@ d'administrateur, jamais une URL libre fournie par un utilisateur.
 
 1. Durcir l'API existante et exposer l'inventaire Proxmox en lecture seule.
 2. Ajouter PostgreSQL, migrations, utilisateurs, rôles, quotas et audit. **Livré.**
-3. Ajouter Keycloak/OIDC puis la fédération LDAP/LDAPS.
+3. Ajouter Keycloak/OIDC puis la fédération LDAP/LDAPS. **Intégration OIDC et
+   guide de fédération livrés ; déploiement Keycloak à venir.**
 4. Introduire la file de travaux, le suivi Proxmox et les profils d'images.
 5. Ajouter la création du compte sudo et Password Pusher.
 6. Livrer Docker Compose, reverse proxy TLS, script d'installation Debian,

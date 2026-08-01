@@ -21,6 +21,9 @@ dépôt.
   face aux demandes concurrentes.
 - Les connexions, refus d'autorisation, créations d'utilisateurs et demandes de
   VM alimentent un journal d'audit sans mot de passe ni secret Proxmox.
+- Keycloak peut authentifier les utilisateurs par OIDC Authorization Code avec
+  PKCE S256 ; les rôles externes sont mappés strictement et les jetons ne sont
+  pas conservés.
 
 Le token de service PVE doit être limité par ACL aux nœuds, stockages et opérations requis. N'utilisez jamais `root@pam`.
 
@@ -50,10 +53,12 @@ Les tests n'appellent aucun PVE réel et n'utilisent aucun secret réel :
 ```
 
 Architecture cible et étapes de livraison : [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+Configuration Keycloak et LDAP/LDAPS : [`docs/KEYCLOAK.md`](docs/KEYCLOAK.md).
 
 Endpoints : `GET /healthz`, `GET /`, `POST /login`, `POST /logout`,
 `GET /api/me`, `GET /api/nodes`, `GET /api/nodes/<node>/isos`, `POST /api/vms`,
-`GET|POST /api/admin/users` et `GET /api/admin/audit-events`.
+`GET|POST /api/admin/users`, `GET /api/admin/audit-events`,
+`GET /auth/oidc/login` et `GET /auth/oidc/callback`.
 
 Exemple de connexion :
 

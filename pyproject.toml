@@ -4,14 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "proxmox-vm-portal"
-version = "0.2.0"
+version = "0.3.0"
 description = "Portail MVP sécurisé de provisionnement Proxmox"
 requires-python = ">=3.11"
 dependencies = [
+    "Authlib>=1.7,<2",
     "Flask>=3.0,<4",
     "Flask-Migrate>=4.0,<5",
     "Flask-SQLAlchemy>=3.1,<4",
     "psycopg[binary]>=3.2,<4",
+    "requests>=2.32,<3",
 ]
 
 [project.optional-dependencies]

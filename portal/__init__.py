@@ -9,14 +9,23 @@ from hmac import compare_digest
 from typing import Any
 
 import click
+from authlib.integrations.base_client.errors import OAuthError
+from authlib.integrations.flask_client import OAuth
 from flask import Flask, g, jsonify, request, session
 from flask_migrate import Migrate
+from requests import RequestException
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from .models import ACTIVE_VM_STATUSES, AuditEvent, User, VMAllocation, db
+from .oidc import (
+    OIDCIdentity,
+    OIDCIdentityError,
+    collision_safe_username,
+    extract_oidc_identity,
+)
 from .pve import PVEClient, PVEHTTPError, PVEProtocolError, PVETransportError
 from .validation import (
     UserCreateRequest,
@@ -33,7 +42,9 @@ def _bool_environment(name: str, default: bool) -> bool:
     return value.lower() not in {"0", "false", "no"}
 
 
-def create_app(test_config: dict | None = None, *, pve_client=None) -> Flask:
+def create_app(
+    test_config: dict | None = None, *, pve_client=None, oidc_client=None
+) -> Flask:
     """Crée l'application; l'accès PVE peut être injecté pendant les tests."""
     app = Flask(__name__)
     app.config.from_mapping(
@@ -50,6 +61,38 @@ def create_app(test_config: dict | None = None, *, pve_client=None) -> Flask:
             "PORTAL_ADMIN_PASSWORD_HASH", ""
         ).strip(),
         PORTAL_SESSION_SECRET=os.environ.get("PORTAL_SESSION_SECRET", ""),
+        PORTAL_LOCAL_AUTH_ENABLED=_bool_environment(
+            "PORTAL_LOCAL_AUTH_ENABLED", True
+        ),
+        PORTAL_OIDC_ISSUER=os.environ.get("PORTAL_OIDC_ISSUER", "").rstrip("/"),
+        PORTAL_OIDC_CLIENT_ID=os.environ.get("PORTAL_OIDC_CLIENT_ID", "").strip(),
+        PORTAL_OIDC_CLIENT_SECRET=os.environ.get(
+            "PORTAL_OIDC_CLIENT_SECRET", ""
+        ).strip(),
+        PORTAL_OIDC_REDIRECT_URI=os.environ.get(
+            "PORTAL_OIDC_REDIRECT_URI", ""
+        ).strip(),
+        PORTAL_OIDC_ROLE_ADMIN=os.environ.get(
+            "PORTAL_OIDC_ROLE_ADMIN", "portal-admin"
+        ).strip(),
+        PORTAL_OIDC_ROLE_OPERATOR=os.environ.get(
+            "PORTAL_OIDC_ROLE_OPERATOR", "portal-operator"
+        ).strip(),
+        PORTAL_OIDC_ROLE_USER=os.environ.get(
+            "PORTAL_OIDC_ROLE_USER", "portal-user"
+        ).strip(),
+        PORTAL_OIDC_DEFAULT_QUOTA_VMS=int(
+            os.environ.get("PORTAL_OIDC_DEFAULT_QUOTA_VMS", "3")
+        ),
+        PORTAL_OIDC_DEFAULT_QUOTA_CPU=int(
+            os.environ.get("PORTAL_OIDC_DEFAULT_QUOTA_CPU", "8")
+        ),
+        PORTAL_OIDC_DEFAULT_QUOTA_RAM_MB=int(
+            os.environ.get("PORTAL_OIDC_DEFAULT_QUOTA_RAM_MB", "16384")
+        ),
+        PORTAL_OIDC_DEFAULT_QUOTA_DISK_GB=int(
+            os.environ.get("PORTAL_OIDC_DEFAULT_QUOTA_DISK_GB", "200")
+        ),
         PORTAL_DUMMY_PASSWORD_HASH=generate_password_hash(
             secrets.token_urlsafe(32), method="scrypt"
         ),
@@ -69,11 +112,15 @@ def create_app(test_config: dict | None = None, *, pve_client=None) -> Flask:
             "PORTAL_SESSION_SECRET"
         )
     app.secret_key = app.config["PORTAL_SESSION_SECRET"]
+    _validate_identity_configuration(app)
 
     db.init_app(app)
     Migrate(app, db)
     if app.config.get("TESTING"):
         _initialize_test_database(app)
+
+    oidc = _configure_oidc(app, oidc_client)
+    app.extensions["oidc_client"] = oidc
 
     client = pve_client or PVEClient.from_environment()
     app.extensions["pve_client"] = client
@@ -168,9 +215,19 @@ def create_app(test_config: dict | None = None, *, pve_client=None) -> Flask:
 
         return wrapped
 
+    def establish_session(user: User, authentication: str) -> str:
+        session.clear()
+        session["user_id"] = user.id
+        session["authentication"] = authentication
+        session["csrf_token"] = secrets.token_urlsafe(32)
+        session.permanent = True
+        return session["csrf_token"]
+
     @app.cli.command("bootstrap-admin")
     def bootstrap_admin_command():
         """Crée le premier administrateur après `flask db upgrade`."""
+        if not app.config["PORTAL_LOCAL_AUTH_ENABLED"]:
+            raise click.ClickException("L'authentification locale est désactivée.")
         username = app.config["PORTAL_ADMIN_USERNAME"]
         password_hash = app.config["PORTAL_ADMIN_PASSWORD_HASH"]
         if not username or not password_hash:
@@ -209,6 +266,8 @@ def create_app(test_config: dict | None = None, *, pve_client=None) -> Flask:
 
     @app.post("/login")
     def login():
+        if not app.config["PORTAL_LOCAL_AUTH_ENABLED"]:
+            return jsonify(error="local_auth_disabled"), 403
         credentials = request.get_json(silent=True)
         username = credentials.get("username") if isinstance(credentials, dict) else None
         password = credentials.get("password") if isinstance(credentials, dict) else None
@@ -219,13 +278,18 @@ def create_app(test_config: dict | None = None, *, pve_client=None) -> Flask:
         )
         password_hash = (
             user.password_hash
-            if user is not None
+            if user is not None and user.auth_provider == "local"
             else app.config["PORTAL_DUMMY_PASSWORD_HASH"]
         )
         password_valid = isinstance(password, str) and check_password_hash(
             password_hash, password
         )
-        if user is None or not user.is_active or not password_valid:
+        if (
+            user is None
+            or user.auth_provider != "local"
+            or not user.is_active
+            or not password_valid
+        ):
             _add_audit(
                 action="authentication.login",
                 target_type="user",
@@ -235,10 +299,7 @@ def create_app(test_config: dict | None = None, *, pve_client=None) -> Flask:
             db.session.commit()
             return jsonify(error="invalid_credentials"), 401
 
-        session.clear()
-        session["user_id"] = user.id
-        session["csrf_token"] = secrets.token_urlsafe(32)
-        session.permanent = True
+        csrf_token = establish_session(user, "local")
         _add_audit(
             action="authentication.login",
             target_type="user",
@@ -249,8 +310,111 @@ def create_app(test_config: dict | None = None, *, pve_client=None) -> Flask:
         db.session.commit()
         return jsonify(
             status="authenticated",
-            csrf_token=session["csrf_token"],
+            csrf_token=csrf_token,
             user=user.public_dict(),
+        )
+
+    @app.get("/auth/oidc/login")
+    def oidc_login():
+        if oidc is None:
+            return jsonify(error="oidc_not_configured"), 404
+        session.clear()
+        session["oidc_nonce"] = secrets.token_urlsafe(32)
+        try:
+            return oidc.authorize_redirect(
+                app.config["PORTAL_OIDC_REDIRECT_URI"],
+                nonce=session["oidc_nonce"],
+            )
+        except (OAuthError, RequestException):
+            session.clear()
+            _add_audit(
+                action="authentication.oidc_login",
+                target_type="provider",
+                target_id="oidc",
+                outcome="failure",
+                details={"reason": "provider_unavailable"},
+            )
+            db.session.commit()
+            return jsonify(error="oidc_unavailable"), 503
+
+    @app.get("/auth/oidc/callback")
+    def oidc_callback():
+        if oidc is None:
+            return jsonify(error="oidc_not_configured"), 404
+        if not session.pop("oidc_nonce", None):
+            return jsonify(error="oidc_session_invalid"), 400
+        try:
+            token = oidc.authorize_access_token()
+            claims = token.get("userinfo") if isinstance(token, dict) else None
+            if not isinstance(claims, dict):
+                raise OIDCIdentityError("Claims OIDC absents.")
+            identity = extract_oidc_identity(
+                claims,
+                expected_issuer=app.config["PORTAL_OIDC_ISSUER"],
+                client_id=app.config["PORTAL_OIDC_CLIENT_ID"],
+                role_names={
+                    "admin": app.config["PORTAL_OIDC_ROLE_ADMIN"],
+                    "operator": app.config["PORTAL_OIDC_ROLE_OPERATOR"],
+                    "user": app.config["PORTAL_OIDC_ROLE_USER"],
+                },
+            )
+        except OAuthError:
+            session.clear()
+            _add_audit(
+                action="authentication.oidc_login",
+                target_type="user",
+                outcome="failure",
+                details={"reason": "protocol_failure"},
+            )
+            db.session.commit()
+            return jsonify(error="oidc_authentication_failed"), 401
+        except RequestException:
+            session.clear()
+            _add_audit(
+                action="authentication.oidc_login",
+                target_type="provider",
+                target_id="oidc",
+                outcome="failure",
+                details={"reason": "provider_unavailable"},
+            )
+            db.session.commit()
+            return jsonify(error="oidc_unavailable"), 503
+        except OIDCIdentityError:
+            session.clear()
+            _add_audit(
+                action="authentication.oidc_login",
+                target_type="user",
+                outcome="denied",
+                details={"reason": "identity_rejected"},
+            )
+            db.session.commit()
+            return jsonify(error="oidc_access_denied"), 403
+
+        user = _find_or_create_oidc_user(app, identity)
+        if not user.is_active:
+            _add_audit(
+                action="authentication.oidc_login",
+                target_type="user",
+                target_id=str(user.id),
+                outcome="denied",
+                details={"reason": "account_disabled"},
+            )
+            db.session.commit()
+            session.clear()
+            return jsonify(error="oidc_access_denied"), 403
+
+        user.role = identity.role
+        _add_audit(
+            action="authentication.oidc_login",
+            target_type="user",
+            target_id=str(user.id),
+            outcome="success",
+            actor_user_id=user.id,
+        )
+        db.session.commit()
+        csrf_token = establish_session(user, "oidc")
+        return jsonify(
+            status="authenticated", csrf_token=csrf_token, user=user.public_dict()
         )
 
     @app.post("/logout")
@@ -513,6 +677,97 @@ def _quota_usage(user_id: int) -> dict[str, int]:
         "ram_mb": int(row[2]),
         "disk_gb": int(row[3]),
     }
+
+
+def _validate_identity_configuration(app: Flask) -> None:
+    oidc_keys = (
+        "PORTAL_OIDC_ISSUER",
+        "PORTAL_OIDC_CLIENT_ID",
+        "PORTAL_OIDC_CLIENT_SECRET",
+        "PORTAL_OIDC_REDIRECT_URI",
+    )
+    configured = [bool(app.config.get(key)) for key in oidc_keys]
+    if any(configured) and not all(configured):
+        missing = [key for key in oidc_keys if not app.config.get(key)]
+        raise ValueError("Configuration OIDC incomplète: " + ", ".join(missing))
+    app.config["PORTAL_OIDC_ENABLED"] = all(configured)
+    if not app.config["PORTAL_LOCAL_AUTH_ENABLED"] and not app.config["PORTAL_OIDC_ENABLED"]:
+        raise ValueError("Au moins un mode d'authentification doit être activé.")
+    if not app.config["PORTAL_OIDC_ENABLED"]:
+        return
+    if not app.config.get("TESTING"):
+        for key in ("PORTAL_OIDC_ISSUER", "PORTAL_OIDC_REDIRECT_URI"):
+            if not app.config[key].startswith("https://"):
+                raise ValueError(f"{key} doit utiliser HTTPS.")
+    role_names = {
+        app.config["PORTAL_OIDC_ROLE_ADMIN"],
+        app.config["PORTAL_OIDC_ROLE_OPERATOR"],
+        app.config["PORTAL_OIDC_ROLE_USER"],
+    }
+    if "" in role_names or len(role_names) != 3:
+        raise ValueError("Les trois rôles OIDC doivent être distincts et non vides.")
+    for key, maximum in (
+        ("PORTAL_OIDC_DEFAULT_QUOTA_VMS", 100),
+        ("PORTAL_OIDC_DEFAULT_QUOTA_CPU", 512),
+        ("PORTAL_OIDC_DEFAULT_QUOTA_RAM_MB", 1048576),
+        ("PORTAL_OIDC_DEFAULT_QUOTA_DISK_GB", 102400),
+    ):
+        value = app.config[key]
+        if type(value) is not int or not 0 <= value <= maximum:
+            raise ValueError(f"{key} est invalide.")
+
+
+def _configure_oidc(app: Flask, injected_client):
+    if not app.config["PORTAL_OIDC_ENABLED"]:
+        return None
+    if injected_client is not None:
+        return injected_client
+    oauth = OAuth(app)
+    return oauth.register(
+        name="keycloak",
+        client_id=app.config["PORTAL_OIDC_CLIENT_ID"],
+        client_secret=app.config["PORTAL_OIDC_CLIENT_SECRET"],
+        server_metadata_url=(
+            app.config["PORTAL_OIDC_ISSUER"] + "/.well-known/openid-configuration"
+        ),
+        client_kwargs={
+            "scope": "openid profile email",
+            "code_challenge_method": "S256",
+            "token_endpoint_auth_method": "client_secret_basic",
+        },
+    )
+
+
+def _find_or_create_oidc_user(app: Flask, identity: OIDCIdentity) -> User:
+    user = db.session.scalar(
+        select(User).where(
+            User.external_issuer == identity.issuer,
+            User.external_subject == identity.subject,
+        )
+    )
+    if user is not None:
+        return user
+
+    username = identity.username
+    if db.session.scalar(select(User.id).where(User.username == username)) is not None:
+        username = collision_safe_username(
+            identity.username, identity.issuer, identity.subject
+        )
+    user = User(
+        username=username,
+        password_hash=None,
+        auth_provider="oidc",
+        external_issuer=identity.issuer,
+        external_subject=identity.subject,
+        role=identity.role,
+        quota_vms=app.config["PORTAL_OIDC_DEFAULT_QUOTA_VMS"],
+        quota_cpu=app.config["PORTAL_OIDC_DEFAULT_QUOTA_CPU"],
+        quota_ram_mb=app.config["PORTAL_OIDC_DEFAULT_QUOTA_RAM_MB"],
+        quota_disk_gb=app.config["PORTAL_OIDC_DEFAULT_QUOTA_DISK_GB"],
+    )
+    db.session.add(user)
+    db.session.flush()
+    return user
 
 
 def _add_audit(
