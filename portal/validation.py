@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 _NAME = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 _NODE = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
@@ -141,15 +141,11 @@ class ImageProfileCreateRequest:
                 errors["template_vmid"] = "VMID de template invalide."
         if errors:
             raise ValidationError(errors)
-        assert isinstance(slug, str)
-        assert isinstance(label, str)
-        assert isinstance(description, str)
-        assert isinstance(source_type, str)
         return cls(
-            slug=slug,
-            label=label.strip(),
-            description=description,
-            source_type=source_type,
+            slug=cast(str, slug),
+            label=cast(str, label).strip(),
+            description=cast(str, description),
+            source_type=cast(str, source_type),
             iso=iso,
             template_node=template_node,
             template_vmid=template_vmid,
@@ -182,7 +178,9 @@ class UserCreateRequest:
         if not isinstance(username, str) or not _NAME.fullmatch(username):
             errors["username"] = "Identifiant invalide."
         if not isinstance(password, str) or not 14 <= len(password) <= 256:
-            errors["password"] = "Le mot de passe doit contenir entre 14 et 256 caractères."
+            errors["password"] = (  # nosec B105
+                "Le mot de passe doit contenir entre 14 et 256 caractères."
+            )
         if role not in {"admin", "operator", "user"}:
             errors["role"] = "Rôle invalide."
         if not isinstance(quota, dict):
@@ -209,13 +207,10 @@ class UserCreateRequest:
 
         if errors:
             raise ValidationError(errors)
-        assert isinstance(username, str)
-        assert isinstance(password, str)
-        assert isinstance(role, str)
         return cls(
-            username=username,
-            password=password,
-            role=role,
+            username=cast(str, username),
+            password=cast(str, password),
+            role=cast(str, role),
             quota_vms=quota["vms"],
             quota_cpu=quota["cpu"],
             quota_ram_mb=quota["ram_mb"],

@@ -63,7 +63,7 @@ class PasswordPusherClient:
         self.base_url = self.base_url.rstrip("/")
 
     def push(self, secret: str, *, note: str) -> CredentialPush:
-        payload = {
+        payload: dict[str, Any] = {
             "push": {
                 "payload": secret,
                 "note": note[:200],
@@ -99,12 +99,15 @@ class PasswordPusherClient:
         token = data.get("url_token") if isinstance(data, dict) else None
         if url is None and isinstance(token, str) and _URL_TOKEN.fullmatch(token):
             url = f"{self.base_url}/p/{token}"
-        parsed_url = urlparse(url) if isinstance(url, str) else None
-        if parsed_url is None or parsed_url.scheme != "https" or not parsed_url.netloc:
+        if not isinstance(url, str):
             raise PasswordPusherProtocolError(
                 "Le lien Password Pusher est invalide."
             )
-        assert isinstance(url, str)
+        parsed_url = urlparse(url)
+        if parsed_url.scheme != "https" or not parsed_url.netloc:
+            raise PasswordPusherProtocolError(
+                "Le lien Password Pusher est invalide."
+            )
         return CredentialPush(
             url=url,
             expire_after_days=self.expire_after_days,

@@ -78,6 +78,9 @@ Les tests n'appellent aucun PVE réel et n'utilisent aucun secret réel :
 ```
 
 Architecture cible et étapes de livraison : [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+Modèle de menaces et preuves de la revue :
+[`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) et
+[`docs/SECURITY_REVIEW.md`](docs/SECURITY_REVIEW.md).
 Configuration Keycloak et LDAP/LDAPS : [`docs/KEYCLOAK.md`](docs/KEYCLOAK.md).
 Exploitation de la file de travaux : [`docs/JOBS.md`](docs/JOBS.md).
 Préparation sécurisée des templates et remise des accès : [`docs/GUEST_ACCESS.md`](docs/GUEST_ACCESS.md).

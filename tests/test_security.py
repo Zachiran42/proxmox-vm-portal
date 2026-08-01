@@ -4,6 +4,7 @@ import ssl
 from urllib.error import URLError
 
 import pytest
+from sqlalchemy import select
 from werkzeug.security import generate_password_hash
 
 from portal import create_app
@@ -77,6 +78,66 @@ def test_invalid_login_and_session_security(app):
     assert app.config["SESSION_COOKIE_HTTPONLY"] is True
     assert app.config["SESSION_COOKIE_SAMESITE"] == "Lax"
     assert app.config["SESSION_COOKIE_SECURE"] is True
+
+
+def test_login_is_throttled_without_storing_raw_identity(app):
+    app.config["PORTAL_LOGIN_MAX_FAILURES"] = 2
+    app.config["PORTAL_LOGIN_IP_MAX_FAILURES"] = 10
+    client = app.test_client()
+    for _attempt in range(2):
+        assert client.post(
+            "/login", json={"username": "Sensitive.Admin", "password": "invalid"}
+        ).status_code == 401
+
+    response = client.post(
+        "/login", json={"username": "Sensitive.Admin", "password": "invalid"}
+    )
+    assert response.status_code == 429
+    assert response.get_json() == {"error": "too_many_attempts"}
+    assert response.headers["Retry-After"] == "900"
+
+    with app.app_context():
+        from portal.models import AuditEvent, db
+
+        events = db.session.scalars(
+            select(AuditEvent).where(
+                AuditEvent.action.in_(
+                    ("authentication.login", "authentication.login_ip")
+                )
+            )
+        ).all()
+        assert events
+        assert all("Sensitive.Admin" not in str(event.target_id) for event in events)
+
+
+def test_success_resets_account_ip_throttle_window(app):
+    app.config["PORTAL_LOGIN_MAX_FAILURES"] = 2
+    app.config["PORTAL_LOGIN_IP_MAX_FAILURES"] = 10
+    client = app.test_client()
+    assert client.post(
+        "/login", json={"username": "admin", "password": "invalid"}
+    ).status_code == 401
+    assert login(client).status_code == 200
+    assert client.post(
+        "/login", json={"username": "admin", "password": "invalid"}
+    ).status_code == 401
+    assert login(client).status_code == 200
+
+
+def test_forwarded_client_ip_is_used_for_distributed_throttle(app):
+    app.config["PORTAL_LOGIN_MAX_FAILURES"] = 1
+    app.config["PORTAL_LOGIN_IP_MAX_FAILURES"] = 10
+    client = app.test_client()
+    payload = {"username": "admin", "password": "invalid"}
+    assert client.post(
+        "/login", json=payload, headers={"X-Forwarded-For": "192.0.2.10"}
+    ).status_code == 401
+    assert client.post(
+        "/login", json=payload, headers={"X-Forwarded-For": "192.0.2.10"}
+    ).status_code == 429
+    assert client.post(
+        "/login", json=payload, headers={"X-Forwarded-For": "192.0.2.11"}
+    ).status_code == 401
 
 
 def test_security_headers_are_added(app):

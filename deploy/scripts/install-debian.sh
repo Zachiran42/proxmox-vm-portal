@@ -15,6 +15,11 @@ if [[ ! -r /etc/os-release ]] || ! grep -q '^ID=debian$' /etc/os-release; then
     echo "Ce script prend uniquement en charge Debian." >&2
     exit 1
 fi
+if [[ $(stat -c '%u' "$ROOT_DIR") != 0 ]] || find "$ROOT_DIR" -xdev \
+    \( -perm -002 -o -perm -020 \) -print -quit | grep -q .; then
+    echo "Le dépôt doit appartenir à root et ne pas être modifiable par groupe/autres." >&2
+    exit 1
+fi
 
 install_docker() {
     if command -v docker >/dev/null && docker compose version >/dev/null 2>&1; then
@@ -86,6 +91,12 @@ if [[ ,$profiles, == *,pwpush,* ]]; then
     install -m 0644 deploy/caddy/sites/pwpush.caddy.disabled deploy/caddy/sites/pwpush.caddy
 fi
 docker compose --env-file "$ENV_FILE" -f compose.yml build api
+if [[ ${PORTAL_INSTALL_VALIDATE_ONLY:-0} == 1 ]]; then
+    portal_image=$(setting PORTAL_IMAGE)
+    docker image inspect "${portal_image:-proxmox-vm-portal:0.7.0}" >/dev/null
+    echo "Validation Debian terminée après la construction de l'image."
+    exit 0
+fi
 if [[ ! -s $SECRETS_DIR/portal_admin_password_hash ]]; then
     read -rsp "Mot de passe initial de l'administrateur (16 caractères minimum): " admin_password
     echo

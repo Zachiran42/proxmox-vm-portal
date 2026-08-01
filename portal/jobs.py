@@ -55,7 +55,8 @@ def _claim_job(worker_id: str) -> tuple[str, str] | None:
 
 def _submit_job(pve_client, job_id: str, poll_seconds: int) -> None:
     job = db.session.get(ProvisioningJob, job_id)
-    assert job is not None
+    if job is None:
+        return
     allocation = job.allocation
     profile = allocation.profile
     if profile is None or not profile.enabled:
@@ -63,12 +64,16 @@ def _submit_job(pve_client, job_id: str, poll_seconds: int) -> None:
         return
     try:
         if profile.source_type == "cloud_init":
-            assert profile.template_node is not None and profile.template_vmid is not None
+            if profile.template_node is None or profile.template_vmid is None:
+                _fail(job, "image_profile_invalid")
+                return
             available = pve_client.is_template_available(
                 profile.template_node, profile.template_vmid
             )
         else:
-            assert allocation.iso is not None
+            if allocation.iso is None:
+                _fail(job, "image_profile_invalid")
+                return
             available = pve_client.is_iso_available(allocation.node, allocation.iso)
     except (PVETransportError, PVEHTTPError):
         _reschedule(job, "queued", poll_seconds, "pve_inventory_unavailable")
@@ -103,7 +108,8 @@ def _submit_job(pve_client, job_id: str, poll_seconds: int) -> None:
     try:
         submission = pve_client.create_vm(request_payload)
     except PVEHTTPError as error:
-        if 400 <= error.status < 500 and error.status not in {408, 429}:
+        status = error.status
+        if status is not None and 400 <= status < 500 and status not in {408, 429}:
             _fail(job, "pve_submission_rejected")
         else:
             _attention(job, "pve_submission_unknown")
@@ -125,7 +131,8 @@ def _submit_job(pve_client, job_id: str, poll_seconds: int) -> None:
 
 def _poll_job(pve_client, password_pusher, job_id: str, poll_seconds: int) -> None:
     job = db.session.get(ProvisioningJob, job_id)
-    assert job is not None
+    if job is None:
+        return
     allocation = job.allocation
     if not allocation.upstream_request_id or not job.upstream_node:
         _attention(job, "missing_upstream_task")

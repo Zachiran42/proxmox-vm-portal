@@ -213,7 +213,7 @@ class ProvisioningJob(db.Model):
     allocation: Mapped[VMAllocation] = relationship(back_populates="job")
 
     def public_dict(self, *, include_credentials: bool = False) -> dict[str, Any]:
-        result = {
+        result: dict[str, Any] = {
             "id": self.id,
             "vm_id": self.allocation_id,
             "status": self.status,
@@ -239,6 +239,13 @@ class AuditEvent(db.Model):
             name="ck_audit_events_outcome",
         ),
         Index("ix_audit_events_created_at", "created_at"),
+        Index(
+            "ix_audit_events_login_throttle",
+            "action",
+            "target_id",
+            "outcome",
+            "created_at",
+        ),
     )
 
     id: Mapped[str] = mapped_column(

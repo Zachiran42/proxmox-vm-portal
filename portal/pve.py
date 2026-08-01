@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import ssl
 from dataclasses import dataclass, field
+from email.message import Message
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -15,7 +16,7 @@ class PVEHTTPError(HTTPError):
     """Erreur HTTP PVE conservant explicitement le statut et le message."""
 
     def __init__(self, status: int, message: str, url: str = ""):
-        super().__init__(url, status, message, hdrs=None, fp=None)
+        super().__init__(url, status, message, hdrs=Message(), fp=None)
         self.message = message
 
 
@@ -71,7 +72,7 @@ class PVEClient:
             headers={"Authorization": self.authorization_header, "Content-Type": "application/json"},
         )
         try:
-            with urlopen(request, timeout=10) as response:  # nosec B310: URL is admin-controlled configuration
+            with urlopen(request, timeout=10) as response:  # nosec B310
                 return json.load(response).get("data")
         except HTTPError as error:
             raise PVEHTTPError(error.code, self._http_error_message(error), error.url) from error

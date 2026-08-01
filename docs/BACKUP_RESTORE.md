@@ -40,12 +40,16 @@ Password Pusher qui n'auraient plus à être actifs.
 
 ```bash
 cd /opt/proxmox-vm-portal
-sudo deploy/scripts/update.sh
+git fetch origin main
+git log --oneline --show-signature HEAD..origin/main
+# Après revue par un second canal de confiance :
+sudo deploy/scripts/update.sh COMMIT_ORIGIN_MAIN_ATTENDU_SUR_40_CARACTERES
 ```
 
-La procédure réalise d'abord une sauvegarde chiffrée, impose un `git pull
---ff-only`, reconstruit l'image, exécute les migrations puis attend la santé des
-services. Les versions majeures de PostgreSQL, Keycloak et Password Pusher ne
+La procédure réalise d'abord une sauvegarde chiffrée, refuse que `origin/main`
+diffère du commit explicitement approuvé, impose une avance rapide, reconstruit
+l'image, exécute les migrations puis attend la santé des services. Les versions
+majeures de PostgreSQL, Keycloak et Password Pusher ne
 doivent jamais être modifiées sans lire leurs notes de migration et réussir une
 restauration en environnement de test. Le retour arrière applicatif consiste à
 revenir à un tag Git compatible avec le schéma ; en cas de migration non

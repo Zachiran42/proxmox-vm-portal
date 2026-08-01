@@ -1,0 +1,12 @@
+title = "Proxmox VM Portal Gitleaks configuration"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "JDBC service name, not a credential"
+condition = "AND"
+regexTarget = "match"
+targetRules = ["generic-api-key"]
+regexes = ['''keycloak-db:5432/keycloak''']
+paths = ['''(?:^|/)compose\.yml$''']

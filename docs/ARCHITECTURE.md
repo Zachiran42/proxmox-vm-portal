@@ -103,4 +103,6 @@ d'administrateur, jamais une URL libre fournie par un utilisateur.
    sauvegardes et procédure de mise à jour. **Livré avec services optionnels
    Keycloak et Password Pusher, secrets par fichiers et restauration chiffrée.**
 7. Réaliser une revue de menace et un test d'installation sur Debian vierge
-   avant la première version publique.
+   avant la première version publique. **Revue interne et banc Debian 13
+   conteneurisé livrés ; validation sur VM systemd, ACL Proxmox et pentest
+   indépendant encore requis avant publication.**

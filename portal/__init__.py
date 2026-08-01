@@ -5,9 +5,11 @@ import secrets
 import socket
 import time
 import uuid
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from functools import wraps
+from hashlib import sha256
 from hmac import compare_digest
+from hmac import new as hmac_new
 from typing import Any
 
 import click
@@ -19,6 +21,7 @@ from requests import RequestException
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from werkzeug.exceptions import RequestEntityTooLarge
+from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from .config import environment_value
@@ -111,6 +114,15 @@ def create_app(
         PORTAL_JOB_LEASE_SECONDS=int(
             os.environ.get("PORTAL_JOB_LEASE_SECONDS", "300")
         ),
+        PORTAL_LOGIN_MAX_FAILURES=int(
+            os.environ.get("PORTAL_LOGIN_MAX_FAILURES", "5")
+        ),
+        PORTAL_LOGIN_IP_MAX_FAILURES=int(
+            os.environ.get("PORTAL_LOGIN_IP_MAX_FAILURES", "25")
+        ),
+        PORTAL_LOGIN_WINDOW_SECONDS=int(
+            os.environ.get("PORTAL_LOGIN_WINDOW_SECONDS", "900")
+        ),
         PORTAL_PWPUSH_URL=os.environ.get("PORTAL_PWPUSH_URL", "").strip(),
         PORTAL_PWPUSH_API_TOKEN=environment_value("PORTAL_PWPUSH_API_TOKEN"),
         PORTAL_PWPUSH_CA_BUNDLE=os.environ.get(
@@ -135,6 +147,8 @@ def create_app(
         if test_config.get("TESTING") and "SQLALCHEMY_DATABASE_URI" not in test_config:
             app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite://"
 
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)  # type: ignore[method-assign]
+
     if not app.config.get("PORTAL_SESSION_SECRET"):
         raise ValueError(
             "Variable d'environnement d'authentification manquante: "
@@ -143,6 +157,7 @@ def create_app(
     app.secret_key = app.config["PORTAL_SESSION_SECRET"]
     _validate_identity_configuration(app)
     _validate_job_configuration(app)
+    _validate_login_throttle_configuration(app)
     password_pusher = _configure_password_pusher(app, password_pusher_client)
 
     db.init_app(app)
@@ -321,6 +336,22 @@ def create_app(
         credentials = request.get_json(silent=True)
         username = credentials.get("username") if isinstance(credentials, dict) else None
         password = credentials.get("password") if isinstance(credentials, dict) else None
+        throttle_key, ip_key = _login_throttle_keys(
+            app, username if isinstance(username, str) else ""
+        )
+        if _login_is_throttled(app, throttle_key, ip_key):
+            _add_audit(
+                action="authentication.throttled",
+                target_type="login",
+                target_id=throttle_key,
+                outcome="denied",
+            )
+            db.session.commit()
+            response = jsonify(error="too_many_attempts")
+            response.headers["Retry-After"] = str(
+                app.config["PORTAL_LOGIN_WINDOW_SECONDS"]
+            )
+            return response, 429
         user = (
             db.session.scalar(select(User).where(User.username == username))
             if isinstance(username, str)
@@ -342,8 +373,14 @@ def create_app(
         ):
             _add_audit(
                 action="authentication.login",
-                target_type="user",
-                target_id=username if isinstance(username, str) else None,
+                target_type="login",
+                target_id=throttle_key,
+                outcome="failure",
+            )
+            _add_audit(
+                action="authentication.login_ip",
+                target_type="login_ip",
+                target_id=ip_key,
                 outcome="failure",
             )
             db.session.commit()
@@ -352,8 +389,8 @@ def create_app(
         csrf_token = establish_session(user, "local")
         _add_audit(
             action="authentication.login",
-            target_type="user",
-            target_id=str(user.id),
+            target_type="login",
+            target_id=throttle_key,
             outcome="success",
             actor_user_id=user.id,
         )
@@ -714,7 +751,8 @@ def create_app(
         if reservation_error:
             error_code, errors = reservation_error
             return jsonify(error=error_code, errors=errors), 409
-        assert allocation is not None and job is not None
+        if allocation is None or job is None:  # pragma: no cover - invariant interne
+            raise RuntimeError("Réservation de VM incohérente.")
         _add_audit(
             action="vm.enqueue",
             target_type="vm",
@@ -873,6 +911,74 @@ def _validate_job_configuration(app: Flask) -> None:
             raise ValueError(f"{key} est invalide.")
 
 
+def _validate_login_throttle_configuration(app: Flask) -> None:
+    for key, minimum, maximum in (
+        ("PORTAL_LOGIN_MAX_FAILURES", 1, 20),
+        ("PORTAL_LOGIN_IP_MAX_FAILURES", 1, 200),
+        ("PORTAL_LOGIN_WINDOW_SECONDS", 60, 86400),
+    ):
+        value = app.config[key]
+        if type(value) is not int or not minimum <= value <= maximum:
+            raise ValueError(f"{key} est invalide.")
+    if (
+        app.config["PORTAL_LOGIN_IP_MAX_FAILURES"]
+        < app.config["PORTAL_LOGIN_MAX_FAILURES"]
+    ):
+        raise ValueError(
+            "PORTAL_LOGIN_IP_MAX_FAILURES doit être supérieur ou égal au seuil par compte."
+        )
+
+
+def _login_throttle_keys(app: Flask, username: str) -> tuple[str, str]:
+    remote_addr = request.remote_addr or "unknown"
+    secret = app.config["PORTAL_SESSION_SECRET"].encode("utf-8")
+
+    def digest(value: str) -> str:
+        return hmac_new(secret, value.encode("utf-8"), sha256).hexdigest()
+
+    normalized_username = username[:128].casefold()
+    return (
+        digest(f"account-ip\0{normalized_username}\0{remote_addr}"),
+        digest(f"ip\0{remote_addr}"),
+    )
+
+
+def _login_is_throttled(app: Flask, throttle_key: str, ip_key: str) -> bool:
+    cutoff = datetime.now(UTC) - timedelta(
+        seconds=app.config["PORTAL_LOGIN_WINDOW_SECONDS"]
+    )
+    last_success = db.session.scalar(
+        select(func.max(AuditEvent.created_at)).where(
+            AuditEvent.action == "authentication.login",
+            AuditEvent.target_id == throttle_key,
+            AuditEvent.outcome == "success",
+        )
+    )
+    if last_success is not None and last_success.tzinfo is None:
+        last_success = last_success.replace(tzinfo=UTC)
+    account_cutoff = max(cutoff, last_success) if last_success else cutoff
+    account_failures = db.session.scalar(
+        select(func.count(AuditEvent.id)).where(
+            AuditEvent.action == "authentication.login",
+            AuditEvent.target_id == throttle_key,
+            AuditEvent.outcome == "failure",
+            AuditEvent.created_at >= account_cutoff,
+        )
+    )
+    ip_failures = db.session.scalar(
+        select(func.count(AuditEvent.id)).where(
+            AuditEvent.action == "authentication.login_ip",
+            AuditEvent.target_id == ip_key,
+            AuditEvent.outcome == "failure",
+            AuditEvent.created_at >= cutoff,
+        )
+    )
+    return (
+        int(account_failures or 0) >= app.config["PORTAL_LOGIN_MAX_FAILURES"]
+        or int(ip_failures or 0) >= app.config["PORTAL_LOGIN_IP_MAX_FAILURES"]
+    )
+
+
 def _configure_password_pusher(app: Flask, injected_client):
     if injected_client is not None:
         return injected_client
@@ -909,7 +1015,7 @@ def _configure_oidc(app: Flask, injected_client):
         client_kwargs={
             "scope": "openid profile email",
             "code_challenge_method": "S256",
-            "token_endpoint_auth_method": "client_secret_basic",
+            "token_endpoint_auth_method": "client_secret_basic",  # nosec B105
         },
     )
 
