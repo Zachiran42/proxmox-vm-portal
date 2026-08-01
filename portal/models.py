@@ -79,12 +79,25 @@ class User(db.Model):
 
 class ImageProfile(db.Model):
     __tablename__ = "image_profiles"
+    __table_args__ = (
+        CheckConstraint(
+            "(source_type = 'iso' AND iso IS NOT NULL AND template_node IS NULL "
+            "AND template_vmid IS NULL) OR (source_type = 'cloud_init' AND "
+            "iso IS NULL AND template_node IS NOT NULL AND template_vmid IS NOT NULL)",
+            name="ck_image_profiles_source",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     slug: Mapped[str] = mapped_column(db.String(63), unique=True, nullable=False)
     label: Mapped[str] = mapped_column(db.String(100), nullable=False)
     description: Mapped[str] = mapped_column(db.String(500), nullable=False, default="")
-    iso: Mapped[str] = mapped_column(db.String(255), nullable=False)
+    source_type: Mapped[str] = mapped_column(
+        db.String(16), nullable=False, default="iso"
+    )
+    iso: Mapped[str | None] = mapped_column(db.String(255))
+    template_node: Mapped[str | None] = mapped_column(db.String(63))
+    template_vmid: Mapped[int | None] = mapped_column()
     enabled: Mapped[bool] = mapped_column(nullable=False, default=True)
     created_by_id: Mapped[int | None] = mapped_column(
         db.ForeignKey("users.id", ondelete="SET NULL")
@@ -98,8 +111,12 @@ class ImageProfile(db.Model):
             "slug": self.slug,
             "label": self.label,
             "description": self.description,
+            "source_type": self.source_type,
             "iso": self.iso,
+            "template_node": self.template_node,
+            "template_vmid": self.template_vmid,
             "enabled": self.enabled,
+            "automatic_guest_access": self.source_type == "cloud_init",
         }
 
 
@@ -125,7 +142,15 @@ class VMAllocation(db.Model):
     )
     name: Mapped[str] = mapped_column(db.String(63), nullable=False)
     node: Mapped[str] = mapped_column(db.String(63), nullable=False)
-    iso: Mapped[str] = mapped_column(db.String(255), nullable=False)
+    iso: Mapped[str | None] = mapped_column(db.String(255))
+    vmid: Mapped[int | None] = mapped_column()
+    guest_username: Mapped[str | None] = mapped_column(db.String(32))
+    credential_url: Mapped[str | None] = mapped_column(db.String(1024))
+    credential_created_at: Mapped[datetime | None] = mapped_column(
+        db.DateTime(timezone=True)
+    )
+    credential_expire_days: Mapped[int | None] = mapped_column()
+    credential_expire_views: Mapped[int | None] = mapped_column()
     cpu: Mapped[int] = mapped_column(nullable=False)
     ram_mb: Mapped[int] = mapped_column(nullable=False)
     disk_gb: Mapped[int] = mapped_column(nullable=False)
@@ -152,6 +177,9 @@ class ProvisioningJob(db.Model):
             "status IN ('queued', 'validating', 'submitting', 'submitted', 'polling', 'succeeded', 'failed', 'attention')",
             name="ck_provisioning_jobs_status",
         ),
+        CheckConstraint(
+            "stage IN ('create', 'start')", name="ck_provisioning_jobs_stage"
+        ),
         Index("ix_provisioning_jobs_status_available", "status", "available_at"),
     )
 
@@ -165,6 +193,9 @@ class ProvisioningJob(db.Model):
     )
     status: Mapped[str] = mapped_column(db.String(16), nullable=False, default="queued")
     attempts: Mapped[int] = mapped_column(nullable=False, default=0)
+    stage: Mapped[str] = mapped_column(db.String(16), nullable=False, default="create")
+    upstream_node: Mapped[str | None] = mapped_column(db.String(63))
+    credential_attempts: Mapped[int] = mapped_column(nullable=False, default=0)
     available_at: Mapped[datetime] = mapped_column(
         db.DateTime(timezone=True), nullable=False, default=utcnow
     )
@@ -181,8 +212,8 @@ class ProvisioningJob(db.Model):
 
     allocation: Mapped[VMAllocation] = relationship(back_populates="job")
 
-    def public_dict(self) -> dict[str, Any]:
-        return {
+    def public_dict(self, *, include_credentials: bool = False) -> dict[str, Any]:
+        result = {
             "id": self.id,
             "vm_id": self.allocation_id,
             "status": self.status,
@@ -190,6 +221,14 @@ class ProvisioningJob(db.Model):
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
         }
+        if include_credentials and self.allocation.credential_url:
+            result["guest_access"] = {
+                "username": self.allocation.guest_username,
+                "password_url": self.allocation.credential_url,
+                "expire_after_days": self.allocation.credential_expire_days,
+                "expire_after_views": self.allocation.credential_expire_views,
+            }
+        return result
 
 
 class AuditEvent(db.Model):

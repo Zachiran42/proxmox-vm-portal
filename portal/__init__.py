@@ -37,6 +37,7 @@ from .oidc import (
     collision_safe_username,
     extract_oidc_identity,
 )
+from .password_pusher import PasswordPusherClient
 from .pve import PVEClient, PVEHTTPError, PVEProtocolError, PVETransportError
 from .validation import (
     ImageProfileCreateRequest,
@@ -55,7 +56,11 @@ def _bool_environment(name: str, default: bool) -> bool:
 
 
 def create_app(
-    test_config: dict | None = None, *, pve_client=None, oidc_client=None
+    test_config: dict | None = None,
+    *,
+    pve_client=None,
+    oidc_client=None,
+    password_pusher_client=None,
 ) -> Flask:
     """Crée l'application; l'accès PVE peut être injecté pendant les tests."""
     app = Flask(__name__)
@@ -109,6 +114,19 @@ def create_app(
         PORTAL_JOB_LEASE_SECONDS=int(
             os.environ.get("PORTAL_JOB_LEASE_SECONDS", "300")
         ),
+        PORTAL_PWPUSH_URL=os.environ.get("PORTAL_PWPUSH_URL", "").strip(),
+        PORTAL_PWPUSH_API_TOKEN=os.environ.get(
+            "PORTAL_PWPUSH_API_TOKEN", ""
+        ).strip(),
+        PORTAL_PWPUSH_CA_BUNDLE=os.environ.get(
+            "PORTAL_PWPUSH_CA_BUNDLE", ""
+        ).strip(),
+        PORTAL_PWPUSH_EXPIRE_DAYS=int(
+            os.environ.get("PORTAL_PWPUSH_EXPIRE_DAYS", "1")
+        ),
+        PORTAL_PWPUSH_EXPIRE_VIEWS=int(
+            os.environ.get("PORTAL_PWPUSH_EXPIRE_VIEWS", "1")
+        ),
         PORTAL_DUMMY_PASSWORD_HASH=generate_password_hash(
             secrets.token_urlsafe(32), method="scrypt"
         ),
@@ -130,6 +148,7 @@ def create_app(
     app.secret_key = app.config["PORTAL_SESSION_SECRET"]
     _validate_identity_configuration(app)
     _validate_job_configuration(app)
+    password_pusher = _configure_password_pusher(app, password_pusher_client)
 
     db.init_app(app)
     Migrate(app, db)
@@ -138,6 +157,7 @@ def create_app(
 
     oidc = _configure_oidc(app, oidc_client)
     app.extensions["oidc_client"] = oidc
+    app.extensions["password_pusher_client"] = password_pusher
 
     client = pve_client or PVEClient.from_environment()
     app.extensions["pve_client"] = client
@@ -277,6 +297,7 @@ def create_app(
         while True:
             processed = process_next_job(
                 client,
+                password_pusher,
                 worker_id=worker_id,
                 poll_seconds=app.config["PORTAL_JOB_POLL_SECONDS"],
                 lease_seconds=app.config["PORTAL_JOB_LEASE_SECONDS"],
@@ -520,7 +541,10 @@ def create_app(
             slug=profile_request.slug,
             label=profile_request.label,
             description=profile_request.description,
+            source_type=profile_request.source_type,
             iso=profile_request.iso,
+            template_node=profile_request.template_node,
+            template_vmid=profile_request.template_vmid,
             created_by_id=g.current_user.id,
         )
         db.session.add(profile)
@@ -642,7 +666,11 @@ def create_app(
             "operator",
         }:
             return jsonify(error="forbidden"), 403
-        return jsonify(job=job.public_dict())
+        return jsonify(
+            job=job.public_dict(
+                include_credentials=job.allocation.owner_id == g.current_user.id
+            )
+        )
 
     @app.post("/api/vms")
     @login_required
@@ -664,6 +692,26 @@ def create_app(
         )
         if profile is None:
             return jsonify(errors={"profile": "Profil indisponible."}), 400
+        if profile.source_type == "cloud_init" and not vm_request.guest_username:
+            return (
+                jsonify(
+                    errors={
+                        "guest_username": "Identifiant Linux requis pour ce profil."
+                    }
+                ),
+                400,
+            )
+        if profile.source_type == "iso" and vm_request.guest_username:
+            return (
+                jsonify(
+                    errors={
+                        "guest_username": "Ce profil ISO ne prend pas en charge cloud-init."
+                    }
+                ),
+                400,
+            )
+        if profile.source_type == "cloud_init" and password_pusher is None:
+            return jsonify(error="password_pusher_unavailable"), 503
 
         allocation, job, reservation_error = _reserve_allocation(
             g.current_user.id, vm_request, profile
@@ -731,6 +779,7 @@ def create_app(
             name=vm_request.name,
             node=vm_request.node,
             iso=profile.iso,
+            guest_username=vm_request.guest_username,
             cpu=vm_request.cpu,
             ram_mb=vm_request.ram_mb,
             disk_gb=vm_request.disk_gb,
@@ -827,6 +876,26 @@ def _validate_job_configuration(app: Flask) -> None:
         value = app.config[key]
         if type(value) is not int or not 1 <= value <= maximum:
             raise ValueError(f"{key} est invalide.")
+
+
+def _configure_password_pusher(app: Flask, injected_client):
+    if injected_client is not None:
+        return injected_client
+    url = app.config["PORTAL_PWPUSH_URL"]
+    token = app.config["PORTAL_PWPUSH_API_TOKEN"]
+    if not url and not token:
+        return None
+    if not url or not token:
+        raise ValueError(
+            "PORTAL_PWPUSH_URL et PORTAL_PWPUSH_API_TOKEN doivent être configurés ensemble."
+        )
+    return PasswordPusherClient(
+        base_url=url,
+        api_token=token,
+        expire_after_days=app.config["PORTAL_PWPUSH_EXPIRE_DAYS"],
+        expire_after_views=app.config["PORTAL_PWPUSH_EXPIRE_VIEWS"],
+        ca_bundle=app.config["PORTAL_PWPUSH_CA_BUNDLE"] or None,
+    )
 
 
 def _configure_oidc(app: Flask, injected_client):
@@ -926,6 +995,7 @@ def _initialize_test_database(app: Flask) -> None:
                 slug="debian-12",
                 label="Debian 12",
                 description="Profil de test",
+                source_type="iso",
                 iso="local:iso/debian-12.iso",
             )
         )

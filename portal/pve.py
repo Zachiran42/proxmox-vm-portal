@@ -26,6 +26,12 @@ class PVEProtocolError(RuntimeError):
     """Réponse PVE invalide ou inattendue."""
 
 
+@dataclass(frozen=True)
+class PVEVMSubmission:
+    upid: str
+    vmid: int
+
+
 @dataclass
 class PVEClient:
     """Adaptateur PVE minimal utilisant exclusivement un API token restreint."""
@@ -98,6 +104,14 @@ class PVEClient:
             for item in content
         )
 
+    def is_template_available(self, node: str, vmid: int) -> bool:
+        result = self._request(
+            f"/nodes/{quote(node, safe='')}/qemu/{vmid}/status/current"
+        )
+        if not isinstance(result, dict):
+            raise PVEProtocolError("Le statut du template PVE est invalide.")
+        return result.get("template") == 1
+
     def list_nodes(self) -> list[str]:
         """Retourne uniquement les nœuds PVE en ligne, triés et dédupliqués."""
         nodes = self._request("/nodes")
@@ -137,30 +151,41 @@ class PVEClient:
                     isos.add(volid)
         return sorted(isos)
 
-    def create_vm(self, request: dict[str, Any]) -> str:
+    def create_vm(self, request: dict[str, Any]) -> PVEVMSubmission:
         # /cluster/nextid n'est pas une réservation atomique : trois collisions maximum.
         for retry in range(4):
             vmid = self._valid_vmid(self._request("/cluster/nextid"))
-            # Le mapping minimal évite de transmettre des paramètres arbitraires du client.
-            payload = {
-                "vmid": vmid,
-                "name": request["name"], "cores": request["cpu"], "memory": request["ram_mb"],
-                "scsihw": "virtio-scsi-pci", "scsi0": f"local-lvm:{request['disk_gb']}",
-                "ide2": f"{request['iso']},media=cdrom",
-            }
-            try:
-                result = self._request(
-                    f"/nodes/{quote(request['node'], safe='')}/qemu",
-                    method="POST",
-                    payload=payload,
+            if request.get("source_type", "iso") == "cloud_init":
+                path = (
+                    f"/nodes/{quote(request['template_node'], safe='')}/qemu/"
+                    f"{request['template_vmid']}/clone"
                 )
+                payload = {
+                    "newid": vmid,
+                    "name": request["name"],
+                    "target": request["node"],
+                    "full": 1,
+                }
+            else:
+                path = f"/nodes/{quote(request['node'], safe='')}/qemu"
+                payload = {
+                    "vmid": vmid,
+                    "name": request["name"],
+                    "cores": request["cpu"],
+                    "memory": request["ram_mb"],
+                    "scsihw": "virtio-scsi-pci",
+                    "scsi0": f"local-lvm:{request['disk_gb']}",
+                    "ide2": f"{request['iso']},media=cdrom",
+                }
+            try:
+                result = self._request(path, method="POST", payload=payload)
             except PVEHTTPError as error:
                 if retry < 3 and self._is_vmid_collision(error):
                     continue
                 raise
             if not isinstance(result, str) or not result.startswith("UPID:"):
                 raise PVEProtocolError("L'identifiant de tâche PVE est invalide.")
-            return result
+            return PVEVMSubmission(upid=result, vmid=vmid)
         raise RuntimeError("Tentatives d'allocation VMID épuisées.")  # pragma: no cover
 
     @staticmethod
@@ -199,6 +224,42 @@ class PVEClient:
             raise PVEProtocolError("Le résultat de tâche PVE est invalide.")
         return {"status": status, **({"exitstatus": exitstatus} if exitstatus else {})}
 
+    def configure_cloud_init_vm(
+        self,
+        *,
+        node: str,
+        vmid: int,
+        cpu: int,
+        ram_mb: int,
+        disk_gb: int,
+        username: str,
+        password: str,
+    ) -> None:
+        path = f"/nodes/{quote(node, safe='')}/qemu/{vmid}"
+        self._request(
+            f"{path}/resize",
+            method="PUT",
+            payload={"disk": "scsi0", "size": f"{disk_gb}G"},
+        )
+        self._request(
+            f"{path}/config",
+            method="PUT",
+            payload={
+                "cores": cpu,
+                "memory": ram_mb,
+                "ciuser": username,
+                "cipassword": password,
+            },
+        )
+
+    def start_vm(self, node: str, vmid: int) -> str:
+        result = self._request(
+            f"/nodes/{quote(node, safe='')}/qemu/{vmid}/status/start", method="POST"
+        )
+        if not isinstance(result, str) or not result.startswith("UPID:"):
+            raise PVEProtocolError("L'identifiant de démarrage PVE est invalide.")
+        return result
+
 
 @dataclass
 class FakePVEClient:
@@ -207,9 +268,15 @@ class FakePVEClient:
     task_statuses: list[dict[str, str]] = field(
         default_factory=lambda: [{"status": "stopped", "exitstatus": "OK"}]
     )
+    templates: set[tuple[str, int]] = field(default_factory=set)
+    configurations: list[dict[str, Any]] = field(default_factory=list)
+    starts: list[tuple[str, int]] = field(default_factory=list)
 
     def is_iso_available(self, node: str, iso: str) -> bool:
         return iso in self.accessible_isos.get(node, set())
+
+    def is_template_available(self, node: str, vmid: int) -> bool:
+        return (node, vmid) in self.templates
 
     def list_nodes(self) -> list[str]:
         return sorted(self.accessible_isos)
@@ -217,11 +284,18 @@ class FakePVEClient:
     def list_isos(self, node: str) -> list[str]:
         return sorted(self.accessible_isos.get(node, set()))
 
-    def create_vm(self, request: dict[str, Any]) -> str:
+    def create_vm(self, request: dict[str, Any]) -> PVEVMSubmission:
         self.requests.append(request)
-        return f"UPID:fake:{len(self.requests)}"
+        return PVEVMSubmission(upid=f"UPID:fake:{len(self.requests)}", vmid=100)
 
     def get_task_status(self, node: str, upid: str) -> dict[str, str]:
         if len(self.task_statuses) > 1:
             return self.task_statuses.pop(0)
         return self.task_statuses[0]
+
+    def configure_cloud_init_vm(self, **configuration: Any) -> None:
+        self.configurations.append(configuration)
+
+    def start_vm(self, node: str, vmid: int) -> str:
+        self.starts.append((node, vmid))
+        return f"UPID:fake:start:{len(self.starts)}"

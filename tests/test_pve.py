@@ -6,7 +6,7 @@ from urllib.error import HTTPError
 
 import pytest
 
-from portal.pve import PVEClient, PVEHTTPError, PVEProtocolError
+from portal.pve import PVEClient, PVEHTTPError, PVEProtocolError, PVEVMSubmission
 
 
 @pytest.fixture
@@ -70,6 +70,19 @@ def test_is_iso_available_uses_node_storage_content_endpoint(client):
 def test_is_iso_available_returns_false_when_iso_is_missing(client):
     with patch.object(client, "_request", return_value=[]):
         assert client.is_iso_available("pve-a", "local:iso/debian-12.iso") is False
+
+
+def test_template_inventory_requires_template_flag(client):
+    with patch.object(client, "_request", return_value={"template": 1}) as request:
+        assert client.is_template_available("pve-a", 9000) is True
+    request.assert_called_once_with("/nodes/pve-a/qemu/9000/status/current")
+
+    with patch.object(client, "_request", return_value={"template": 0}):
+        assert client.is_template_available("pve-a", 9000) is False
+
+    with patch.object(client, "_request", return_value=[]):
+        with pytest.raises(PVEProtocolError, match="template"):
+            client.is_template_available("pve-a", 9000)
 
 
 def test_list_nodes_returns_only_online_nodes_sorted(client):
@@ -141,7 +154,7 @@ def test_create_vm_allocates_valid_vmid_and_uses_exact_payload(client):
         "ide2": "local:iso/debian-12.iso,media=cdrom",
     }
     with patch.object(client, "_request", side_effect=["101", "UPID:pve:0001"]) as request:
-        assert client.create_vm(vm_request) == "UPID:pve:0001"
+        assert client.create_vm(vm_request) == PVEVMSubmission("UPID:pve:0001", 101)
 
     assert request.call_args_list[0].args == ("/cluster/nextid",)
     assert request.call_args_list[0].kwargs == {}
@@ -155,6 +168,64 @@ def test_create_vm_rejects_response_without_upid(client):
     with patch.object(client, "_request", side_effect=[101, None]):
         with pytest.raises(PVEProtocolError, match="tâche"):
             client.create_vm(vm_request)
+
+
+def test_create_vm_clones_approved_cloud_init_template(client):
+    vm_request = {
+        "name": "cloud-vm",
+        "node": "pve-b",
+        "source_type": "cloud_init",
+        "template_node": "pve-a",
+        "template_vmid": 9000,
+    }
+    with patch.object(client, "_request", side_effect=[101, "UPID:pve:clone"]) as request:
+        assert client.create_vm(vm_request) == PVEVMSubmission("UPID:pve:clone", 101)
+
+    request.assert_any_call(
+        "/nodes/pve-a/qemu/9000/clone",
+        method="POST",
+        payload={"newid": 101, "name": "cloud-vm", "target": "pve-b", "full": 1},
+    )
+
+
+def test_configure_cloud_init_and_start_use_exact_allowlisted_payloads(client):
+    with patch.object(
+        client, "_request", side_effect=[None, None, "UPID:pve:start"]
+    ) as request:
+        client.configure_cloud_init_vm(
+            node="pve-a",
+            vmid=101,
+            cpu=2,
+            ram_mb=4096,
+            disk_gb=40,
+            username="hugo",
+            password="generated-secret",
+        )
+        assert client.start_vm("pve-a", 101) == "UPID:pve:start"
+
+    assert request.call_args_list[0].args == ("/nodes/pve-a/qemu/101/resize",)
+    assert request.call_args_list[0].kwargs == {
+        "method": "PUT",
+        "payload": {"disk": "scsi0", "size": "40G"},
+    }
+    assert request.call_args_list[1].kwargs == {
+        "method": "PUT",
+        "payload": {
+            "cores": 2,
+            "memory": 4096,
+            "ciuser": "hugo",
+            "cipassword": "generated-secret",
+        },
+    }
+    assert request.call_args_list[2].args == (
+        "/nodes/pve-a/qemu/101/status/start",
+    )
+
+
+def test_start_rejects_missing_upid(client):
+    with patch.object(client, "_request", return_value=None):
+        with pytest.raises(PVEProtocolError, match="démarrage"):
+            client.start_vm("pve-a", 101)
 
 
 @pytest.mark.parametrize(
@@ -187,7 +258,7 @@ def test_create_vm_reallocates_vmid_after_a_specific_collision(client, status):
     collision = PVEHTTPError(status, "VMID 101 already exists")
 
     with patch.object(client, "_request", side_effect=[101, collision, 102, "UPID:pve:0002"]) as request:
-        assert client.create_vm(vm_request) == "UPID:pve:0002"
+        assert client.create_vm(vm_request) == PVEVMSubmission("UPID:pve:0002", 102)
 
     assert request.call_args_list[0].args == ("/cluster/nextid",)
     assert request.call_args_list[1].kwargs["payload"]["vmid"] == 101

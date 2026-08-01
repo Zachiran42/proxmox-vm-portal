@@ -7,10 +7,13 @@ from typing import Any
 _NAME = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 _NODE = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 _ISO = re.compile(r"^[a-z][a-z0-9_-]*:iso/[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}\.iso$")
-_FIELDS = {"name", "node", "profile", "cpu", "ram_mb", "disk_gb"}
+_LINUX_USER = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+_FIELDS = {"name", "node", "profile", "cpu", "ram_mb", "disk_gb", "guest_username"}
+_VM_REQUIRED_FIELDS = _FIELDS - {"guest_username"}
 _USER_FIELDS = {"username", "password", "role", "quota"}
 _QUOTA_FIELDS = {"vms", "cpu", "ram_mb", "disk_gb"}
-_PROFILE_FIELDS = {"slug", "label", "description", "iso"}
+_PROFILE_BASE_FIELDS = {"slug", "label", "description", "source_type"}
+_PROFILE_FIELDS = _PROFILE_BASE_FIELDS | {"iso", "template_node", "template_vmid"}
 
 
 class ValidationError(Exception):
@@ -34,6 +37,7 @@ class VMRequest:
     cpu: int
     ram_mb: int
     disk_gb: int
+    guest_username: str | None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> VMRequest:
@@ -41,7 +45,7 @@ class VMRequest:
         unknown = set(data) - _FIELDS
         if unknown:
             errors["unknown"] = "Champs non autorisés: " + ", ".join(sorted(unknown))
-        missing = _FIELDS - set(data)
+        missing = _VM_REQUIRED_FIELDS - set(data)
         for field in sorted(missing):
             errors[field] = "Champ requis."
 
@@ -54,6 +58,13 @@ class VMRequest:
             not isinstance(profile, str) or not _NAME.fullmatch(profile)
         ):
             errors["profile"] = "Profil d'image invalide."
+        guest_username = data.get("guest_username")
+        if guest_username is not None and (
+            not isinstance(guest_username, str)
+            or not _LINUX_USER.fullmatch(guest_username)
+            or guest_username in {"root", "admin"}
+        ):
+            errors["guest_username"] = "Identifiant Linux non privilégié invalide."
 
         for field, minimum, maximum, multiple in (
             ("cpu", 1, 32, 1),
@@ -66,7 +77,10 @@ class VMRequest:
 
         if errors:
             raise ValidationError(errors)
-        return cls(**{field: data[field] for field in _FIELDS})
+        return cls(
+            **{field: data[field] for field in _VM_REQUIRED_FIELDS},
+            guest_username=guest_username,
+        )
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -76,6 +90,7 @@ class VMRequest:
             "cpu": self.cpu,
             "ram_mb": self.ram_mb,
             "disk_gb": self.disk_gb,
+            "guest_username": self.guest_username,
         }
 
 
@@ -84,7 +99,10 @@ class ImageProfileCreateRequest:
     slug: str
     label: str
     description: str
-    iso: str
+    source_type: str
+    iso: str | None
+    template_node: str | None
+    template_vmid: int | None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ImageProfileCreateRequest:
@@ -92,27 +110,50 @@ class ImageProfileCreateRequest:
         unknown = set(data) - _PROFILE_FIELDS
         if unknown:
             errors["unknown"] = "Champs non autorisés: " + ", ".join(sorted(unknown))
-        for field in sorted(_PROFILE_FIELDS - set(data)):
+        for field in sorted(_PROFILE_BASE_FIELDS - set(data)):
             errors[field] = "Champ requis."
         slug = data.get("slug")
         label = data.get("label")
         description = data.get("description")
+        source_type = data.get("source_type")
         iso = data.get("iso")
+        template_node = data.get("template_node")
+        template_vmid = data.get("template_vmid")
         if not isinstance(slug, str) or not _NAME.fullmatch(slug):
             errors["slug"] = "Identifiant de profil invalide."
         if not isinstance(label, str) or not 1 <= len(label.strip()) <= 100:
             errors["label"] = "Libellé requis (1 à 100 caractères)."
         if not isinstance(description, str) or len(description) > 500:
             errors["description"] = "Description invalide (500 caractères maximum)."
-        if not isinstance(iso, str) or not _ISO.fullmatch(iso):
-            errors["iso"] = "ISO invalide; format attendu stockage:iso/fichier.iso."
+        if source_type not in {"iso", "cloud_init"}:
+            errors["source_type"] = "Type de profil invalide."
+        elif source_type == "iso":
+            if not isinstance(iso, str) or not _ISO.fullmatch(iso):
+                errors["iso"] = "ISO invalide; format attendu stockage:iso/fichier.iso."
+            if template_node is not None or template_vmid is not None:
+                errors["template"] = "Un profil ISO ne référence pas de template."
+        else:
+            if iso is not None:
+                errors["iso"] = "Un profil cloud-init ne référence pas d'ISO."
+            if not isinstance(template_node, str) or not _NODE.fullmatch(template_node):
+                errors["template_node"] = "Nœud du template invalide."
+            if type(template_vmid) is not int or not 100 <= template_vmid <= 999999999:
+                errors["template_vmid"] = "VMID de template invalide."
         if errors:
             raise ValidationError(errors)
         assert isinstance(slug, str)
         assert isinstance(label, str)
         assert isinstance(description, str)
-        assert isinstance(iso, str)
-        return cls(slug=slug, label=label.strip(), description=description, iso=iso)
+        assert isinstance(source_type, str)
+        return cls(
+            slug=slug,
+            label=label.strip(),
+            description=description,
+            source_type=source_type,
+            iso=iso,
+            template_node=template_node,
+            template_vmid=template_vmid,
+        )
 
 
 @dataclass(frozen=True)

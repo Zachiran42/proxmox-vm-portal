@@ -26,6 +26,9 @@ dépôt.
   pas conservés.
 - PostgreSQL porte une file de travaux verrouillée par worker. Le suivi du UPID
   Proxmox distingue réussite, échec et résultat ambigu nécessitant une revue.
+- Les profils cloud-init clonés créent un compte nominatif non-root ; son secret
+  aléatoire n'est jamais persisté et seul un lien Password Pusher expirant est
+  remis au propriétaire.
 
 Le token de service PVE doit être limité par ACL aux nœuds, stockages et opérations requis. N'utilisez jamais `root@pam`.
 
@@ -59,6 +62,7 @@ Les tests n'appellent aucun PVE réel et n'utilisent aucun secret réel :
 Architecture cible et étapes de livraison : [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 Configuration Keycloak et LDAP/LDAPS : [`docs/KEYCLOAK.md`](docs/KEYCLOAK.md).
 Exploitation de la file de travaux : [`docs/JOBS.md`](docs/JOBS.md).
+Préparation sécurisée des templates et remise des accès : [`docs/GUEST_ACCESS.md`](docs/GUEST_ACCESS.md).
 
 Endpoints : `GET /healthz`, `GET /`, `POST /login`, `POST /logout`,
 `GET /api/me`, `GET /api/nodes`, `GET /api/nodes/<node>/isos`,
@@ -90,5 +94,10 @@ Avant la première demande, un administrateur doit publier au moins un profil
 avec `POST /api/admin/image-profiles`, par exemple :
 
 ```json
-{"slug":"debian-12","label":"Debian 12","description":"ISO approuvée","iso":"local:iso/debian-12.iso"}
+{"slug":"debian-12","label":"Debian 12","description":"ISO approuvée","source_type":"iso","iso":"local:iso/debian-12.iso"}
 ```
+
+Un profil cloud-init utilise à la place `source_type: "cloud_init"`,
+`template_node` et `template_vmid`. La demande de VM doit alors inclure un
+`guest_username` Linux non-root. Le lien `guest_access.password_url` n'est
+retourné qu'au propriétaire du travail.

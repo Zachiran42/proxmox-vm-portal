@@ -27,6 +27,12 @@ est réessayée. En revanche, une coupure pendant l'envoi de la création peut
 signifier que Proxmox a accepté la VM sans que le portail reçoive le UPID. Le
 travail passe alors en `attention` et n'est jamais soumis une seconde fois.
 
+Pour un profil cloud-init, le premier UPID suit le clone du template. Le worker
+configure ensuite le compte invité, remet le secret à Password Pusher et suit
+un second UPID de démarrage. Une remise échouée remplace le mot de passe avant
+chaque nouvelle tentative ; un éventuel lien orphelin ne contient donc plus un
+secret valide.
+
 ## Exploitation
 
 Les états `submitting` et `attention` doivent déclencher une alerte. Avant toute
@@ -41,6 +47,6 @@ PostgreSQL et la même configuration Proxmox.
 
 Les profils sont gérés par un administrateur via
 `/api/admin/image-profiles`. Leur désactivation bloque les nouveaux travaux et
-ceux qui n'ont pas encore été soumis. Ce lot attache encore une ISO à la VM : il
-ne réalise pas à lui seul l'installation automatique du système. Celle-ci sera
-assurée par les futurs profils cloud-init ou d'installation sans assistance.
+ceux qui n'ont pas encore été soumis. Les profils ISO attachent encore une ISO
+à la VM et ne créent aucun compte automatique. Seuls les profils cloud-init
+clonés fournissent `guest_access`.
