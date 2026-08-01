@@ -36,10 +36,31 @@ jobs:
           mypy portal
           bandit -q -r portal
           pip-audit -r requirements.lock
-          bash -n deploy/scripts/*.sh deploy/testing/*.sh deploy/keycloak/*.sh deploy/password-pusher/*.sh
+          bash -n deploy/scripts/*.sh deploy/testing/*.sh deploy/keycloak/*.sh deploy/password-pusher/*.sh images/packer/build.sh images/packer/scripts/*.sh
           python -m json.tool deploy/proxmox/acl-policy.example.json >/dev/null
       - name: Build the production image
         run: docker build --tag proxmox-vm-portal:${{ github.sha }} .
+
+  image-factory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Validate the Debian Packer recipe
+        run: |
+          docker run --rm --entrypoint /bin/sh \
+            -e PKR_VAR_proxmox_url=https://pve.example.invalid:8006/api2/json \
+            -e 'PKR_VAR_proxmox_username=packer@pve!image-factory' \
+            -e PKR_VAR_proxmox_token=ci-validation-only \
+            -e PKR_VAR_proxmox_node=pve-a \
+            -e PKR_VAR_proxmox_pool=image-factory \
+            -e PKR_VAR_iso_storage_pool=local \
+            -e PKR_VAR_vm_storage_pool=local-lvm \
+            -e PKR_VAR_build_password=ci-validation-only \
+            -e 'PKR_VAR_build_password_hash=$6$validation$hash' \
+            -v "$PWD/images/packer:/workspace" -w /workspace \
+            hashicorp/packer:1.14.3@sha256:0b9feae59276b3d72e2488d6884a281e3eab31f58d0ef9790e8f012846965dba \
+            -c 'packer init debian-13.pkr.hcl && packer fmt -check debian-13.pkr.hcl && packer validate debian-13.pkr.hcl'
 
   secrets:
     runs-on: ubuntu-latest

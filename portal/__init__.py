@@ -569,6 +569,15 @@ def create_app(
             profile_request = ImageProfileCreateRequest.from_dict(payload)
         except ValidationError as error:
             return jsonify(errors=error.errors), 400
+        if (
+            profile_request.source_type == "cloud_init"
+            and profile_request.template_node is not None
+            and profile_request.template_vmid is not None
+            and not client.is_template_available(
+                profile_request.template_node, profile_request.template_vmid
+            )
+        ):
+            return jsonify(errors={"template": "Template Proxmox indisponible ou non converti."}), 422
         profile = ImageProfile(
             slug=profile_request.slug,
             label=profile_request.label,

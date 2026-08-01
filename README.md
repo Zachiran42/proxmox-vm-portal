@@ -85,6 +85,8 @@ Recette de qualification réelle : [`docs/PREPRODUCTION.md`](docs/PREPRODUCTION.
 Configuration Keycloak et LDAP/LDAPS : [`docs/KEYCLOAK.md`](docs/KEYCLOAK.md).
 Exploitation de la file de travaux : [`docs/JOBS.md`](docs/JOBS.md).
 Préparation sécurisée des templates et remise des accès : [`docs/GUEST_ACCESS.md`](docs/GUEST_ACCESS.md).
+Construction reproductible des templates Debian depuis l'ISO :
+[`docs/IMAGE_FACTORY.md`](docs/IMAGE_FACTORY.md).
 
 Endpoints : `GET /healthz`, `GET /`, `POST /login`, `POST /logout`,
 `GET /api/me`, `GET /api/nodes`, `GET /api/nodes/<node>/isos`,
@@ -122,4 +124,5 @@ avec `POST /api/admin/image-profiles`, par exemple :
 Un profil cloud-init utilise à la place `source_type: "cloud_init"`,
 `template_node` et `template_vmid`. La demande de VM doit alors inclure un
 `guest_username` Linux non-root. Le lien `guest_access.password_url` n'est
-retourné qu'au propriétaire du travail.
+retourné qu'au propriétaire du travail. Lors de la publication, le portail
+vérifie immédiatement que le VMID désigne bien un template Proxmox disponible.

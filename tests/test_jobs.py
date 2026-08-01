@@ -389,6 +389,29 @@ def test_admin_manages_approved_image_profiles(app):
     assert len(client.get("/api/admin/image-profiles").get_json()["profiles"]) == 2
 
 
+def test_admin_cannot_publish_an_unavailable_cloud_init_template(app):
+    client = app.test_client()
+    login(client)
+
+    response = client.post(
+        "/api/admin/image-profiles",
+        json={
+            "slug": "unverified-template",
+            "label": "Unverified template",
+            "description": "Must be rejected",
+            "source_type": "cloud_init",
+            "template_node": "pve-a",
+            "template_vmid": 9130,
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.get_json() == {
+        "errors": {"template": "Template Proxmox indisponible ou non converti."}
+    }
+    assert len(client.get("/api/admin/image-profiles").get_json()["profiles"]) == 1
+
+
 def test_cloud_init_profile_delivers_owner_credentials_and_starts_vm(
     app, pve_client, password_pusher
 ):
@@ -453,8 +476,8 @@ def test_operator_can_monitor_but_cannot_read_owner_credential_link(
 def test_cloud_init_requires_non_root_username_and_password_pusher(app, pve_client):
     client = app.test_client()
     login(client)
-    create_cloud_profile(client)
     pve_client.templates.add(("pve-a", 9000))
+    create_cloud_profile(client)
 
     missing = client.post(
         "/api/vms", json={**vm_payload(), "profile": "debian-cloud"}

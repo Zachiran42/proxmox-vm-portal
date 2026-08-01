@@ -24,8 +24,10 @@ sont obligatoires. `PORTAL_PWPUSH_CA_BUNDLE` permet d'utiliser une CA interne.
 
 ## Préparer un template cloud-init
 
-Le portail ne peut pas transformer une ISO interactive en image cloud-init. Un
-administrateur doit préparer et tester le template avant de publier son profil :
+La recette Packer versionnée transforme automatiquement l'ISO Debian en template
+cloud-init. Sa construction, son durcissement et sa promotion sont décrits dans
+[`IMAGE_FACTORY.md`](IMAGE_FACTORY.md). Un administrateur doit toujours tester
+un clone avant de publier son profil :
 
 1. partir d'une image cloud officielle dont la somme est vérifiée ;
 2. installer et activer cloud-init et le QEMU Guest Agent ;

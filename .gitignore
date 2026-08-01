@@ -13,3 +13,4 @@ build/
 instance/
 backups/
 deploy/caddy/sites/*.caddy
+images/packer/promotion.json
