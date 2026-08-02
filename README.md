@@ -32,6 +32,9 @@ stocké dans le dépôt.
 - Le démarrage, l’arrêt propre, le redémarrage et la suppression suivent la même
   file persistante. Une seule opération peut être active par VM et les quotas ne
   sont libérés qu’après confirmation de suppression par Proxmox.
+- L’administration expose la santé de PostgreSQL, du worker et de Proxmox ainsi
+  que les travaux ambigus. Un suivi ne peut être repris qu’avec son UPID existant
+  et une clôture en échec exige la confirmation exacte du nom de la VM.
 - Les profils cloud-init clonés créent un compte nominatif non-root ; son secret
   aléatoire n'est jamais persisté et seul un lien Password Pusher expirant est
   remis au propriétaire.
@@ -64,7 +67,8 @@ Les machines prêtes peuvent être démarrées, arrêtées et redémarrées depu
 vue. La suppression définitive exige de saisir le nom exact de la VM.
 L'espace Administration permet de créer et suspendre les comptes locaux,
 d'ajuster leurs rôles et quotas et de consulter les 100 derniers événements
-d'audit. Les rôles des identités OIDC restent gérés dans Keycloak.
+d'audit. Il centralise aussi l’état des services et les interventions manuelles
+sur les travaux ambigus. Les rôles des identités OIDC restent gérés dans Keycloak.
 
 En production, servez l'application derrière TLS avec un serveur WSGI et conservez `PORTAL_SESSION_COOKIE_SECURE=true`. N'activez pas le mode debug.
 
@@ -108,6 +112,7 @@ Endpoints : `GET /healthz`, `GET /`, `POST /login`, `POST /logout`,
 `GET /api/jobs`, `GET /api/jobs/<id>`,
 `GET|POST /api/admin/users`, `PATCH /api/admin/users/<id>`,
 `GET /api/admin/audit-events`,
+`GET /api/admin/operations`, `POST /api/admin/incidents/<kind>/<id>/actions`,
 `GET|POST /api/admin/image-profiles`, `PATCH /api/admin/image-profiles/<slug>`,
 `GET /auth/oidc/login` et `GET /auth/oidc/callback`.
 

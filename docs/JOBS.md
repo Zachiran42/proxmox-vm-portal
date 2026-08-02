@@ -51,6 +51,13 @@ correction manuelle, recherchez la VM par son nom et son propriétaire dans
 Proxmox et consultez le journal d'audit du portail. Ne remettez pas aveuglément
 un travail `attention` dans la file.
 
+La vue Administration affiche les heartbeats des workers, la connectivité
+Proxmox, la profondeur de file et les travaux en `attention`. La reprise du
+suivi est disponible seulement si le portail possède déjà le nœud et l’UPID ;
+elle ne soumet donc aucune nouvelle action. Une clôture en échec demande le nom
+exact de la VM et doit être utilisée uniquement après avoir vérifié son absence
+dans Proxmox. Ces deux décisions sont inscrites dans le journal d’audit.
+
 `PORTAL_JOB_POLL_SECONDS` règle l'intervalle de suivi (1 à 300 secondes) et
 `PORTAL_JOB_LEASE_SECONDS` la durée après laquelle un verrou abandonné est
 récupéré (1 à 3600 secondes). Les workers et l'API doivent partager la même base

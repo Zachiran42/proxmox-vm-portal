@@ -13,6 +13,7 @@ _VM_REQUIRED_FIELDS = _FIELDS - {"guest_username"}
 _USER_FIELDS = {"username", "password", "role", "quota"}
 _USER_UPDATE_FIELDS = {"password", "role", "is_active", "quota"}
 _VM_ACTION_FIELDS = {"action", "confirm_name"}
+_INCIDENT_ACTION_FIELDS = {"action", "confirm_name"}
 _QUOTA_FIELDS = {"vms", "cpu", "ram_mb", "disk_gb"}
 _PROFILE_BASE_FIELDS = {"slug", "label", "description", "source_type"}
 _PROFILE_FIELDS = _PROFILE_BASE_FIELDS | {"iso", "template_node", "template_vmid"}
@@ -119,6 +120,31 @@ class VMActionRequest:
         elif confirm_name is not None:
             errors["confirm_name"] = "Confirmation réservée à la suppression."
 
+        if errors:
+            raise ValidationError(errors)
+        return cls(action=cast(str, action), confirm_name=confirm_name)
+
+
+@dataclass(frozen=True)
+class IncidentActionRequest:
+    action: str
+    confirm_name: str | None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> IncidentActionRequest:
+        errors: dict[str, str] = {}
+        unknown = set(data) - _INCIDENT_ACTION_FIELDS
+        if unknown:
+            errors["body"] = "Champs non autorisés: " + ", ".join(sorted(unknown))
+        action = data.get("action")
+        if action not in {"resume_tracking", "close_failed"}:
+            errors["action"] = "Action de résolution invalide."
+        confirm_name = data.get("confirm_name")
+        if action == "close_failed":
+            if not isinstance(confirm_name, str) or not confirm_name:
+                errors["confirm_name"] = "Le nom exact de la VM est requis."
+        elif confirm_name is not None:
+            errors["confirm_name"] = "Confirmation réservée à la clôture."
         if errors:
             raise ValidationError(errors)
         return cls(action=cast(str, action), confirm_name=confirm_name)

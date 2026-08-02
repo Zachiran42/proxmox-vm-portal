@@ -1,6 +1,6 @@
 "use strict";
 
-const state = { csrfToken: "", user: null, usage: {}, profiles: [], nodes: [], jobs: [], users: [], auditEvents: [], pollTimer: null };
+const state = { csrfToken: "", user: null, usage: {}, profiles: [], nodes: [], jobs: [], users: [], auditEvents: [], operations: null, pollTimer: null };
 const elements = Object.fromEntries(
   [
     "login-screen", "login-form", "local-login-fields", "login-error", "login-button",
@@ -25,7 +25,13 @@ const elements = Object.fromEntries(
     "managed-active", "user-error", "vm-action-dialog", "vm-action-form", "vm-action-id",
     "vm-action-kind", "vm-action-title", "vm-action-intro", "vm-delete-confirmation",
     "vm-confirm-name", "vm-confirm-expected", "vm-action-error", "close-vm-action",
-    "cancel-vm-action", "submit-vm-action"
+    "cancel-vm-action", "submit-vm-action", "operations-checked", "refresh-operations",
+    "service-grid", "incident-count",
+    "queue-count", "incident-list", "incident-empty", "incident-dialog", "incident-form",
+    "incident-kind", "incident-id", "incident-action", "incident-dialog-title",
+    "incident-dialog-intro", "incident-close-confirmation", "incident-confirm-name",
+    "incident-confirm-expected", "incident-error", "close-incident-dialog",
+    "cancel-incident", "submit-incident"
   ].map((id) => [id, document.getElementById(id)])
 );
 
@@ -49,6 +55,8 @@ function errorMessage(payload, fallback) {
     confirmation_mismatch: "Le nom saisi ne correspond pas à la machine.",
     lifecycle_invalid_state: "Cette action n’est pas disponible dans l’état actuel.",
     operation_in_progress: "Une opération est déjà en cours sur cette machine.",
+    incident_not_open: "Cet incident a déjà été traité.",
+    incident_not_resumable: "Aucun identifiant Proxmox exploitable ne permet de reprendre ce suivi.",
     forbidden: "Cette action est réservée aux administrateurs."
   };
   return (payload && known[payload.error]) || fallback;
@@ -116,7 +124,7 @@ function showApplication(session) {
   const requestedView = window.location.hash.slice(1);
   switchView(["images", "admin"].includes(requestedView) ? requestedView : "machines");
   const loaders = [loadProfiles(), loadNodes(), loadJobs()];
-  if (session.user.role === "admin") loaders.push(loadUsers(), loadAudit());
+  if (session.user.role === "admin") loaders.push(loadUsers(), loadAudit(), loadOperations());
   Promise.all(loaders).catch(() => {});
 }
 
@@ -562,6 +570,126 @@ async function submitVm(event) {
   }
 }
 
+const serviceLabels = {
+  database: "Base PostgreSQL", worker: "Worker", proxmox: "Proxmox",
+  password_pusher: "Password Pusher"
+};
+const serviceStatusLabels = {
+  healthy: "Opérationnel", configured: "Configuré", degraded: "Dégradé",
+  unavailable: "Indisponible", disabled: "Désactivé", unknown: "En attente"
+};
+
+function serviceDetail(name, service) {
+  if (name === "proxmox") return `${service.online_nodes} nœud(s) en ligne · ${service.latency_ms} ms`;
+  if (name === "worker" && service.last_seen_at) return `Dernier signal il y a ${service.age_seconds} s`;
+  if (name === "password_pusher" && service.status === "disabled") return "Accès automatique indisponible";
+  return serviceStatusLabels[service.status] || service.status;
+}
+
+function renderOperations() {
+  if (!state.operations) return;
+  const services = Object.entries(state.operations.services).map(([name, service]) => {
+    const card = document.createElement("article");
+    card.className = "service-card";
+    appendText(card, "span", "", `service-dot ${service.status}`);
+    const copy = document.createElement("div");
+    copy.className = "service-copy";
+    appendText(copy, "strong", serviceLabels[name] || name);
+    appendText(copy, "span", serviceDetail(name, service));
+    card.append(copy);
+    return card;
+  });
+  elements["service-grid"].replaceChildren(...services);
+  elements["operations-checked"].textContent = `Vérifié le ${new Date(state.operations.checked_at).toLocaleString("fr-FR")}`;
+  elements["queue-count"].textContent = `${state.operations.queue.active} tâche${state.operations.queue.active > 1 ? "s" : ""} active${state.operations.queue.active > 1 ? "s" : ""}`;
+  elements["incident-count"].textContent = `${state.operations.queue.attention} incident${state.operations.queue.attention > 1 ? "s" : ""} ouvert${state.operations.queue.attention > 1 ? "s" : ""}`;
+  elements["incident-list"].replaceChildren(...state.operations.incidents.map(renderIncident));
+  elements["incident-empty"].hidden = state.operations.incidents.length !== 0;
+}
+
+function renderIncident(incident) {
+  const card = document.createElement("article");
+  card.className = "incident-card";
+  const identity = document.createElement("div");
+  identity.className = "incident-identity";
+  appendText(identity, "strong", incident.vm.name);
+  appendText(identity, "span", `${incident.vm.owner} · ${incident.vm.node}${incident.vm.vmid ? ` · VMID ${incident.vm.vmid}` : ""}`);
+  card.append(identity);
+  const action = incident.action === "provision" ? "Provisionnement" : operationLabels[incident.action];
+  appendText(card, "p", `${action} · ${jobErrorLabels[incident.error_code] || incident.error_code || "État ambigu"} · ${new Date(incident.updated_at).toLocaleString("fr-FR")}`, "incident-detail");
+  const actions = document.createElement("div");
+  actions.className = "incident-actions";
+  if (incident.can_resume) {
+    const resume = appendText(actions, "button", "Reprendre le suivi", "incident-button");
+    resume.type = "button";
+    resume.addEventListener("click", () => openIncidentDialog(incident, "resume_tracking"));
+  }
+  const close = appendText(actions, "button", "Clôturer en échec", "incident-button danger");
+  close.type = "button";
+  close.addEventListener("click", () => openIncidentDialog(incident, "close_failed"));
+  card.append(actions);
+  return card;
+}
+
+async function loadOperations() {
+  elements["refresh-operations"].disabled = true;
+  try {
+    state.operations = await api("/api/admin/operations");
+    renderOperations();
+  } catch (error) {
+    if (error.status === 401) return showLogin();
+    elements["operations-checked"].textContent = error.message;
+  } finally {
+    elements["refresh-operations"].disabled = false;
+  }
+}
+
+function openIncidentDialog(incident, action) {
+  elements["incident-form"].reset();
+  elements["incident-kind"].value = incident.kind;
+  elements["incident-id"].value = incident.id;
+  elements["incident-action"].value = action;
+  const closing = action === "close_failed";
+  elements["incident-dialog-title"].textContent = closing ? "Clôturer en échec" : "Reprendre le suivi Proxmox";
+  elements["incident-dialog-intro"].textContent = closing
+    ? `Cette décision marque ${incident.vm.name} en échec après votre vérification manuelle dans Proxmox.`
+    : `Le worker reprendra uniquement le suivi de l’UPID existant pour ${incident.vm.name}, sans soumettre une nouvelle action.`;
+  elements["incident-close-confirmation"].hidden = !closing;
+  elements["incident-confirm-name"].required = closing;
+  elements["incident-confirm-expected"].textContent = incident.vm.name;
+  elements["submit-incident"].classList.toggle("button-danger", closing);
+  showError(elements["incident-error"], "");
+  elements["incident-dialog"].showModal();
+  if (closing) elements["incident-confirm-name"].focus();
+  else elements["submit-incident"].focus();
+}
+
+function closeIncidentDialog() {
+  elements["incident-dialog"].close();
+}
+
+async function submitIncident(event) {
+  event.preventDefault();
+  const action = elements["incident-action"].value;
+  const payload = { action };
+  if (action === "close_failed") payload.confirm_name = elements["incident-confirm-name"].value;
+  showError(elements["incident-error"], "");
+  setBusy(elements["submit-incident"], true, "Traitement…");
+  try {
+    const kind = encodeURIComponent(elements["incident-kind"].value);
+    const id = encodeURIComponent(elements["incident-id"].value);
+    await api(`/api/admin/incidents/${kind}/${id}/actions`, { method: "POST", body: JSON.stringify(payload) });
+    closeIncidentDialog();
+    showToast(action === "resume_tracking" ? "Suivi remis dans la file." : "Incident clôturé en échec.");
+    await Promise.all([loadOperations(), loadAudit(), loadUsers()]);
+  } catch (error) {
+    if (error.status === 401) return showLogin();
+    showError(elements["incident-error"], error.message);
+  } finally {
+    setBusy(elements["submit-incident"], false, "");
+  }
+}
+
 function renderUser(user) {
   const card = document.createElement("article");
   card.className = `user-card${user.is_active ? "" : " inactive"}`;
@@ -620,7 +748,13 @@ const auditActionLabels = {
   "image_profile.update": "Image modifiée",
   "vm.enqueue": "VM demandée",
   "vm.create": "Création de VM",
-  "vm.provision": "Provisionnement"
+  "vm.provision": "Provisionnement",
+  "vm.start": "Démarrage de VM",
+  "vm.stop": "Arrêt de VM",
+  "vm.reboot": "Redémarrage de VM",
+  "vm.delete": "Suppression de VM",
+  "incident.resume_tracking": "Suivi repris",
+  "incident.close_failed": "Incident clôturé"
 };
 
 function filteredAuditEvents() {
@@ -835,6 +969,10 @@ elements["close-user-dialog"].addEventListener("click", closeUserDialog);
 elements["cancel-user"].addEventListener("click", closeUserDialog);
 elements["user-form"].addEventListener("submit", saveUser);
 elements["refresh-users"].addEventListener("click", loadUsers);
+elements["refresh-operations"].addEventListener("click", loadOperations);
+elements["close-incident-dialog"].addEventListener("click", closeIncidentDialog);
+elements["cancel-incident"].addEventListener("click", closeIncidentDialog);
+elements["incident-form"].addEventListener("submit", submitIncident);
 elements["refresh-audit"].addEventListener("click", loadAudit);
 elements["audit-outcome"].addEventListener("change", renderAudit);
 elements["audit-search"].addEventListener("input", renderAudit);
@@ -860,6 +998,9 @@ elements["vm-action-dialog"].addEventListener("click", (event) => {
 });
 elements["user-dialog"].addEventListener("click", (event) => {
   if (event.target === elements["user-dialog"]) closeUserDialog();
+});
+elements["incident-dialog"].addEventListener("click", (event) => {
+  if (event.target === elements["incident-dialog"]) closeIncidentDialog();
 });
 
 configureAuthenticationChoices();

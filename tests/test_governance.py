@@ -368,6 +368,7 @@ def test_initial_migration_and_bootstrap_admin(tmp_path, pve_client):
             "users",
             "vm_allocations",
             "vm_operations",
+            "worker_heartbeats",
             "audit_events",
             "alembic_version",
         } <= set(inspect(db.engine).get_table_names())

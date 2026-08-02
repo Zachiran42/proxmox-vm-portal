@@ -43,6 +43,7 @@ from .models import (
     User,
     VMAllocation,
     VMOperation,
+    WorkerHeartbeat,
     db,
 )
 from .oidc import (
@@ -55,6 +56,7 @@ from .password_pusher import PasswordPusherClient
 from .pve import PVEClient, PVEHTTPError, PVEProtocolError, PVETransportError
 from .validation import (
     ImageProfileCreateRequest,
+    IncidentActionRequest,
     UserCreateRequest,
     UserUpdateRequest,
     ValidationError,
@@ -783,6 +785,213 @@ def create_app(
             select(AuditEvent).order_by(AuditEvent.created_at.desc()).limit(100)
         ).all()
         return jsonify(events=[event.public_dict() for event in events])
+
+    @app.get("/api/admin/operations")
+    @login_required
+    @role_required("admin")
+    def operations_overview():
+        now = datetime.now(UTC)
+        heartbeat = db.session.scalar(
+            select(WorkerHeartbeat)
+            .order_by(WorkerHeartbeat.last_seen_at.desc())
+            .limit(1)
+        )
+        if heartbeat is None:
+            worker_service = {"status": "unknown", "last_seen_at": None}
+        else:
+            last_seen = heartbeat.last_seen_at
+            if last_seen.tzinfo is None:
+                last_seen = last_seen.replace(tzinfo=UTC)
+            age_seconds = max(0, int((now - last_seen).total_seconds()))
+            worker_service = {
+                "status": "healthy"
+                if age_seconds <= max(15, app.config["PORTAL_JOB_POLL_SECONDS"] * 3)
+                else "degraded",
+                "last_seen_at": last_seen.isoformat(),
+                "age_seconds": age_seconds,
+            }
+
+        pve_started = time.monotonic()
+        try:
+            nodes = client.list_nodes()
+            pve_service = {
+                "status": "healthy" if nodes else "degraded",
+                "online_nodes": len(nodes),
+                "latency_ms": int((time.monotonic() - pve_started) * 1000),
+            }
+        except (PVETransportError, PVEHTTPError, PVEProtocolError):
+            pve_service = {
+                "status": "unavailable",
+                "online_nodes": 0,
+                "latency_ms": int((time.monotonic() - pve_started) * 1000),
+            }
+
+        provisioning_incidents = db.session.scalars(
+            select(ProvisioningJob)
+            .where(ProvisioningJob.status == "attention")
+            .order_by(ProvisioningJob.updated_at.desc())
+            .limit(25)
+        ).all()
+        lifecycle_incidents = db.session.scalars(
+            select(VMOperation)
+            .where(VMOperation.status == "attention")
+            .order_by(VMOperation.updated_at.desc())
+            .limit(25)
+        ).all()
+        incidents = [
+            {
+                "kind": "provisioning",
+                "id": job.id,
+                "error_code": job.error_code,
+                "stage": job.stage,
+                "action": "provision",
+                "updated_at": job.updated_at.isoformat(),
+                "can_resume": bool(
+                    job.upstream_node and job.allocation.upstream_request_id
+                ),
+                "vm": {
+                    "id": job.allocation_id,
+                    "name": job.allocation.name,
+                    "node": job.allocation.node,
+                    "vmid": job.allocation.vmid,
+                    "owner": job.allocation.owner.username,
+                },
+            }
+            for job in provisioning_incidents
+        ] + [
+            {
+                "kind": "lifecycle",
+                "id": operation.id,
+                "error_code": operation.error_code,
+                "stage": None,
+                "action": operation.action,
+                "updated_at": operation.updated_at.isoformat(),
+                "can_resume": bool(
+                    operation.upstream_node and operation.upstream_request_id
+                ),
+                "vm": {
+                    "id": operation.allocation_id,
+                    "name": operation.allocation.name,
+                    "node": operation.allocation.node,
+                    "vmid": operation.allocation.vmid,
+                    "owner": operation.allocation.owner.username,
+                },
+            }
+            for operation in lifecycle_incidents
+        ]
+        incidents.sort(key=lambda incident: incident["updated_at"], reverse=True)
+
+        provisioning_active = db.session.scalar(
+            select(func.count(ProvisioningJob.id)).where(
+                ProvisioningJob.status.in_(
+                    ("queued", "validating", "submitting", "submitted", "polling")
+                )
+            )
+        )
+        lifecycle_active = db.session.scalar(
+            select(func.count(VMOperation.id)).where(
+                VMOperation.status.in_(
+                    ("queued", "submitting", "submitted", "polling")
+                )
+            )
+        )
+        return jsonify(
+            services={
+                "database": {"status": "healthy"},
+                "worker": worker_service,
+                "proxmox": pve_service,
+                "password_pusher": {
+                    "status": "configured"
+                    if password_pusher is not None
+                    else "disabled"
+                },
+            },
+            queue={
+                "active": int(provisioning_active or 0)
+                + int(lifecycle_active or 0),
+                "attention": len(incidents),
+            },
+            incidents=incidents[:50],
+            checked_at=now.isoformat(),
+        )
+
+    @app.post("/api/admin/incidents/<kind>/<incident_id>/actions")
+    @login_required
+    @role_required("admin")
+    @csrf_protected
+    def resolve_incident(kind: str, incident_id: str):
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify(errors={"body": "Un objet JSON est requis."}), 400
+        try:
+            incident_request = IncidentActionRequest.from_dict(payload)
+        except ValidationError as error:
+            return jsonify(errors=error.errors), 400
+
+        if kind == "provisioning":
+            incident = db.session.scalar(
+                select(ProvisioningJob)
+                .where(ProvisioningJob.id == incident_id)
+                .with_for_update()
+            )
+            allocation = incident.allocation if incident is not None else None
+            upstream_node = incident.upstream_node if incident is not None else None
+            upstream_request_id = (
+                allocation.upstream_request_id if allocation is not None else None
+            )
+        elif kind == "lifecycle":
+            incident = db.session.scalar(
+                select(VMOperation)
+                .where(VMOperation.id == incident_id)
+                .with_for_update()
+            )
+            allocation = incident.allocation if incident is not None else None
+            upstream_node = incident.upstream_node if incident is not None else None
+            upstream_request_id = (
+                incident.upstream_request_id if incident is not None else None
+            )
+        else:
+            return jsonify(error="not_found"), 404
+
+        if incident is None or allocation is None:
+            return jsonify(error="not_found"), 404
+        if incident.status != "attention":
+            return jsonify(error="incident_not_open"), 409
+        previous_error = incident.error_code
+        if incident_request.action == "resume_tracking":
+            if not upstream_node or not upstream_request_id:
+                return jsonify(error="incident_not_resumable"), 409
+            incident.status = "submitted"
+            incident.available_at = datetime.now(UTC)
+            incident.completed_at = None
+            incident.error_code = None
+            incident.locked_at = None
+            incident.locked_by = None
+        else:
+            if not compare_digest(
+                incident_request.confirm_name or "", allocation.name
+            ):
+                return jsonify(error="confirmation_mismatch"), 409
+            incident.status = "failed"
+            incident.completed_at = datetime.now(UTC)
+            incident.locked_at = None
+            incident.locked_by = None
+            if kind == "provisioning":
+                allocation.status = "failed"
+
+        _add_audit(
+            action=f"incident.{incident_request.action}",
+            target_type=kind,
+            target_id=incident_id,
+            outcome="success",
+            actor_user_id=g.current_user.id,
+            details={
+                "vm_id": allocation.id,
+                "previous_error": previous_error,
+            },
+        )
+        db.session.commit()
+        return jsonify(status=incident.status)
 
     @app.get("/api/jobs/<job_id>")
     @login_required

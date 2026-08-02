@@ -120,9 +120,23 @@
 
       <div class="page" id="admin-view" hidden>
         <div class="page-heading">
-          <div><span class="eyebrow">Gouvernance</span><h1>Administration</h1><p>Gérez les accès, les limites de ressources et la traçabilité du portail.</p></div>
+          <div><span class="eyebrow">Gouvernance et exploitation</span><h1>Administration</h1><p>Surveillez les services, traitez les incidents et gérez les accès du portail.</p></div>
           <button class="button button-primary" type="button" id="open-user-dialog">+ Nouvel utilisateur</button>
         </div>
+
+        <section class="operations-panel" aria-labelledby="operations-title">
+          <div class="section-heading">
+            <div><h2 id="operations-title">État opérationnel</h2><p id="operations-checked">Vérification des services…</p></div>
+            <button class="icon-button" type="button" id="refresh-operations" aria-label="Actualiser l’état opérationnel">↻</button>
+          </div>
+          <div class="service-grid" id="service-grid" aria-live="polite"></div>
+          <div class="incident-heading">
+            <div><h3>Interventions requises</h3><p id="incident-count">Chargement des incidents…</p></div>
+            <span class="queue-count" id="queue-count">0 tâche active</span>
+          </div>
+          <div class="incident-list" id="incident-list" aria-live="polite"></div>
+          <div class="empty-state compact" id="incident-empty" hidden><span>✓</span><h3>Aucune intervention requise</h3><p>Les travaux ambigus apparaîtront ici sans être rejoués automatiquement.</p></div>
+        </section>
 
         <section class="stats admin-stats" aria-label="Résumé des utilisateurs">
           <article><span class="stat-icon stat-green">●</span><div><strong id="stat-users-active">0</strong><span>Comptes actifs</span></div></article>
@@ -262,6 +276,29 @@
       <div class="dialog-actions">
         <button class="button button-secondary" type="button" id="cancel-vm-action">Annuler</button>
         <button class="button button-primary" type="submit" id="submit-vm-action">Confirmer</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="incident-dialog" aria-labelledby="incident-dialog-title">
+    <form id="incident-form">
+      <input id="incident-kind" type="hidden">
+      <input id="incident-id" type="hidden">
+      <input id="incident-action" type="hidden">
+      <div class="dialog-heading">
+        <div><span class="eyebrow">Intervention administrateur</span><h2 id="incident-dialog-title">Résoudre l’incident</h2></div>
+        <button class="close-button" type="button" id="close-incident-dialog" aria-label="Fermer">×</button>
+      </div>
+      <p class="dialog-intro" id="incident-dialog-intro"></p>
+      <div id="incident-close-confirmation" hidden>
+        <label for="incident-confirm-name">Après vérification dans Proxmox, saisissez <strong id="incident-confirm-expected"></strong></label>
+        <input id="incident-confirm-name" maxlength="63" autocomplete="off">
+        <p class="field-help">Confirmez uniquement si la VM est absente ou déjà supprimée. Cette clôture peut libérer ses quotas.</p>
+      </div>
+      <p class="form-error" id="incident-error" role="alert" hidden></p>
+      <div class="dialog-actions">
+        <button class="button button-secondary" type="button" id="cancel-incident">Annuler</button>
+        <button class="button button-primary" type="submit" id="submit-incident">Confirmer</button>
       </div>
     </form>
   </dialog>

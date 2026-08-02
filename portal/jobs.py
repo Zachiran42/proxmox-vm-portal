@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
-from .models import AuditEvent, ProvisioningJob, VMOperation, db
+from .models import AuditEvent, ProvisioningJob, VMOperation, WorkerHeartbeat, db
 from .password_pusher import PasswordPusherError
 from .pve import PVEHTTPError, PVEProtocolError, PVETransportError
 
@@ -19,6 +19,7 @@ def process_next_job(
     lease_seconds: int = 300,
 ) -> bool:
     """Traite une seule étape; retourne False quand aucune tâche n'est prête."""
+    _record_heartbeat(worker_id)
     _recover_stale_jobs(lease_seconds)
     claimed = _claim_job(worker_id)
     if claimed is None:
@@ -34,6 +35,16 @@ def process_next_job(
     else:
         _poll_job(pve_client, password_pusher, job_id, poll_seconds)
     return True
+
+
+def _record_heartbeat(worker_id: str) -> None:
+    normalized_id = worker_id[:128]
+    heartbeat = db.session.get(WorkerHeartbeat, normalized_id)
+    if heartbeat is None:
+        db.session.add(WorkerHeartbeat(worker_id=normalized_id))
+    else:
+        heartbeat.last_seen_at = datetime.now(UTC)
+    db.session.commit()
 
 
 def _claim_job(worker_id: str) -> tuple[str, str] | None:

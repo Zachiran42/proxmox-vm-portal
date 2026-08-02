@@ -321,6 +321,15 @@ class VMOperation(db.Model):
         }
 
 
+class WorkerHeartbeat(db.Model):
+    __tablename__ = "worker_heartbeats"
+
+    worker_id: Mapped[str] = mapped_column(db.String(128), primary_key=True)
+    last_seen_at: Mapped[datetime] = mapped_column(
+        db.DateTime(timezone=True), nullable=False, default=utcnow
+    )
+
+
 class AuditEvent(db.Model):
     __tablename__ = "audit_events"
     __table_args__ = (

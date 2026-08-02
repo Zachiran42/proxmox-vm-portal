@@ -111,3 +111,6 @@ d'administrateur, jamais une URL libre fournie par un utilisateur.
 8. Qualifier l'environnement réel avant publication. **Outillage de contrôle
    Debian 13, politique ACL Proxmox et recette MFA livrés ; leur exécution sur
    la préproduction et le pentest indépendant restent requis.**
+9. Superviser la file et les dépendances. **Livré : heartbeat des workers,
+   état Proxmox, incidents centralisés et reprise manuelle limitée au suivi d’un
+   UPID existant.**
