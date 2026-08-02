@@ -54,3 +54,9 @@ def test_release_operations_verify_before_pull_or_qualification():
     )
     assert "verify-published-image.sh" in qualify
     assert override.count("build: !reset null") == 3
+
+
+def test_ci_installs_the_checkout_editably_for_coverage():
+    workflow = (ROOT / ".github/workflows/security.yml").read_text(encoding="utf-8")
+
+    assert "python -m pip install --no-deps -e ." in workflow
