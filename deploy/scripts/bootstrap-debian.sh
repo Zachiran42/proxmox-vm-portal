@@ -3,8 +3,8 @@ set -Eeuo pipefail
 umask 077
 
 REPOSITORY="hugofelix088-spec/proxmox-vm-portal"
-RELEASE_TAG="v0.18.0"
-RELEASE_VERSION="0.18.0"
+RELEASE_TAG="v0.18.1"
+RELEASE_VERSION="0.18.1"
 TARGET_DIR="/opt/proxmox-vm-portal"
 API_ROOT="https://api.github.com/repos/$REPOSITORY"
 work_dir=""
@@ -85,7 +85,9 @@ tar -xzf "$archive_file" -C "$extract_dir" --no-same-owner --no-same-permissions
 mapfile -t archive_roots < <(find "$extract_dir" -mindepth 1 -maxdepth 1 -type d -print)
 [[ ${#archive_roots[@]} -eq 1 ]] || fail "Structure d'archive GitHub inattendue."
 source_dir=${archive_roots[0]}
-[[ ${source_dir##*/} == *-${manifest_commit:0:7} ]] || fail \
+archive_commit=${source_dir##*/}
+archive_commit=${archive_commit##*-}
+[[ $archive_commit =~ ^[0-9a-f]{7,40}$ && $manifest_commit == "$archive_commit"* ]] || fail \
     "L'archive GitHub ne correspond pas au commit du manifeste."
 [[ -f $source_dir/deploy/scripts/install-debian.sh ]] || fail "Installateur absent de l'archive."
 [[ -z $(find "$source_dir" -type l -print -quit) ]] || fail "Les liens symboliques sont interdits."
