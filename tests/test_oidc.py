@@ -117,6 +117,21 @@ def test_oidc_login_provisions_user_and_does_not_persist_tokens():
     dispose(app)
 
 
+def test_oidc_browser_callback_returns_to_the_portal():
+    app = make_app(FakeOIDCClient())
+    client = app.test_client()
+    assert client.get("/auth/oidc/login").status_code == 302
+
+    response = client.get(
+        "/auth/oidc/callback", headers={"Accept": "text/html,application/xhtml+xml"}
+    )
+
+    assert response.status_code == 302
+    assert response.headers["Location"] == "/"
+    assert client.get("/api/me").status_code == 200
+    dispose(app)
+
+
 def test_oidc_role_is_synchronized_on_each_login():
     fake = FakeOIDCClient()
     app = make_app(fake)

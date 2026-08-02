@@ -15,7 +15,16 @@ from typing import Any
 import click
 from authlib.integrations.base_client.errors import OAuthError
 from authlib.integrations.flask_client import OAuth
-from flask import Flask, g, jsonify, request, session
+from flask import (
+    Flask,
+    g,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    session,
+    url_for,
+)
 from flask_migrate import Migrate
 from requests import RequestException
 from sqlalchemy import func, select
@@ -198,7 +207,8 @@ def create_app(
     @app.after_request
     def add_security_headers(response):
         response.headers["Content-Security-Policy"] = (
-            "default-src 'none'; frame-ancestors 'none'; "
+            "default-src 'none'; script-src 'self'; style-src 'self'; "
+            "img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; "
             "base-uri 'none'; form-action 'self'"
         )
         response.headers["X-Content-Type-Options"] = "nosniff"
@@ -323,10 +333,10 @@ def create_app(
 
     @app.get("/")
     def home():
-        return (
-            "<!doctype html><title>Portail Proxmox</title>"
-            "<h1>Portail Proxmox</h1>"
-            "<p>MVP de provisionnement sécurisé.</p>"
+        return render_template(
+            "index.html",
+            local_auth_enabled=app.config["PORTAL_LOCAL_AUTH_ENABLED"],
+            oidc_enabled=oidc is not None,
         )
 
     @app.post("/login")
@@ -500,6 +510,8 @@ def create_app(
         )
         db.session.commit()
         csrf_token = establish_session(user, "oidc")
+        if request.accept_mimetypes.accept_html and not request.accept_mimetypes.accept_json:
+            return redirect(url_for("home"))
         return jsonify(
             status="authenticated", csrf_token=csrf_token, user=user.public_dict()
         )
@@ -522,7 +534,11 @@ def create_app(
     @app.get("/api/me")
     @login_required
     def me():
-        return jsonify(user=g.current_user.public_dict(), usage=_quota_usage(g.current_user.id))
+        return jsonify(
+            user=g.current_user.public_dict(),
+            usage=_quota_usage(g.current_user.id),
+            csrf_token=session["csrf_token"],
+        )
 
     @app.get("/api/nodes")
     @login_required

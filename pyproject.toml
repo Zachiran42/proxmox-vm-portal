@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "proxmox-vm-portal"
-version = "0.9.0"
-description = "Portail MVP sécurisé de provisionnement Proxmox"
+version = "0.10.0"
+description = "Portail Web sécurisé de provisionnement Proxmox"
 requires-python = ">=3.11"
 dependencies = [
     "Authlib>=1.7,<2",
@@ -38,3 +38,6 @@ disable_error_code = ["name-defined"]
 
 [tool.setuptools]
 packages = ["portal"]
+
+[tool.setuptools.package-data]
+portal = ["templates/*.html", "static/*.css", "static/*.js"]

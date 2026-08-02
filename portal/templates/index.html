@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Portail Proxmox</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='portal.css') }}">
+  <script src="{{ url_for('static', filename='portal.js') }}" defer></script>
+</head>
+<body data-local-auth="{{ local_auth_enabled|lower }}" data-oidc="{{ oidc_enabled|lower }}">
+  <section class="login-screen" id="login-screen" aria-labelledby="login-title">
+    <div class="login-brand" aria-hidden="true">
+      <div class="brand-mark brand-mark-large">P</div>
+      <div>
+        <span class="eyebrow eyebrow-light">Infrastructure privée</span>
+        <h1>Vos machines.<br>À votre rythme.</h1>
+        <p>Un catalogue maîtrisé pour déployer des VM Proxmox sans accès root ni manipulation sensible.</p>
+      </div>
+      <div class="security-note"><span class="security-icon">✓</span><span>Accès temporaires et traçabilité intégrée</span></div>
+    </div>
+
+    <div class="login-panel">
+      <form class="login-card" id="login-form">
+        <div class="mobile-brand"><div class="brand-mark">P</div><strong>Portail Proxmox</strong></div>
+        <span class="eyebrow">Espace sécurisé</span>
+        <h2 id="login-title">Bienvenue</h2>
+        <p class="subtle">Connectez-vous pour gérer le catalogue d’images.</p>
+
+        <div id="local-login-fields">
+          <label for="username">Identifiant</label>
+          <input id="username" name="username" autocomplete="username" maxlength="128" required>
+          <label for="password">Mot de passe</label>
+          <input id="password" name="password" type="password" autocomplete="current-password" required>
+          <button class="button button-primary button-wide" type="submit" id="login-button">Se connecter</button>
+        </div>
+
+        <p class="form-error" id="login-error" role="alert" hidden></p>
+        <div class="separator" id="login-separator"><span>ou</span></div>
+        <a class="button button-secondary button-wide" id="oidc-login" href="/auth/oidc/login">Continuer avec Keycloak</a>
+        <p class="privacy-copy">Votre session est chiffrée et expire automatiquement après inactivité.</p>
+      </form>
+    </div>
+  </section>
+
+  <div class="app-shell" id="app-shell" hidden>
+    <aside class="sidebar">
+      <div class="sidebar-brand"><div class="brand-mark">P</div><div><strong>Portail</strong><span>Proxmox</span></div></div>
+      <nav aria-label="Navigation principale">
+        <a class="nav-link active" href="#catalogue" aria-current="page"><span>◫</span> Images</a>
+      </nav>
+      <div class="sidebar-footer">
+        <div class="service-state"><span></span> Services opérationnels</div>
+        <p>Console d’administration privée</p>
+      </div>
+    </aside>
+
+    <main class="content" id="catalogue">
+      <header class="topbar">
+        <span class="mobile-title">Portail Proxmox</span>
+        <div class="user-menu">
+          <div class="avatar" id="user-avatar">A</div>
+          <div class="user-copy"><strong id="user-name">—</strong><span id="user-role">—</span></div>
+          <button class="text-button" type="button" id="logout-button">Déconnexion</button>
+        </div>
+      </header>
+
+      <div class="page">
+        <div class="page-heading">
+          <div><span class="eyebrow">Catalogue approuvé</span><h1>Images de machines</h1><p>Publiez uniquement des sources validées et prêtes à être provisionnées.</p></div>
+          <button class="button button-primary" type="button" id="open-profile-dialog">+ Nouvelle image</button>
+        </div>
+
+        <section class="stats" aria-label="Résumé du catalogue">
+          <article><span class="stat-icon stat-green">●</span><div><strong id="stat-active">0</strong><span>Images actives</span></div></article>
+          <article><span class="stat-icon stat-blue">◇</span><div><strong id="stat-cloud">0</strong><span>Accès automatisés</span></div></article>
+          <article><span class="stat-icon stat-amber">◷</span><div><strong id="stat-disabled">0</strong><span>Images suspendues</span></div></article>
+        </section>
+
+        <section class="catalogue-section" aria-labelledby="profiles-title">
+          <div class="section-heading">
+            <div><h2 id="profiles-title">Profils disponibles</h2><p id="profile-count">Chargement du catalogue…</p></div>
+            <button class="icon-button" type="button" id="refresh-profiles" aria-label="Actualiser le catalogue">↻</button>
+          </div>
+          <div class="profile-grid" id="profile-grid" aria-live="polite"></div>
+          <div class="empty-state" id="empty-state" hidden><span>□</span><h3>Aucune image publiée</h3><p>Ajoutez votre premier template ou ISO approuvé.</p></div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <dialog id="profile-dialog" aria-labelledby="dialog-title">
+    <form id="profile-form">
+      <div class="dialog-heading">
+        <div><span class="eyebrow">Publication contrôlée</span><h2 id="dialog-title">Nouvelle image</h2></div>
+        <button class="close-button" type="button" id="close-profile-dialog" aria-label="Fermer">×</button>
+      </div>
+      <p class="dialog-intro">La source sera vérifiée côté serveur avant d’apparaître dans le catalogue.</p>
+
+      <fieldset class="type-picker">
+        <legend>Type de source</legend>
+        <label><input type="radio" name="source_type" value="cloud_init" checked><span><strong>Template cloud-init</strong><small>Compte sudo et accès automatique</small></span></label>
+        <label><input type="radio" name="source_type" value="iso"><span><strong>ISO Proxmox</strong><small>Installation manuelle dans la VM</small></span></label>
+      </fieldset>
+
+      <div class="form-row">
+        <div><label for="profile-label">Nom affiché</label><input id="profile-label" name="label" maxlength="100" placeholder="Debian 13 Cloud" required></div>
+        <div><label for="profile-slug">Identifiant</label><input id="profile-slug" name="slug" maxlength="63" pattern="[a-z0-9][a-z0-9-]{0,62}" placeholder="debian-13-cloud" required></div>
+      </div>
+      <label for="profile-description">Description</label>
+      <textarea id="profile-description" name="description" maxlength="500" rows="3" placeholder="Template durci et validé"></textarea>
+
+      <div id="cloud-fields">
+        <div class="form-row">
+          <div><label for="template-node">Nœud du template</label><select id="template-node" name="template_node"></select></div>
+          <div><label for="template-vmid">VMID du template</label><input id="template-vmid" name="template_vmid" type="number" min="100" max="999999999" placeholder="9130"></div>
+        </div>
+        <p class="field-help">Proxmox confirmera que ce VMID est bien converti en template.</p>
+      </div>
+
+      <div id="iso-fields" hidden>
+        <label for="iso-node">Nœud utilisé pour découvrir les ISO</label>
+        <select id="iso-node"></select>
+        <label for="profile-iso">ISO approuvée</label>
+        <select id="profile-iso" name="iso"></select>
+      </div>
+
+      <p class="form-error" id="profile-error" role="alert" hidden></p>
+      <div class="dialog-actions">
+        <button class="button button-secondary" type="button" id="cancel-profile">Annuler</button>
+        <button class="button button-primary" type="submit" id="publish-profile">Vérifier et publier</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

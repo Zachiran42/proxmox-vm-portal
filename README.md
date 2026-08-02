@@ -1,8 +1,8 @@
 # Portail Proxmox VM
 
-MVP Flask de demande de provisionnement de VM Proxmox, avec comptes locaux,
-rôles, quotas et journal d'audit PostgreSQL. Aucun secret n'est stocké dans le
-dépôt.
+Portail Web Flask de provisionnement de VM Proxmox, avec catalogue d'images,
+comptes locaux, rôles, quotas et journal d'audit PostgreSQL. Aucun secret n'est
+stocké dans le dépôt.
 
 ## Sécurité intégrée
 
@@ -51,6 +51,10 @@ flask --app 'portal:create_app' run
 # Dans un second service/processus :
 flask --app 'portal:create_app' worker
 ```
+
+L'interface Web est disponible sur `/`. Un administrateur peut y publier,
+contrôler, suspendre et réactiver les profils d'images ; les autres rôles voient
+le catalogue actif en lecture seule.
 
 En production, servez l'application derrière TLS avec un serveur WSGI et conservez `PORTAL_SESSION_COOKIE_SECURE=true`. N'activez pas le mode debug.
 
