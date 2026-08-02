@@ -33,6 +33,17 @@ un second UPID de démarrage. Une remise échouée remplace le mot de passe avan
 chaque nouvelle tentative ; un éventuel lien orphelin ne contient donc plus un
 secret valide.
 
+## Cycle de vie
+
+Les opérations `start`, `stop`, `reboot` et `delete` utilisent la table
+`vm_operations`. Un index unique partiel interdit deux opérations actives sur
+une même VM. Le worker revalide l’état et le VMID avant soumission, puis suit le
+`UPID` comme pour le provisionnement. Un crash pendant la soumission place
+l’opération en revue manuelle afin de ne jamais la rejouer aveuglément.
+
+Une suppression réussie passe l’allocation à `deleted`, efface le lien de remise
+d’accès restant et libère alors seulement CPU, RAM, disque et compteur de VM.
+
 ## Exploitation
 
 Les états `submitting` et `attention` doivent déclencher une alerte. Avant toute

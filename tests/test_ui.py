@@ -39,6 +39,8 @@ def test_portal_shell_loads_self_hosted_assets_and_strict_csp(app):
     assert "Images de machines" in html
     assert "Mes machines" in html
     assert 'id="vm-form"' in html
+    assert 'id="vm-action-dialog"' in html
+    assert 'id="vm-confirm-name"' in html
     assert 'id="job-list"' in html
     assert "Password Pusher" in html
     assert 'id="admin-view"' in html

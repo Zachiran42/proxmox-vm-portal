@@ -17,7 +17,7 @@
     "/storage/portal-vm": ["Datastore.AllocateSpace", "Datastore.Audit"]
   },
   "required_paths": {
-    "/pool/portal-vms": ["VM.Allocate", "VM.Audit"],
+    "/pool/portal-vms": ["VM.Allocate", "VM.Audit", "VM.PowerMgmt"],
     "/storage/portal-iso": ["Datastore.Audit"],
     "/storage/portal-vm": ["Datastore.AllocateSpace"]
   },

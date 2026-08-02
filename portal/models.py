@@ -5,13 +5,13 @@ from datetime import UTC, datetime
 from typing import Any
 
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import CheckConstraint, Index, UniqueConstraint
+from sqlalchemy import CheckConstraint, Index, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 db = SQLAlchemy()
 
 ROLES = ("admin", "operator", "user")
-ACTIVE_VM_STATUSES = ("queued", "provisioning", "accepted", "running")
+ACTIVE_VM_STATUSES = ("queued", "provisioning", "accepted", "running", "stopped")
 
 
 def utcnow() -> datetime:
@@ -124,7 +124,7 @@ class VMAllocation(db.Model):
     __tablename__ = "vm_allocations"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('queued', 'provisioning', 'accepted', 'running', 'failed', 'deleted')",
+            "status IN ('queued', 'provisioning', 'accepted', 'running', 'stopped', 'failed', 'deleted')",
             name="ck_vm_allocations_status",
         ),
         UniqueConstraint("owner_id", "name", name="uq_vm_allocations_owner_name"),
@@ -167,6 +167,11 @@ class VMAllocation(db.Model):
     profile: Mapped[ImageProfile | None] = relationship()
     job: Mapped[ProvisioningJob | None] = relationship(
         back_populates="allocation", uselist=False
+    )
+    operations: Mapped[list[VMOperation]] = relationship(
+        back_populates="allocation",
+        cascade="all, delete-orphan",
+        order_by="VMOperation.created_at",
     )
 
 
@@ -213,6 +218,9 @@ class ProvisioningJob(db.Model):
     allocation: Mapped[VMAllocation] = relationship(back_populates="job")
 
     def public_dict(self, *, include_credentials: bool = False) -> dict[str, Any]:
+        latest_operation = (
+            self.allocation.operations[-1] if self.allocation.operations else None
+        )
         result: dict[str, Any] = {
             "id": self.id,
             "vm_id": self.allocation_id,
@@ -232,8 +240,11 @@ class ProvisioningJob(db.Model):
                 "ram_mb": self.allocation.ram_mb,
                 "disk_gb": self.allocation.disk_gb,
                 "guest_username": self.allocation.guest_username,
+                "status": self.allocation.status,
             },
         }
+        if latest_operation is not None:
+            result["operation"] = latest_operation.public_dict()
         if include_credentials and self.allocation.credential_url:
             result["guest_access"] = {
                 "username": self.allocation.guest_username,
@@ -242,6 +253,72 @@ class ProvisioningJob(db.Model):
                 "expire_after_views": self.allocation.credential_expire_views,
             }
         return result
+
+
+class VMOperation(db.Model):
+    __tablename__ = "vm_operations"
+    __table_args__ = (
+        CheckConstraint(
+            "action IN ('start', 'stop', 'reboot', 'delete')",
+            name="ck_vm_operations_action",
+        ),
+        CheckConstraint(
+            "status IN ('queued', 'submitting', 'submitted', 'polling', "
+            "'succeeded', 'failed', 'attention')",
+            name="ck_vm_operations_status",
+        ),
+        Index("ix_vm_operations_status_available", "status", "available_at"),
+        Index(
+            "uq_vm_operations_active_allocation",
+            "allocation_id",
+            unique=True,
+            postgresql_where=text(
+                "status IN ('queued', 'submitting', 'submitted', 'polling')"
+            ),
+            sqlite_where=text(
+                "status IN ('queued', 'submitting', 'submitted', 'polling')"
+            ),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        db.String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    allocation_id: Mapped[str] = mapped_column(
+        db.ForeignKey("vm_allocations.id", ondelete="CASCADE"), nullable=False
+    )
+    actor_user_id: Mapped[int | None] = mapped_column(
+        db.ForeignKey("users.id", ondelete="SET NULL")
+    )
+    action: Mapped[str] = mapped_column(db.String(16), nullable=False)
+    status: Mapped[str] = mapped_column(db.String(16), nullable=False, default="queued")
+    upstream_node: Mapped[str | None] = mapped_column(db.String(63))
+    upstream_request_id: Mapped[str | None] = mapped_column(db.String(255))
+    available_at: Mapped[datetime] = mapped_column(
+        db.DateTime(timezone=True), nullable=False, default=utcnow
+    )
+    locked_at: Mapped[datetime | None] = mapped_column(db.DateTime(timezone=True))
+    locked_by: Mapped[str | None] = mapped_column(db.String(128))
+    error_code: Mapped[str | None] = mapped_column(db.String(80))
+    created_at: Mapped[datetime] = mapped_column(
+        db.DateTime(timezone=True), nullable=False, default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        db.DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(db.DateTime(timezone=True))
+
+    allocation: Mapped[VMAllocation] = relationship(back_populates="operations")
+
+    def public_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "action": self.action,
+            "status": self.status,
+            "error_code": self.error_code,
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+        }
 
 
 class AuditEvent(db.Model):

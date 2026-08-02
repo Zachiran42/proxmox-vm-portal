@@ -22,7 +22,10 @@ const elements = Object.fromEntries(
     "close-user-dialog", "cancel-user", "save-user", "managed-username", "managed-role",
     "managed-password", "password-optional", "identity-help", "managed-quota-vms",
     "managed-quota-cpu", "managed-quota-ram", "managed-quota-disk", "active-checkbox",
-    "managed-active", "user-error"
+    "managed-active", "user-error", "vm-action-dialog", "vm-action-form", "vm-action-id",
+    "vm-action-kind", "vm-action-title", "vm-action-intro", "vm-delete-confirmation",
+    "vm-confirm-name", "vm-confirm-expected", "vm-action-error", "close-vm-action",
+    "cancel-vm-action", "submit-vm-action"
   ].map((id) => [id, document.getElementById(id)])
 );
 
@@ -42,6 +45,10 @@ function errorMessage(payload, fallback) {
     self_admin_protection: "Vous ne pouvez pas désactiver ou rétrograder votre propre compte administrateur.",
     last_admin_protection: "Le dernier administrateur actif doit être conservé.",
     external_identity_managed: "Le rôle et le mot de passe de cette identité sont gérés dans Keycloak.",
+    vm_not_ready: "Cette machine n’est pas encore prête.",
+    confirmation_mismatch: "Le nom saisi ne correspond pas à la machine.",
+    lifecycle_invalid_state: "Cette action n’est pas disponible dans l’état actuel.",
+    operation_in_progress: "Une opération est déjà en cours sur cette machine.",
     forbidden: "Cette action est réservée aux administrateurs."
   };
   return (payload && known[payload.error]) || fallback;
@@ -320,6 +327,12 @@ const statusLabels = {
   submitted: "En cours", polling: "En cours", succeeded: "Prête",
   failed: "Échec", attention: "À vérifier"
 };
+const vmStatusLabels = {
+  queued: "Réservée", provisioning: "Provisionnement", accepted: "Prête",
+  running: "Démarrée", stopped: "Arrêtée", failed: "Échec", deleted: "Supprimée"
+};
+const operationLabels = { start: "Démarrage", stop: "Arrêt", reboot: "Redémarrage", delete: "Suppression" };
+const activeOperationStatuses = new Set(["queued", "submitting", "submitted", "polling"]);
 const jobErrorLabels = {
   iso_unavailable: "ISO indisponible sur ce nœud",
   template_unavailable: "Template indisponible",
@@ -347,7 +360,7 @@ function renderJob(job) {
   const identity = document.createElement("div");
   appendText(identity, "strong", job.vm.name);
   const placement = `${job.vm.node}${job.vm.vmid ? ` · VMID ${job.vm.vmid}` : " · VMID en attente"}`;
-  appendText(identity, "span", placement);
+  appendText(identity, "span", `${placement} · ${vmStatusLabels[job.vm.status] || job.vm.status}`);
   main.append(identity);
   card.append(main);
 
@@ -367,9 +380,36 @@ function renderJob(job) {
     access.rel = "noopener noreferrer";
     access.title = `Compte ${job.guest_access.username} · ${job.guest_access.expire_after_views} vue(s) maximum`;
   }
+  if (job.operation && activeOperationStatuses.has(job.operation.status)) {
+    appendText(result, "span", `${operationLabels[job.operation.action]} en cours`, "job-status status-progress");
+  } else if (job.operation?.status === "attention") {
+    appendText(result, "span", `${operationLabels[job.operation.action]} à vérifier`, "job-error");
+  }
   appendText(result, "span", statusLabels[job.status] || job.status, `job-status ${jobStatusClass(job.status)}`);
+  const controls = lifecycleControls(job);
+  if (controls.length) {
+    const actions = document.createElement("div");
+    actions.className = "vm-actions";
+    controls.forEach(({ action, label, danger }) => {
+      const button = appendText(actions, "button", label, `vm-action-button${danger ? " danger" : ""}`);
+      button.type = "button";
+      button.addEventListener("click", () => openVmActionDialog(job, action));
+    });
+    result.append(actions);
+  }
   card.append(result);
   return card;
+}
+
+function lifecycleControls(job) {
+  if (job.status !== "succeeded" || activeOperationStatuses.has(job.operation?.status)) return [];
+  if (["accepted", "stopped"].includes(job.vm.status)) {
+    return [{ action: "start", label: "Démarrer" }, { action: "delete", label: "Supprimer", danger: true }];
+  }
+  if (job.vm.status === "running") {
+    return [{ action: "stop", label: "Arrêter" }, { action: "reboot", label: "Redémarrer" }];
+  }
+  return [];
 }
 
 function renderJobs() {
@@ -380,7 +420,7 @@ function renderJobs() {
 
 function scheduleJobPoll() {
   window.clearTimeout(state.pollTimer);
-  if (state.jobs.some((job) => !terminalStatuses.has(job.status))) {
+  if (state.jobs.some((job) => !terminalStatuses.has(job.status) || activeOperationStatuses.has(job.operation?.status))) {
     state.pollTimer = window.setTimeout(loadJobs, 5000);
   }
 }
@@ -388,7 +428,11 @@ function scheduleJobPoll() {
 async function loadJobs() {
   elements["refresh-jobs"].disabled = true;
   try {
-    state.jobs = (await api("/api/jobs")).jobs;
+    const [history, session] = await Promise.all([api("/api/jobs"), api("/api/me")]);
+    state.jobs = history.jobs;
+    state.usage = session.usage;
+    state.csrfToken = session.csrf_token;
+    renderQuotas();
     renderJobs();
     scheduleJobPoll();
   } catch (error) {
@@ -396,6 +440,55 @@ async function loadJobs() {
     elements["job-count"].textContent = error.message;
   } finally {
     elements["refresh-jobs"].disabled = false;
+  }
+}
+
+const vmActionCopy = {
+  start: ["Démarrer la machine", "Proxmox recevra une demande de démarrage suivie jusqu’à son résultat."],
+  stop: ["Arrêter la machine", "Un arrêt propre du système invité sera demandé à Proxmox."],
+  reboot: ["Redémarrer la machine", "Le système invité sera redémarré et l’opération sera journalisée."],
+  delete: ["Supprimer définitivement", "Cette opération détruit la VM et ses disques dans Proxmox."]
+};
+
+function openVmActionDialog(job, action) {
+  elements["vm-action-form"].reset();
+  elements["vm-action-id"].value = job.vm_id;
+  elements["vm-action-kind"].value = action;
+  elements["vm-action-title"].textContent = vmActionCopy[action][0];
+  elements["vm-action-intro"].textContent = `${job.vm.name} · ${vmActionCopy[action][1]}`;
+  elements["vm-delete-confirmation"].hidden = action !== "delete";
+  elements["vm-confirm-name"].required = action === "delete";
+  elements["vm-confirm-expected"].textContent = job.vm.name;
+  elements["submit-vm-action"].classList.toggle("button-danger", action === "delete");
+  showError(elements["vm-action-error"], "");
+  elements["vm-action-dialog"].showModal();
+  if (action === "delete") elements["vm-confirm-name"].focus();
+  else elements["submit-vm-action"].focus();
+}
+
+function closeVmActionDialog() {
+  elements["vm-action-dialog"].close();
+}
+
+async function submitVmAction(event) {
+  event.preventDefault();
+  const action = elements["vm-action-kind"].value;
+  const payload = { action };
+  if (action === "delete") payload.confirm_name = elements["vm-confirm-name"].value;
+  showError(elements["vm-action-error"], "");
+  setBusy(elements["submit-vm-action"], true, "Transmission…");
+  try {
+    await api(`/api/vms/${encodeURIComponent(elements["vm-action-id"].value)}/actions`, {
+      method: "POST", body: JSON.stringify(payload)
+    });
+    closeVmActionDialog();
+    showToast(`${operationLabels[action]} placé dans la file.`);
+    await loadJobs();
+  } catch (error) {
+    if (error.status === 401) return showLogin();
+    showError(elements["vm-action-error"], error.message);
+  } finally {
+    setBusy(elements["submit-vm-action"], false, "");
   }
 }
 
@@ -731,6 +824,9 @@ elements["open-vm-dialog"].addEventListener("click", openVmDialog);
 elements["close-vm-dialog"].addEventListener("click", closeVmDialog);
 elements["cancel-vm"].addEventListener("click", closeVmDialog);
 elements["vm-form"].addEventListener("submit", submitVm);
+elements["close-vm-action"].addEventListener("click", closeVmActionDialog);
+elements["cancel-vm-action"].addEventListener("click", closeVmActionDialog);
+elements["vm-action-form"].addEventListener("submit", submitVmAction);
 elements["vm-profile"].addEventListener("change", updateGuestAccessField);
 elements["refresh-jobs"].addEventListener("click", loadJobs);
 [elements["vm-cpu"], elements["vm-ram"], elements["vm-disk"]].forEach((input) => input.addEventListener("input", updateQuotaPreview));
@@ -758,6 +854,9 @@ elements["profile-dialog"].addEventListener("click", (event) => {
 });
 elements["vm-dialog"].addEventListener("click", (event) => {
   if (event.target === elements["vm-dialog"]) closeVmDialog();
+});
+elements["vm-action-dialog"].addEventListener("click", (event) => {
+  if (event.target === elements["vm-action-dialog"]) closeVmActionDialog();
 });
 elements["user-dialog"].addEventListener("click", (event) => {
   if (event.target === elements["user-dialog"]) closeUserDialog();

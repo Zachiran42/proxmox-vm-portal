@@ -222,9 +222,32 @@ def test_configure_cloud_init_and_start_use_exact_allowlisted_payloads(client):
     )
 
 
+def test_lifecycle_methods_use_exact_proxmox_endpoints(client):
+    with patch.object(
+        client,
+        "_request",
+        side_effect=["UPID:stop", "UPID:reboot", "UPID:delete"],
+    ) as request:
+        assert client.stop_vm("pve-a", 101) == "UPID:stop"
+        assert client.reboot_vm("pve-a", 101) == "UPID:reboot"
+        assert client.delete_vm("pve-a", 101) == "UPID:delete"
+
+    assert request.call_args_list[0].args == (
+        "/nodes/pve-a/qemu/101/status/shutdown",
+    )
+    assert request.call_args_list[1].args == (
+        "/nodes/pve-a/qemu/101/status/reboot",
+    )
+    assert request.call_args_list[2].args == ("/nodes/pve-a/qemu/101",)
+    assert request.call_args_list[2].kwargs == {
+        "method": "DELETE",
+        "payload": {"purge": 1, "destroy-unreferenced-disks": 1},
+    }
+
+
 def test_start_rejects_missing_upid(client):
     with patch.object(client, "_request", return_value=None):
-        with pytest.raises(PVEProtocolError, match="démarrage"):
+        with pytest.raises(PVEProtocolError, match="tâche"):
             client.start_vm("pve-a", 101)
 
 

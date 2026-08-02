@@ -42,6 +42,7 @@ from .models import (
     ProvisioningJob,
     User,
     VMAllocation,
+    VMOperation,
     db,
 )
 from .oidc import (
@@ -57,6 +58,7 @@ from .validation import (
     UserCreateRequest,
     UserUpdateRequest,
     ValidationError,
+    VMActionRequest,
     VMRequest,
     validate_node_name,
 )
@@ -872,6 +874,74 @@ def create_app(
         )
         db.session.commit()
         return jsonify(status="queued", job_id=job.id, vm_id=allocation.id), 202
+
+    @app.post("/api/vms/<vm_id>/actions")
+    @login_required
+    @csrf_protected
+    def request_vm_action(vm_id: str):
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify(errors={"body": "Un objet JSON est requis."}), 400
+        try:
+            action_request = VMActionRequest.from_dict(payload)
+        except ValidationError as error:
+            return jsonify(errors=error.errors), 400
+
+        allocation = db.session.scalar(
+            select(VMAllocation)
+            .where(VMAllocation.id == vm_id)
+            .with_for_update()
+        )
+        if allocation is None or allocation.owner_id != g.current_user.id:
+            _add_audit(
+                action="vm.lifecycle",
+                target_type="vm",
+                target_id=vm_id,
+                outcome="denied",
+                actor_user_id=g.current_user.id,
+                details={"reason": "not_found_or_not_owner"},
+            )
+            db.session.commit()
+            return jsonify(error="not_found"), 404
+        if allocation.vmid is None:
+            return jsonify(error="vm_not_ready"), 409
+        if (
+            action_request.action == "delete"
+            and not compare_digest(action_request.confirm_name or "", allocation.name)
+        ):
+            return jsonify(error="confirmation_mismatch"), 409
+
+        allowed_states = {
+            "start": {"accepted", "stopped"},
+            "stop": {"accepted", "running"},
+            "reboot": {"running"},
+            "delete": {"accepted", "stopped"},
+        }
+        if allocation.status not in allowed_states[action_request.action]:
+            return jsonify(error="lifecycle_invalid_state"), 409
+        active_operation = db.session.scalar(
+            select(VMOperation.id).where(
+                VMOperation.allocation_id == allocation.id,
+                VMOperation.status.in_(
+                    ("queued", "submitting", "submitted", "polling")
+                ),
+            )
+        )
+        if active_operation is not None:
+            return jsonify(error="operation_in_progress"), 409
+
+        operation = VMOperation(
+            allocation_id=allocation.id,
+            actor_user_id=g.current_user.id,
+            action=action_request.action,
+        )
+        db.session.add(operation)
+        try:
+            db.session.commit()
+        except IntegrityError:
+            db.session.rollback()
+            return jsonify(error="operation_in_progress"), 409
+        return jsonify(operation=operation.public_dict()), 202
 
     def _reserve_allocation(
         user_id: int, vm_request: VMRequest, profile: ImageProfile

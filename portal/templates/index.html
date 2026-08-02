@@ -244,6 +244,28 @@
     </form>
   </dialog>
 
+  <dialog id="vm-action-dialog" aria-labelledby="vm-action-title">
+    <form id="vm-action-form">
+      <input id="vm-action-id" type="hidden">
+      <input id="vm-action-kind" type="hidden">
+      <div class="dialog-heading">
+        <div><span class="eyebrow">Cycle de vie</span><h2 id="vm-action-title">Confirmer l’action</h2></div>
+        <button class="close-button" type="button" id="close-vm-action" aria-label="Fermer">×</button>
+      </div>
+      <p class="dialog-intro" id="vm-action-intro"></p>
+      <div id="vm-delete-confirmation" hidden>
+        <label for="vm-confirm-name">Saisissez le nom exact <strong id="vm-confirm-expected"></strong></label>
+        <input id="vm-confirm-name" maxlength="63" autocomplete="off">
+        <p class="field-help">La suppression est définitive et libérera les quotas uniquement après confirmation par Proxmox.</p>
+      </div>
+      <p class="form-error" id="vm-action-error" role="alert" hidden></p>
+      <div class="dialog-actions">
+        <button class="button button-secondary" type="button" id="cancel-vm-action">Annuler</button>
+        <button class="button button-primary" type="submit" id="submit-vm-action">Confirmer</button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog id="profile-dialog" aria-labelledby="dialog-title">
     <form id="profile-form">
       <div class="dialog-heading">

@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
-from .models import AuditEvent, ProvisioningJob, db
+from .models import AuditEvent, ProvisioningJob, VMOperation, db
 from .password_pusher import PasswordPusherError
 from .pve import PVEHTTPError, PVEProtocolError, PVETransportError
 
@@ -22,7 +22,12 @@ def process_next_job(
     _recover_stale_jobs(lease_seconds)
     claimed = _claim_job(worker_id)
     if claimed is None:
-        return False
+        return _process_next_operation(
+            pve_client,
+            worker_id=worker_id,
+            poll_seconds=poll_seconds,
+            lease_seconds=lease_seconds,
+        )
     job_id, phase = claimed
     if phase == "validating":
         _submit_job(pve_client, job_id, poll_seconds)
@@ -239,7 +244,7 @@ def _complete(job: ProvisioningJob) -> None:
     job.completed_at = datetime.now(UTC)
     job.locked_at = None
     job.locked_by = None
-    job.allocation.status = "accepted"
+    job.allocation.status = "running" if job.stage == "start" else "accepted"
     _audit(job, "success", {"name": job.allocation.name})
     db.session.commit()
 
@@ -318,4 +323,206 @@ def _recover_stale_jobs(lease_seconds: int) -> None:
         job.locked_at = None
         job.locked_by = None
     if jobs:
+        db.session.commit()
+
+
+def _process_next_operation(
+    pve_client,
+    *,
+    worker_id: str,
+    poll_seconds: int,
+    lease_seconds: int,
+) -> bool:
+    _recover_stale_operations(lease_seconds)
+    claimed = _claim_operation(worker_id)
+    if claimed is None:
+        return False
+    operation_id, phase = claimed
+    if phase == "submitting":
+        _submit_operation(pve_client, operation_id, poll_seconds)
+    else:
+        _poll_operation(pve_client, operation_id, poll_seconds)
+    return True
+
+
+def _claim_operation(worker_id: str) -> tuple[str, str] | None:
+    now = datetime.now(UTC)
+    operation = db.session.scalar(
+        select(VMOperation)
+        .where(
+            VMOperation.status.in_(("queued", "submitted")),
+            VMOperation.available_at <= now,
+        )
+        .order_by(VMOperation.available_at, VMOperation.created_at)
+        .with_for_update(skip_locked=True)
+    )
+    if operation is None:
+        db.session.rollback()
+        return None
+    operation.status = "submitting" if operation.status == "queued" else "polling"
+    operation.locked_at = now
+    operation.locked_by = worker_id[:128]
+    db.session.commit()
+    return operation.id, operation.status
+
+
+def _submit_operation(pve_client, operation_id: str, poll_seconds: int) -> None:
+    operation = db.session.get(VMOperation, operation_id)
+    if operation is None:
+        return
+    allocation = operation.allocation
+    allowed_states = {
+        "start": {"accepted", "stopped"},
+        "stop": {"accepted", "running"},
+        "reboot": {"running"},
+        "delete": {"accepted", "stopped"},
+    }
+    if allocation.vmid is None or allocation.status not in allowed_states[operation.action]:
+        _fail_operation(operation, "lifecycle_invalid_state")
+        return
+
+    method = getattr(pve_client, f"{operation.action}_vm")
+    try:
+        upid = method(allocation.node, allocation.vmid)
+    except PVEHTTPError as error:
+        if error.status is not None and 400 <= error.status < 500 and error.status not in {408, 429}:
+            _fail_operation(operation, "pve_operation_rejected")
+        else:
+            _attention_operation(operation, "pve_operation_unknown")
+        return
+    except (PVETransportError, PVEProtocolError):
+        _attention_operation(operation, "pve_operation_unknown")
+        return
+
+    operation.upstream_node = allocation.node
+    operation.upstream_request_id = upid
+    _reschedule_operation(operation, "submitted", poll_seconds)
+
+
+def _poll_operation(pve_client, operation_id: str, poll_seconds: int) -> None:
+    operation = db.session.get(VMOperation, operation_id)
+    if operation is None:
+        return
+    if not operation.upstream_node or not operation.upstream_request_id:
+        _attention_operation(operation, "missing_upstream_task")
+        return
+    try:
+        result = pve_client.get_task_status(
+            operation.upstream_node, operation.upstream_request_id
+        )
+    except PVETransportError:
+        _reschedule_operation(
+            operation, "submitted", poll_seconds, "pve_temporarily_unavailable"
+        )
+        return
+    except (PVEHTTPError, PVEProtocolError):
+        _attention_operation(operation, "pve_task_status_unknown")
+        return
+    if result["status"] == "running":
+        _reschedule_operation(operation, "submitted", poll_seconds)
+    elif result.get("exitstatus") == "OK":
+        _complete_operation(operation)
+    else:
+        _fail_operation(operation, "pve_operation_failed")
+
+
+def _reschedule_operation(
+    operation: VMOperation,
+    status: str,
+    delay_seconds: int,
+    error_code: str | None = None,
+) -> None:
+    operation.status = status
+    operation.error_code = error_code
+    operation.available_at = datetime.now(UTC) + timedelta(seconds=delay_seconds)
+    operation.locked_at = None
+    operation.locked_by = None
+    db.session.commit()
+
+
+def _complete_operation(operation: VMOperation) -> None:
+    allocation = operation.allocation
+    allocation.status = {
+        "start": "running",
+        "stop": "stopped",
+        "reboot": "running",
+        "delete": "deleted",
+    }[operation.action]
+    if operation.action == "delete":
+        allocation.credential_url = None
+        allocation.credential_created_at = None
+        allocation.credential_expire_days = None
+        allocation.credential_expire_views = None
+    operation.status = "succeeded"
+    operation.error_code = None
+    operation.completed_at = datetime.now(UTC)
+    operation.locked_at = None
+    operation.locked_by = None
+    _audit_operation(operation, "success", {"name": allocation.name})
+    db.session.commit()
+
+
+def _fail_operation(operation: VMOperation, error_code: str) -> None:
+    operation.status = "failed"
+    operation.error_code = error_code
+    operation.completed_at = datetime.now(UTC)
+    operation.locked_at = None
+    operation.locked_by = None
+    _audit_operation(operation, "failure", {"error_code": error_code})
+    db.session.commit()
+
+
+def _attention_operation(operation: VMOperation, error_code: str) -> None:
+    operation.status = "attention"
+    operation.error_code = error_code
+    operation.completed_at = datetime.now(UTC)
+    operation.locked_at = None
+    operation.locked_by = None
+    _audit_operation(
+        operation,
+        "failure",
+        {"error_code": error_code, "manual_review": True},
+    )
+    db.session.commit()
+
+
+def _audit_operation(
+    operation: VMOperation, outcome: str, details: dict[str, object]
+) -> None:
+    db.session.add(
+        AuditEvent(
+            actor_user_id=operation.actor_user_id,
+            action=f"vm.{operation.action}",
+            target_type="vm",
+            target_id=operation.allocation_id,
+            outcome=outcome,
+            request_id=operation.id,
+            details=details,
+        )
+    )
+
+
+def _recover_stale_operations(lease_seconds: int) -> None:
+    cutoff = datetime.now(UTC) - timedelta(seconds=lease_seconds)
+    operations = db.session.scalars(
+        select(VMOperation).where(
+            VMOperation.status.in_(("submitting", "polling")),
+            VMOperation.locked_at < cutoff,
+        )
+    ).all()
+    for operation in operations:
+        if operation.status == "polling":
+            operation.status = "submitted"
+        else:
+            operation.status = "attention"
+            operation.error_code = "worker_crashed_during_operation"
+            operation.completed_at = datetime.now(UTC)
+            _audit_operation(
+                operation,
+                "failure",
+                {"reason": "worker_crashed_during_operation", "manual_review": True},
+            )
+        operation.locked_at = None
+        operation.locked_by = None
+    if operations:
         db.session.commit()

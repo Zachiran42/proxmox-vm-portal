@@ -187,6 +187,7 @@ def test_owner_can_list_recent_jobs_with_safe_vm_details(app, pve_client):
                 "ram_mb": 4096,
                 "disk_gb": 40,
                 "guest_username": None,
+                "status": "queued",
             },
         }
     ]

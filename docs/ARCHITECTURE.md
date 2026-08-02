@@ -96,7 +96,9 @@ d'administrateur, jamais une URL libre fournie par un utilisateur.
    guide de fédération livrés ; déploiement Keycloak à venir.**
 4. Introduire la file de travaux, le suivi Proxmox et les profils d'images.
    **Livré : profils ISO, clones cloud-init et construction Debian 13 sans
-   assistance par Packer/Preseed avec somme ISO épinglée.**
+   assistance par Packer/Preseed avec somme ISO épinglée. Le démarrage, l’arrêt,
+   le redémarrage et la suppression contrôlée utilisent également une file
+   persistante et un suivi UPID.**
 5. Ajouter la création du compte sudo et Password Pusher. **Livré pour les
    templates cloud-init prévalidés, avec remise réservée au propriétaire.**
 6. Livrer Docker Compose, reverse proxy TLS, script d'installation Debian,

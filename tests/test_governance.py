@@ -364,9 +364,13 @@ def test_initial_migration_and_bootstrap_admin(tmp_path, pve_client):
     runner = app.test_cli_runner()
     assert runner.invoke(args=["db", "upgrade"]).exit_code == 0
     with app.app_context():
-        assert {"users", "vm_allocations", "audit_events", "alembic_version"} <= set(
-            inspect(db.engine).get_table_names()
-        )
+        assert {
+            "users",
+            "vm_allocations",
+            "vm_operations",
+            "audit_events",
+            "alembic_version",
+        } <= set(inspect(db.engine).get_table_names())
 
     first = runner.invoke(args=["bootstrap-admin"])
     second = runner.invoke(args=["bootstrap-admin"])

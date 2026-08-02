@@ -29,6 +29,9 @@ stocké dans le dépôt.
   pas conservés.
 - PostgreSQL porte une file de travaux verrouillée par worker. Le suivi du UPID
   Proxmox distingue réussite, échec et résultat ambigu nécessitant une revue.
+- Le démarrage, l’arrêt propre, le redémarrage et la suppression suivent la même
+  file persistante. Une seule opération peut être active par VM et les quotas ne
+  sont libérés qu’après confirmation de suppression par Proxmox.
 - Les profils cloud-init clonés créent un compte nominatif non-root ; son secret
   aléatoire n'est jamais persisté et seul un lien Password Pusher expirant est
   remis au propriétaire.
@@ -57,6 +60,8 @@ contrôler, suspendre et réactiver les profils d'images ; les autres rôles voi
 le catalogue actif en lecture seule. Chaque utilisateur dispose d'un assistant
 de création de VM, d'une vue de ses quotas et d'un historique privé actualisé
 automatiquement. Le lien Password Pusher n'y apparaît que pour le propriétaire.
+Les machines prêtes peuvent être démarrées, arrêtées et redémarrées depuis cette
+vue. La suppression définitive exige de saisir le nom exact de la VM.
 L'espace Administration permet de créer et suspendre les comptes locaux,
 d'ajuster leurs rôles et quotas et de consulter les 100 derniers événements
 d'audit. Les rôles des identités OIDC restent gérés dans Keycloak.
@@ -99,7 +104,8 @@ Construction reproductible des templates Debian depuis l'ISO :
 
 Endpoints : `GET /healthz`, `GET /`, `POST /login`, `POST /logout`,
 `GET /api/me`, `GET /api/nodes`, `GET /api/nodes/<node>/isos`,
-`GET /api/image-profiles`, `POST /api/vms`, `GET /api/jobs`, `GET /api/jobs/<id>`,
+`GET /api/image-profiles`, `POST /api/vms`, `POST /api/vms/<id>/actions`,
+`GET /api/jobs`, `GET /api/jobs/<id>`,
 `GET|POST /api/admin/users`, `PATCH /api/admin/users/<id>`,
 `GET /api/admin/audit-events`,
 `GET|POST /api/admin/image-profiles`, `PATCH /api/admin/image-profiles/<slug>`,
@@ -112,7 +118,7 @@ Exemple de connexion :
 ```
 
 La réponse contient un jeton CSRF à envoyer dans l'en-tête `X-CSRF-Token` pour
-`POST /api/vms` et `POST /logout`.
+`POST /api/vms`, `POST /api/vms/<id>/actions` et `POST /logout`.
 
 Exemple de demande authentifiée (avec cet en-tête) :
 

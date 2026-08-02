@@ -258,11 +258,38 @@ class PVEClient:
         )
 
     def start_vm(self, node: str, vmid: int) -> str:
-        result = self._request(
-            f"/nodes/{quote(node, safe='')}/qemu/{vmid}/status/start", method="POST"
+        return self._vm_task(node, vmid, "status/start", method="POST")
+
+    def stop_vm(self, node: str, vmid: int) -> str:
+        return self._vm_task(node, vmid, "status/shutdown", method="POST")
+
+    def reboot_vm(self, node: str, vmid: int) -> str:
+        return self._vm_task(node, vmid, "status/reboot", method="POST")
+
+    def delete_vm(self, node: str, vmid: int) -> str:
+        return self._vm_task(
+            node,
+            vmid,
+            "",
+            method="DELETE",
+            payload={"purge": 1, "destroy-unreferenced-disks": 1},
         )
+
+    def _vm_task(
+        self,
+        node: str,
+        vmid: int,
+        suffix: str,
+        *,
+        method: str,
+        payload: dict[str, Any] | None = None,
+    ) -> str:
+        path = f"/nodes/{quote(node, safe='')}/qemu/{vmid}"
+        if suffix:
+            path += f"/{suffix}"
+        result = self._request(path, method=method, payload=payload)
         if not isinstance(result, str) or not result.startswith("UPID:"):
-            raise PVEProtocolError("L'identifiant de démarrage PVE est invalide.")
+            raise PVEProtocolError("L'identifiant de tâche PVE est invalide.")
         return result
 
 
@@ -276,6 +303,9 @@ class FakePVEClient:
     templates: set[tuple[str, int]] = field(default_factory=set)
     configurations: list[dict[str, Any]] = field(default_factory=list)
     starts: list[tuple[str, int]] = field(default_factory=list)
+    stops: list[tuple[str, int]] = field(default_factory=list)
+    reboots: list[tuple[str, int]] = field(default_factory=list)
+    deletions: list[tuple[str, int]] = field(default_factory=list)
 
     def is_iso_available(self, node: str, iso: str) -> bool:
         return iso in self.accessible_isos.get(node, set())
@@ -304,3 +334,15 @@ class FakePVEClient:
     def start_vm(self, node: str, vmid: int) -> str:
         self.starts.append((node, vmid))
         return f"UPID:fake:start:{len(self.starts)}"
+
+    def stop_vm(self, node: str, vmid: int) -> str:
+        self.stops.append((node, vmid))
+        return f"UPID:fake:stop:{len(self.stops)}"
+
+    def reboot_vm(self, node: str, vmid: int) -> str:
+        self.reboots.append((node, vmid))
+        return f"UPID:fake:reboot:{len(self.reboots)}"
+
+    def delete_vm(self, node: str, vmid: int) -> str:
+        self.deletions.append((node, vmid))
+        return f"UPID:fake:delete:{len(self.deletions)}"
