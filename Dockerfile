@@ -1,5 +1,15 @@
 FROM python:3.13.14-alpine3.24@sha256:399babc8b49529dabfd9c922f2b5eea81d611e4512e3ed250d75bd2e7683f4b0 AS runtime
 
+ARG PORTAL_VERSION=dev
+ARG PORTAL_VCS_REF=unknown
+ARG PORTAL_SOURCE=https://github.com/hugofelix088-spec/proxmox-vm-portal
+
+LABEL org.opencontainers.image.source="$PORTAL_SOURCE" \
+      org.opencontainers.image.description="Secure self-hosted Proxmox VM provisioning portal" \
+      org.opencontainers.image.licenses="AGPL-3.0-only" \
+      org.opencontainers.image.version="$PORTAL_VERSION" \
+      org.opencontainers.image.revision="$PORTAL_VCS_REF"
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \

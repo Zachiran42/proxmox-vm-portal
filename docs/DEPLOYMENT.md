@@ -18,6 +18,11 @@ doivent être appliqués sans risquer de couper l'accès. Les seuls ports publi�
 par Compose sont 80 et 443. Toutes les images tierces sont épinglées par version
 et digest ; leur mise à jour est donc une modification de code revue.
 
+Pour déployer une image publiée, utilisez exclusivement la référence par digest
+issue du `release-manifest.json` et vérifiez d'abord sa signature selon
+`docs/RELEASES.md`. Un tag, y compris `latest`, reste mutable et ne constitue pas
+une preuve d'approbation.
+
 ## Installation
 
 ```bash

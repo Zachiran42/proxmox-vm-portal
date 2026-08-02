@@ -116,3 +116,6 @@ d'administrateur, jamais une URL libre fournie par un utilisateur.
    UPID existant.**
 10. Exposer l’observabilité externe. **Livré : métriques Prometheus protégées,
     règles Alertmanager versionnées et export CSV sécurisé du journal d’audit.**
+11. Sécuriser la chaîne de publication. **Livré : image GHCR signée sans clé
+    persistante, provenance BuildKit maximale, SBOM SPDX, manifeste signé,
+    contrôles de cohérence SemVer et surveillance Dependabot.**

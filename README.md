@@ -38,6 +38,9 @@ stocké dans le dépôt.
 - Les métriques Prometheus utilisent un jeton Bearer dédié et ne contiennent
   aucun identifiant individuel. Les alertes email/webhook sont déléguées à
   Alertmanager afin de ne jamais bloquer le worker.
+- Les tags de release construisent une image GHCR signée par identité OIDC, avec
+  provenance `mode=max`, SBOM SPDX, manifeste signé et sommes SHA-256. Aucune clé
+  de signature longue durée n'est stockée dans GitHub.
 - Les profils cloud-init clonés créent un compte nominatif non-root ; son secret
   aléatoire n'est jamais persisté et seul un lien Password Pusher expirant est
   remis au propriétaire.
@@ -111,6 +114,8 @@ Construction reproductible des templates Debian depuis l'ISO :
 [`docs/IMAGE_FACTORY.md`](docs/IMAGE_FACTORY.md).
 Métriques, règles d’alerte et export d’audit :
 [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md).
+Publication, SBOM, provenance et vérification des signatures :
+[`docs/RELEASES.md`](docs/RELEASES.md).
 
 Endpoints : `GET /healthz`, `GET /metrics`, `GET /`, `POST /login`, `POST /logout`,
 `GET /api/me`, `GET /api/nodes`, `GET /api/nodes/<node>/isos`,

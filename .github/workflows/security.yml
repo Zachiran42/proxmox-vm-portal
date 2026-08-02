@@ -37,6 +37,10 @@ jobs:
           bandit -q -r portal
           pip-audit -r requirements.lock
           bash -n deploy/scripts/*.sh deploy/testing/*.sh deploy/keycloak/*.sh deploy/password-pusher/*.sh images/packer/build.sh images/packer/scripts/*.sh
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml)
+          bash deploy/scripts/verify-release.sh "v$version"
+          docker run --rm -v "$PWD:/repo" -w /repo \
+            rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
           python -m json.tool deploy/proxmox/acl-policy.example.json >/dev/null
       - name: Build the production image
         run: docker build --tag proxmox-vm-portal:${{ github.sha }} .
