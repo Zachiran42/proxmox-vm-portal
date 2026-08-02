@@ -75,7 +75,11 @@ jobs:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}"
-          cosign sign --yes --tlog-upload=false "${IMAGE}@${DIGEST}"
+          signing_config="$RUNNER_TEMP/cosign-signing-config.json"
+          cosign signing-config create --with-default-services \
+            --no-default-rekor --out "$signing_config"
+          cosign sign --yes --signing-config "$signing_config" \
+            "${IMAGE}@${DIGEST}"
           cosign verify --insecure-ignore-tlog=true \
             --certificate-identity "$identity" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
@@ -110,7 +114,8 @@ jobs:
             --arg workflow "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
             '{schema: 1, version: $version, image: $image, digest: $digest, commit: $commit, workflow: $workflow, sbom: {file: $sbom_file, sha256: $sbom_sha256}}' \
             > release-manifest.json
-          cosign sign-blob --yes --tlog-upload=false \
+          signing_config="$RUNNER_TEMP/cosign-signing-config.json"
+          cosign sign-blob --yes --signing-config "$signing_config" \
             --bundle release-manifest.sigstore.json release-manifest.json
           identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}"
           cosign verify-blob --insecure-ignore-tlog=true \

@@ -21,7 +21,10 @@ def test_release_build_emits_and_verifies_supply_chain_evidence():
 
     assert "provenance: mode=max" in workflow
     assert "sbom: true" in workflow
-    assert 'cosign sign --yes --tlog-upload=false "${IMAGE}@${DIGEST}"' in workflow
+    assert "cosign signing-config create --with-default-services" in workflow
+    assert "--no-default-rekor" in workflow
+    assert workflow.count('--signing-config "$signing_config"') == 2
+    assert "--tlog-upload=false" not in workflow
     assert "cosign verify --insecure-ignore-tlog=true" in workflow
     assert "release-manifest.sigstore.json" in workflow
     assert "sbom_sha256" in workflow

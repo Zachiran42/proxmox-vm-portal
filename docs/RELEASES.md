@@ -23,10 +23,12 @@ sont référencées par leur SHA complet et le workflow dispose seulement de
 
 ## Confidentialité du dépôt privé
 
-Le journal public Rekor est désactivé avec `--tlog-upload=false`. La signature
-reste stockée dans le package GHCR privé et sa chaîne Fulcio est vérifiée dans
-le workflow, mais elle ne bénéficie pas encore de la transparence publique de
-Rekor. Lors du passage en open source, supprimer cette option et les options
+Le journal public Rekor est désactivé avec une configuration Cosign 3 explicite,
+générée depuis les services Sigstore par défaut avec
+`--no-default-rekor`. La signature reste stockée dans le package GHCR privé et
+sa chaîne Fulcio est vérifiée dans le workflow, mais elle ne bénéficie pas
+encore de la transparence publique de Rekor. Lors du passage en open source,
+rétablir Rekor dans cette configuration et supprimer les options
 `--insecure-ignore-tlog=true` correspondantes afin d'obtenir la preuve publique
 et l'auditabilité maximales.
 
