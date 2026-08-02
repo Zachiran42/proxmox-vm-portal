@@ -1,6 +1,6 @@
 "use strict";
 
-const state = { csrfToken: "", user: null, usage: {}, profiles: [], nodes: [], jobs: [], pollTimer: null };
+const state = { csrfToken: "", user: null, usage: {}, profiles: [], nodes: [], jobs: [], users: [], auditEvents: [], pollTimer: null };
 const elements = Object.fromEntries(
   [
     "login-screen", "login-form", "local-login-fields", "login-error", "login-button",
@@ -14,7 +14,15 @@ const elements = Object.fromEntries(
     "vm-profile", "vm-node", "vm-name", "vm-cpu", "vm-ram", "vm-disk", "vm-error",
     "guest-access-step", "vm-guest-username", "quota-preview", "refresh-jobs", "job-list",
     "jobs-empty", "job-count", "quota-vms", "quota-cpu", "quota-ram", "quota-disk",
-    "quota-vms-progress", "quota-cpu-progress", "quota-ram-progress", "quota-disk-progress"
+    "quota-vms-progress", "quota-cpu-progress", "quota-ram-progress", "quota-disk-progress",
+    "admin-nav", "admin-mobile-nav", "admin-view", "open-user-dialog", "refresh-users",
+    "user-list", "user-count", "stat-users-active", "stat-users-oidc", "stat-users-admin",
+    "audit-list", "audit-empty", "audit-count", "audit-outcome", "audit-search", "refresh-audit",
+    "user-dialog", "user-form", "user-id", "user-dialog-title", "user-dialog-intro",
+    "close-user-dialog", "cancel-user", "save-user", "managed-username", "managed-role",
+    "managed-password", "password-optional", "identity-help", "managed-quota-vms",
+    "managed-quota-cpu", "managed-quota-ram", "managed-quota-disk", "active-checkbox",
+    "managed-active", "user-error"
   ].map((id) => [id, document.getElementById(id)])
 );
 
@@ -31,6 +39,9 @@ function errorMessage(payload, fallback) {
     password_pusher_unavailable: "Password Pusher est momentanément indisponible.",
     quota_exceeded: "Cette demande dépasse votre quota disponible.",
     name_conflict: "Une machine active utilise déjà ce nom.",
+    self_admin_protection: "Vous ne pouvez pas désactiver ou rétrograder votre propre compte administrateur.",
+    last_admin_protection: "Le dernier administrateur actif doit être conservé.",
+    external_identity_managed: "Le rôle et le mot de passe de cette identité sont gérés dans Keycloak.",
     forbidden: "Cette action est réservée aux administrateurs."
   };
   return (payload && known[payload.error]) || fallback;
@@ -92,9 +103,14 @@ function showApplication(session) {
   elements["user-role"].textContent = { admin: "administrateur", operator: "opérateur", user: "utilisateur" }[session.user.role] || session.user.role;
   elements["user-avatar"].textContent = session.user.username.slice(0, 1).toUpperCase();
   elements["open-profile-dialog"].hidden = session.user.role !== "admin";
+  elements["admin-nav"].hidden = session.user.role !== "admin";
+  elements["admin-mobile-nav"].hidden = session.user.role !== "admin";
   renderQuotas();
-  switchView(window.location.hash === "#images" ? "images" : "machines");
-  Promise.all([loadProfiles(), loadNodes(), loadJobs()]).catch(() => {});
+  const requestedView = window.location.hash.slice(1);
+  switchView(["images", "admin"].includes(requestedView) ? requestedView : "machines");
+  const loaders = [loadProfiles(), loadNodes(), loadJobs()];
+  if (session.user.role === "admin") loaders.push(loadUsers(), loadAudit());
+  Promise.all(loaders).catch(() => {});
 }
 
 async function restoreSession() {
@@ -135,9 +151,10 @@ async function logout() {
 }
 
 function switchView(view) {
-  const machines = view === "machines";
-  elements["machines-view"].hidden = !machines;
-  elements["images-view"].hidden = machines;
+  if (view === "admin" && state.user?.role !== "admin") view = "machines";
+  elements["machines-view"].hidden = view !== "machines";
+  elements["images-view"].hidden = view !== "images";
+  elements["admin-view"].hidden = view !== "admin";
   document.querySelectorAll("[data-view]").forEach((control) => {
     const active = control.dataset.view === view;
     control.classList.toggle("active", active);
@@ -146,7 +163,7 @@ function switchView(view) {
       else control.removeAttribute("aria-current");
     }
   });
-  window.history.replaceState(null, "", machines ? "#machines" : "#images");
+  window.history.replaceState(null, "", `#${view}`);
 }
 
 function formatRam(mebibytes) {
@@ -452,6 +469,187 @@ async function submitVm(event) {
   }
 }
 
+function renderUser(user) {
+  const card = document.createElement("article");
+  card.className = `user-card${user.is_active ? "" : " inactive"}`;
+  const identity = document.createElement("div");
+  identity.className = "user-identity";
+  appendText(identity, "div", user.username.slice(0, 1).toUpperCase(), "avatar");
+  const copy = document.createElement("div");
+  appendText(copy, "strong", user.username);
+  appendText(copy, "span", user.authentication === "oidc" ? "Keycloak / OIDC" : "Compte local");
+  identity.append(copy);
+  card.append(identity);
+  appendText(card, "span", { admin: "Administrateur", operator: "Opérateur", user: "Utilisateur" }[user.role], "role-label");
+  appendText(
+    card,
+    "span",
+    `${user.usage.vms}/${user.quota.vms} VM · ${user.usage.cpu}/${user.quota.cpu} vCPU · ${formatRam(user.usage.ram_mb)}/${formatRam(user.quota.ram_mb)} · ${user.usage.disk_gb}/${user.quota.disk_gb} Gio`,
+    "user-quota"
+  );
+  appendText(card, "span", user.is_active ? "Actif" : "Suspendu", `user-state ${user.is_active ? "active" : "inactive"}`);
+  const edit = appendText(card, "button", "Modifier", "edit-user");
+  edit.type = "button";
+  edit.addEventListener("click", () => openEditUserDialog(user));
+  return card;
+}
+
+function renderUsers() {
+  elements["user-list"].replaceChildren(...state.users.map(renderUser));
+  elements["user-count"].textContent = `${state.users.length} compte${state.users.length > 1 ? "s" : ""}`;
+  elements["stat-users-active"].textContent = String(state.users.filter((user) => user.is_active).length);
+  elements["stat-users-oidc"].textContent = String(state.users.filter((user) => user.authentication === "oidc").length);
+  elements["stat-users-admin"].textContent = String(state.users.filter((user) => user.is_active && user.role === "admin").length);
+}
+
+async function loadUsers() {
+  elements["refresh-users"].disabled = true;
+  try {
+    state.users = (await api("/api/admin/users")).users;
+    renderUsers();
+  } catch (error) {
+    if (error.status === 401) return showLogin();
+    elements["user-count"].textContent = error.message;
+  } finally {
+    elements["refresh-users"].disabled = false;
+  }
+}
+
+const auditActionLabels = {
+  "authentication.login": "Connexion",
+  "authentication.logout": "Déconnexion",
+  "authentication.throttled": "Connexion ralentie",
+  "authentication.oidc_login": "Connexion Keycloak",
+  "authorization.denied": "Autorisation refusée",
+  "user.create": "Utilisateur créé",
+  "user.update": "Utilisateur modifié",
+  "image_profile.create": "Image publiée",
+  "image_profile.update": "Image modifiée",
+  "vm.enqueue": "VM demandée",
+  "vm.create": "Création de VM",
+  "vm.provision": "Provisionnement"
+};
+
+function filteredAuditEvents() {
+  const outcome = elements["audit-outcome"].value;
+  const search = elements["audit-search"].value.trim().toLowerCase();
+  return state.auditEvents.filter((event) => {
+    const label = auditActionLabels[event.action] || event.action;
+    const matchesOutcome = !outcome || event.outcome === outcome;
+    const haystack = `${label} ${event.action} ${event.target_type} ${event.target_id || ""}`.toLowerCase();
+    return matchesOutcome && (!search || haystack.includes(search));
+  });
+}
+
+function renderAudit() {
+  const events = filteredAuditEvents();
+  const outcomeLabels = { success: "Succès", failure: "Échec", denied: "Refus" };
+  elements["audit-list"].replaceChildren(...events.map((event) => {
+    const row = document.createElement("article");
+    row.className = "audit-row";
+    appendText(row, "time", new Date(event.created_at).toLocaleString("fr-FR"), "audit-time");
+    appendText(row, "span", auditActionLabels[event.action] || event.action, "audit-action");
+    appendText(row, "span", `${event.target_type}${event.target_id ? ` · ${event.target_id}` : ""}`, "audit-target");
+    appendText(row, "span", outcomeLabels[event.outcome] || event.outcome, `audit-outcome outcome-${event.outcome}`);
+    return row;
+  }));
+  elements["audit-empty"].hidden = events.length !== 0;
+  elements["audit-count"].textContent = `${events.length} événement${events.length > 1 ? "s" : ""} affiché${events.length > 1 ? "s" : ""}`;
+}
+
+async function loadAudit() {
+  elements["refresh-audit"].disabled = true;
+  try {
+    state.auditEvents = (await api("/api/admin/audit-events")).events;
+    renderAudit();
+  } catch (error) {
+    if (error.status === 401) return showLogin();
+    elements["audit-count"].textContent = error.message;
+  } finally {
+    elements["refresh-audit"].disabled = false;
+  }
+}
+
+function setUserDialogMode(user = null) {
+  elements["user-form"].reset();
+  showError(elements["user-error"], "");
+  const editing = user !== null;
+  elements["user-id"].value = editing ? String(user.id) : "";
+  elements["user-dialog-title"].textContent = editing ? `Modifier ${user.username}` : "Nouvel utilisateur";
+  elements["user-dialog-intro"].textContent = editing
+    ? "Les changements de rôle, d’état et de quota sont journalisés."
+    : "Créez un compte local avec le minimum de droits et de ressources nécessaires.";
+  elements["managed-username"].disabled = editing;
+  elements["managed-username"].value = editing ? user.username : "";
+  elements["managed-role"].value = editing ? user.role : "user";
+  elements["managed-active"].checked = editing ? user.is_active : true;
+  elements["active-checkbox"].hidden = !editing;
+  elements["managed-quota-vms"].value = editing ? user.quota.vms : 3;
+  elements["managed-quota-cpu"].value = editing ? user.quota.cpu : 8;
+  elements["managed-quota-ram"].value = editing ? user.quota.ram_mb : 16384;
+  elements["managed-quota-disk"].value = editing ? user.quota.disk_gb : 200;
+  elements["managed-password"].value = "";
+  elements["managed-password"].required = !editing;
+  elements["password-optional"].hidden = !editing;
+  const externallyManaged = editing && user.authentication === "oidc";
+  const self = editing && user.id === state.user.id;
+  elements["managed-role"].disabled = externallyManaged || self;
+  elements["managed-password"].disabled = externallyManaged;
+  elements["managed-active"].disabled = self;
+  document.querySelector('label[for="managed-password"]').hidden = externallyManaged;
+  elements["managed-password"].hidden = externallyManaged;
+  elements["identity-help"].textContent = externallyManaged
+    ? "Le rôle et le mot de passe sont synchronisés depuis Keycloak ; seuls l’état local et les quotas sont modifiables."
+    : "Le mot de passe n’est jamais retourné par l’API ni écrit dans l’audit.";
+  elements["save-user"].textContent = editing ? "Enregistrer" : "Créer le compte";
+}
+
+function openCreateUserDialog() {
+  setUserDialogMode();
+  elements["user-dialog"].showModal();
+  elements["managed-username"].focus();
+}
+
+function openEditUserDialog(user) {
+  setUserDialogMode(user);
+  elements["user-dialog"].showModal();
+  elements["managed-quota-vms"].focus();
+}
+
+function closeUserDialog() {
+  elements["user-dialog"].close();
+}
+
+async function saveUser(event) {
+  event.preventDefault();
+  showError(elements["user-error"], "");
+  setBusy(elements["save-user"], true, "Enregistrement…");
+  const editing = Boolean(elements["user-id"].value);
+  const quota = {
+    vms: Number(elements["managed-quota-vms"].value),
+    cpu: Number(elements["managed-quota-cpu"].value),
+    ram_mb: Number(elements["managed-quota-ram"].value),
+    disk_gb: Number(elements["managed-quota-disk"].value)
+  };
+  const payload = editing
+    ? { role: elements["managed-role"].value, is_active: elements["managed-active"].checked, quota }
+    : { username: elements["managed-username"].value, password: elements["managed-password"].value, role: elements["managed-role"].value, quota };
+  if (editing && !elements["managed-password"].disabled && elements["managed-password"].value) {
+    payload.password = elements["managed-password"].value;
+  }
+  try {
+    const path = editing ? `/api/admin/users/${encodeURIComponent(elements["user-id"].value)}` : "/api/admin/users";
+    await api(path, { method: editing ? "PATCH" : "POST", body: JSON.stringify(payload) });
+    closeUserDialog();
+    showToast(editing ? "Utilisateur mis à jour." : "Utilisateur créé.");
+    await Promise.all([loadUsers(), loadAudit()]);
+  } catch (error) {
+    showError(elements["user-error"], error.message);
+  } finally {
+    setBusy(elements["save-user"], false, "");
+  }
+}
+
 function sourceType() {
   return elements["profile-form"].querySelector('input[name="source_type"]:checked').value;
 }
@@ -536,6 +734,14 @@ elements["vm-form"].addEventListener("submit", submitVm);
 elements["vm-profile"].addEventListener("change", updateGuestAccessField);
 elements["refresh-jobs"].addEventListener("click", loadJobs);
 [elements["vm-cpu"], elements["vm-ram"], elements["vm-disk"]].forEach((input) => input.addEventListener("input", updateQuotaPreview));
+elements["open-user-dialog"].addEventListener("click", openCreateUserDialog);
+elements["close-user-dialog"].addEventListener("click", closeUserDialog);
+elements["cancel-user"].addEventListener("click", closeUserDialog);
+elements["user-form"].addEventListener("submit", saveUser);
+elements["refresh-users"].addEventListener("click", loadUsers);
+elements["refresh-audit"].addEventListener("click", loadAudit);
+elements["audit-outcome"].addEventListener("change", renderAudit);
+elements["audit-search"].addEventListener("input", renderAudit);
 elements["refresh-profiles"].addEventListener("click", loadProfiles);
 elements["open-profile-dialog"].addEventListener("click", openProfileDialog);
 elements["close-profile-dialog"].addEventListener("click", closeProfileDialog);
@@ -552,6 +758,9 @@ elements["profile-dialog"].addEventListener("click", (event) => {
 });
 elements["vm-dialog"].addEventListener("click", (event) => {
   if (event.target === elements["vm-dialog"]) closeVmDialog();
+});
+elements["user-dialog"].addEventListener("click", (event) => {
+  if (event.target === elements["user-dialog"]) closeUserDialog();
 });
 
 configureAuthenticationChoices();

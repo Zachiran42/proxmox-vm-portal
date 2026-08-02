@@ -87,6 +87,104 @@ def test_admin_can_create_and_list_users_without_exposing_password(app):
     }
     assert [user["username"] for user in listed.get_json()["users"]] == ["admin", "alice"]
     assert "password" not in json.dumps(created.get_json())
+    assert listed.get_json()["users"][1]["usage"] == {
+        "vms": 0,
+        "cpu": 0,
+        "ram_mb": 0,
+        "disk_gb": 0,
+    }
+
+
+def test_admin_can_update_local_role_quotas_status_and_password(app):
+    client = app.test_client()
+    login(client)
+    created = create_user(client).get_json()["user"]
+
+    response = client.patch(
+        f"/api/admin/users/{created['id']}",
+        json={
+            "password": "a-new-strong-password",
+            "role": "operator",
+            "is_active": False,
+            "quota": {"vms": 5, "cpu": 12, "ram_mb": 24576, "disk_gb": 400},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["user"] == {
+        "id": created["id"],
+        "username": "alice",
+        "role": "operator",
+        "authentication": "local",
+        "is_active": False,
+        "quota": {"vms": 5, "cpu": 12, "ram_mb": 24576, "disk_gb": 400},
+    }
+    assert "password" not in json.dumps(response.get_json())
+    with app.app_context():
+        event = db.session.scalars(
+            select(AuditEvent)
+            .where(AuditEvent.action == "user.update")
+            .order_by(AuditEvent.created_at.desc())
+        ).first()
+        assert event.details == {
+            "role_before": "user",
+            "role_after": "operator",
+            "active_before": True,
+            "active_after": False,
+            "password_rotated": True,
+        }
+
+
+def test_admin_cannot_demote_or_disable_own_account(app):
+    client = app.test_client()
+    login(client)
+    admin = client.get("/api/me").get_json()["user"]
+    base = {
+        "role": "admin",
+        "is_active": True,
+        "quota": admin["quota"],
+    }
+
+    demoted = client.patch(
+        f"/api/admin/users/{admin['id']}", json={**base, "role": "user"}
+    )
+    disabled = client.patch(
+        f"/api/admin/users/{admin['id']}", json={**base, "is_active": False}
+    )
+
+    assert demoted.status_code == 409
+    assert disabled.status_code == 409
+    assert demoted.get_json() == {"error": "self_admin_protection"}
+
+
+def test_oidc_role_and_password_remain_managed_by_identity_provider(app):
+    client = app.test_client()
+    login(client)
+    with app.app_context():
+        user = User(
+            username="oidc-user",
+            password_hash=None,
+            auth_provider="oidc",
+            external_issuer="https://id.example/realms/portal",
+            external_subject="oidc-subject",
+            role="user",
+        )
+        db.session.add(user)
+        db.session.commit()
+        user_id = user.id
+
+    response = client.patch(
+        f"/api/admin/users/{user_id}",
+        json={
+            "password": "must-not-be-applied",
+            "role": "admin",
+            "is_active": True,
+            "quota": {"vms": 3, "cpu": 8, "ram_mb": 16384, "disk_gb": 200},
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.get_json() == {"error": "external_identity_managed"}
 
 
 def test_duplicate_username_is_rejected_and_audited(app):
@@ -125,6 +223,33 @@ def test_user_creation_validation(app, change, field):
     assert field in response.get_json()["errors"]
 
 
+@pytest.mark.parametrize(
+    ("change", "field"),
+    [
+        ({"role": "root"}, "role"),
+        ({"is_active": "yes"}, "is_active"),
+        ({"password": "short"}, "password"),
+        ({"quota": {"vms": -1, "cpu": 4, "ram_mb": 8192, "disk_gb": 100}}, "quota.vms"),
+        ({"unexpected": True}, "unknown"),
+    ],
+)
+def test_user_update_validation(app, change, field):
+    client = app.test_client()
+    login(client)
+    user = create_user(client).get_json()["user"]
+    payload = {
+        "role": "user",
+        "is_active": True,
+        "quota": {"vms": 2, "cpu": 4, "ram_mb": 8192, "disk_gb": 100},
+    }
+    payload.update(change)
+
+    response = client.patch(f"/api/admin/users/{user['id']}", json=payload)
+
+    assert response.status_code == 400
+    assert field in response.get_json()["errors"]
+
+
 def test_non_admin_cannot_manage_users_or_read_audit(app):
     client = app.test_client()
     login(client)
@@ -134,12 +259,13 @@ def test_non_admin_cannot_manage_users_or_read_audit(app):
 
     assert client.get("/api/admin/users").status_code == 403
     assert create_user(client, username="bob").status_code == 403
+    assert client.patch("/api/admin/users/1", json={}).status_code == 403
     assert client.get("/api/admin/audit-events").status_code == 403
     with app.app_context():
         denied = db.session.scalar(
             select(db.func.count(AuditEvent.id)).where(AuditEvent.action == "authorization.denied")
         )
-        assert denied == 3
+        assert denied == 4
 
 
 def test_quota_is_reserved_before_second_proxmox_request(app, pve_client):

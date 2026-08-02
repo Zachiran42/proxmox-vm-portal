@@ -41,6 +41,9 @@ def test_portal_shell_loads_self_hosted_assets_and_strict_csp(app):
     assert 'id="vm-form"' in html
     assert 'id="job-list"' in html
     assert "Password Pusher" in html
+    assert 'id="admin-view"' in html
+    assert 'id="user-form"' in html
+    assert 'id="audit-list"' in html
     assert 'data-local-auth="true"' in html
     assert 'data-oidc="false"' in html
     assert 'src="/static/portal.js"' in html

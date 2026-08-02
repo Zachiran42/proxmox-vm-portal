@@ -93,7 +93,7 @@ fi
 docker compose --env-file "$ENV_FILE" -f compose.yml build api
 if [[ ${PORTAL_INSTALL_VALIDATE_ONLY:-0} == 1 ]]; then
     portal_image=$(setting PORTAL_IMAGE)
-    docker image inspect "${portal_image:-proxmox-vm-portal:0.11.0}" >/dev/null
+    docker image inspect "${portal_image:-proxmox-vm-portal:0.12.0}" >/dev/null
     echo "Validation Debian terminée après la construction de l'image."
     exit 0
 fi

@@ -55,6 +55,7 @@ from .pve import PVEClient, PVEHTTPError, PVEProtocolError, PVETransportError
 from .validation import (
     ImageProfileCreateRequest,
     UserCreateRequest,
+    UserUpdateRequest,
     ValidationError,
     VMRequest,
     validate_node_name,
@@ -650,7 +651,12 @@ def create_app(
     @role_required("admin")
     def list_users():
         users = db.session.scalars(select(User).order_by(User.username)).all()
-        return jsonify(users=[user.public_dict() for user in users])
+        return jsonify(
+            users=[
+                {**user.public_dict(), "usage": _quota_usage(user.id)}
+                for user in users
+            ]
+        )
 
     @app.post("/api/admin/users")
     @login_required
@@ -702,6 +708,70 @@ def create_app(
         )
         db.session.commit()
         return jsonify(user=user.public_dict()), 201
+
+    @app.patch("/api/admin/users/<int:user_id>")
+    @login_required
+    @role_required("admin")
+    @csrf_protected
+    def update_user(user_id: int):
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify(errors={"body": "Un objet JSON est requis."}), 400
+        try:
+            user_request = UserUpdateRequest.from_dict(payload)
+        except ValidationError as error:
+            return jsonify(errors=error.errors), 400
+        user = db.session.get(User, user_id)
+        if user is None:
+            return jsonify(error="not_found"), 404
+        if user.id == g.current_user.id and (
+            not user_request.is_active or user_request.role != "admin"
+        ):
+            return jsonify(error="self_admin_protection"), 409
+        if user.auth_provider == "oidc" and (
+            user_request.role != user.role or user_request.password is not None
+        ):
+            return jsonify(error="external_identity_managed"), 409
+        removes_active_admin = user.is_active and user.role == "admin" and (
+            not user_request.is_active or user_request.role != "admin"
+        )
+        if removes_active_admin:
+            active_admins = db.session.scalar(
+                select(func.count(User.id)).where(
+                    User.role == "admin", User.is_active.is_(True)
+                )
+            )
+            if active_admins is None or active_admins <= 1:
+                return jsonify(error="last_admin_protection"), 409
+
+        old_role = user.role
+        old_active = user.is_active
+        user.role = user_request.role
+        user.is_active = user_request.is_active
+        user.quota_vms = user_request.quota_vms
+        user.quota_cpu = user_request.quota_cpu
+        user.quota_ram_mb = user_request.quota_ram_mb
+        user.quota_disk_gb = user_request.quota_disk_gb
+        if user_request.password is not None:
+            user.password_hash = generate_password_hash(
+                user_request.password, method="scrypt"
+            )
+        _add_audit(
+            action="user.update",
+            target_type="user",
+            target_id=str(user.id),
+            outcome="success",
+            actor_user_id=g.current_user.id,
+            details={
+                "role_before": old_role,
+                "role_after": user.role,
+                "active_before": old_active,
+                "active_after": user.is_active,
+                "password_rotated": user_request.password is not None,
+            },
+        )
+        db.session.commit()
+        return jsonify(user=user.public_dict())
 
     @app.get("/api/admin/audit-events")
     @login_required

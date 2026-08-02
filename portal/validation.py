@@ -11,6 +11,7 @@ _LINUX_USER = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 _FIELDS = {"name", "node", "profile", "cpu", "ram_mb", "disk_gb", "guest_username"}
 _VM_REQUIRED_FIELDS = _FIELDS - {"guest_username"}
 _USER_FIELDS = {"username", "password", "role", "quota"}
+_USER_UPDATE_FIELDS = {"password", "role", "is_active", "quota"}
 _QUOTA_FIELDS = {"vms", "cpu", "ram_mb", "disk_gb"}
 _PROFILE_BASE_FIELDS = {"slug", "label", "description", "source_type"}
 _PROFILE_FIELDS = _PROFILE_BASE_FIELDS | {"iso", "template_node", "template_vmid"}
@@ -211,6 +212,74 @@ class UserCreateRequest:
             username=cast(str, username),
             password=cast(str, password),
             role=cast(str, role),
+            quota_vms=quota["vms"],
+            quota_cpu=quota["cpu"],
+            quota_ram_mb=quota["ram_mb"],
+            quota_disk_gb=quota["disk_gb"],
+        )
+
+
+@dataclass(frozen=True)
+class UserUpdateRequest:
+    password: str | None
+    role: str
+    is_active: bool
+    quota_vms: int
+    quota_cpu: int
+    quota_ram_mb: int
+    quota_disk_gb: int
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> UserUpdateRequest:
+        errors: dict[str, str] = {}
+        unknown = set(data) - _USER_UPDATE_FIELDS
+        if unknown:
+            errors["unknown"] = "Champs non autorisés: " + ", ".join(sorted(unknown))
+        for field in sorted({"role", "is_active", "quota"} - set(data)):
+            errors[field] = "Champ requis."
+
+        password = data.get("password")
+        role = data.get("role")
+        is_active = data.get("is_active")
+        quota = data.get("quota")
+        if password is not None and (
+            not isinstance(password, str) or not 14 <= len(password) <= 256
+        ):
+            errors["password"] = (  # nosec B105
+                "Le mot de passe doit contenir entre 14 et 256 caractères."
+            )
+        if role not in {"admin", "operator", "user"}:
+            errors["role"] = "Rôle invalide."
+        if type(is_active) is not bool:
+            errors["is_active"] = "Booléen requis."
+        if not isinstance(quota, dict):
+            errors["quota"] = "Un objet quota est requis."
+            quota = {}
+        else:
+            quota_unknown = set(quota) - _QUOTA_FIELDS
+            if quota_unknown:
+                errors["quota"] = "Champs de quota non autorisés: " + ", ".join(
+                    sorted(quota_unknown)
+                )
+            for field in sorted(_QUOTA_FIELDS - set(quota)):
+                errors[f"quota.{field}"] = "Champ requis."
+
+        for field, maximum in (
+            ("vms", 100),
+            ("cpu", 512),
+            ("ram_mb", 1048576),
+            ("disk_gb", 102400),
+        ):
+            value = quota.get(field)
+            if type(value) is not int or not 0 <= value <= maximum:
+                errors[f"quota.{field}"] = f"Entier requis entre 0 et {maximum}."
+
+        if errors:
+            raise ValidationError(errors)
+        return cls(
+            password=password,
+            role=cast(str, role),
+            is_active=cast(bool, is_active),
             quota_vms=quota["vms"],
             quota_cpu=quota["cpu"],
             quota_ram_mb=quota["ram_mb"],
