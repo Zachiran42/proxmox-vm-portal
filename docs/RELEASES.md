@@ -14,7 +14,9 @@ Une release réussie fournit :
 - un SBOM BuildKit SPDX attaché à l'image ;
 - un SBOM SPDX JSON téléchargeable depuis la release ;
 - `release-manifest.json`, qui lie version, commit, image, digest, SBOM et exécution ;
-- la signature Sigstore du manifeste et `SHA256SUMS`.
+- la signature Sigstore du manifeste et `SHA256SUMS` ;
+- l'installateur Debian autonome `proxmox-vm-portal-<version>-install.sh`, inclus
+  dans `SHA256SUMS`.
 
 L'image et le manifeste sont signés sans clé persistante : GitHub Actions émet
 une identité OIDC de courte durée, acceptée par Sigstore. Les actions tierces

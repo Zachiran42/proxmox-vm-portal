@@ -37,7 +37,7 @@ sudo docker login ghcr.io
 
 PORTAL_DEPLOY_MODE=release
 PORTAL_IMAGE=ghcr.io/hugofelix088-spec/proxmox-vm-portal@sha256:DIGEST_RELEASE
-PORTAL_RELEASE_TAG=v0.17.1
+PORTAL_RELEASE_TAG=v0.18.0
 PORTAL_RELEASE_REPOSITORY=hugofelix088-spec/proxmox-vm-portal
 PORTAL_RELEASE_TRANSPARENCY=private
 ```
@@ -48,7 +48,41 @@ seule, capacités supprimées et configuration Docker montée en lecture seule.
 Le mode `public` interdit l'ignorance du journal Rekor ; ne l'activez qu'après
 avoir publié les signatures avec transparence lors du passage open source.
 
-## Installation
+## Installation rapide de la release privée
+
+Tant que le dépôt et GHCR sont privés, créez un personal access token **classic**
+temporaire avec `repo` et `read:packages`. Collez ensuite ce bloc dans une VM
+Debian 12 ou 13 vierge. Le script est téléchargé depuis le tag immuable et non
+depuis `main`; il récupère lui-même le digest du manifeste de release, refuse un
+répertoire `/opt/proxmox-vm-portal` existant et vérifie la signature de l'image
+avant son téléchargement.
+
+```bash
+read -rsp "Token GitHub temporaire : " PORTAL_GITHUB_TOKEN && echo
+export PORTAL_GITHUB_TOKEN
+export PORTAL_GITHUB_USERNAME="hugofelix088-spec"
+bootstrap=$(mktemp)
+printf 'header = "Authorization: Bearer %s"\n' "$PORTAL_GITHUB_TOKEN" | \
+curl --config - --proto '=https' --tlsv1.2 --fail --silent --show-error \
+  -H "Accept: application/vnd.github.raw+json" \
+  -H "X-GitHub-Api-Version: 2022-11-28" \
+  "https://api.github.com/repos/hugofelix088-spec/proxmox-vm-portal/contents/deploy/scripts/bootstrap-debian.sh?ref=v0.18.0" \
+  --output "$bootstrap" && \
+bash -n "$bootstrap" && \
+sudo --preserve-env=PORTAL_GITHUB_TOKEN,PORTAL_GITHUB_USERNAME bash "$bootstrap"
+result=$?
+rm -f -- "$bootstrap"
+unset PORTAL_GITHUB_TOKEN PORTAL_GITHUB_USERNAME
+test "$result" -eq 0
+```
+
+L'installateur demande le domaine, l'adresse ACME, l'URL et l'identifiant du
+token Proxmox, le destinataire `age`, puis les secrets Proxmox et administrateur
+via des invites masquées. Docker conserve l'authentification GHCR du compte root
+dans `/root/.docker/config.json` pour permettre les mises à jour ultérieures.
+Révoquez le token temporaire après le test si vous ne souhaitez pas le conserver.
+
+## Installation manuelle depuis les sources
 
 ```bash
 sudo apt-get update && sudo apt-get install -y git

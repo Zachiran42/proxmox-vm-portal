@@ -27,6 +27,8 @@ def test_release_build_emits_and_verifies_supply_chain_evidence():
     assert "--tlog-upload=false" not in workflow
     assert "cosign verify --insecure-ignore-tlog=true" in workflow
     assert "release-manifest.sigstore.json" in workflow
+    assert "deploy/scripts/bootstrap-debian.sh" in workflow
+    assert '"proxmox-vm-portal-${VERSION}-install.sh"' in workflow
     assert "sbom_sha256" in workflow
     assert "SHA256SUMS" in workflow
     assert "--verify-tag" in workflow

@@ -1,0 +1,50 @@
+import os
+import subprocess
+from pathlib import Path
+
+ROOT = Path(__file__).parents[1]
+BOOTSTRAP = ROOT / "deploy/scripts/bootstrap-debian.sh"
+
+
+def test_private_bootstrap_is_pinned_and_defensive():
+    script = BOOTSTRAP.read_text(encoding="utf-8")
+
+    assert 'RELEASE_TAG="v0.18.0"' in script
+    assert 'RELEASE_VERSION="0.18.0"' in script
+    assert 'TARGET_DIR="/opt/proxmox-vm-portal"' in script
+    assert "mktemp -d /tmp/proxmox-vm-portal." in script
+    assert "--proto '=https' --tlsv1.2" in script
+    assert "curl --config -" in script
+    assert '"$API_ROOT/tarball/$RELEASE_TAG"' in script
+    assert "manifest_digest =~ ^sha256:" in script
+    assert "manifest_commit =~ ^[0-9a-f]{40}$" in script
+    assert "*-${manifest_commit:0:7}" in script
+    assert "Les liens symboliques sont interdits" in script
+    assert "[[ ! -e $TARGET_DIR ]]" in script
+    assert "PORTAL_DEPLOY_MODE release" in script
+
+
+def test_bootstrap_requires_a_token_before_network_or_filesystem_changes():
+    environment = os.environ.copy()
+    environment.pop("PORTAL_GITHUB_TOKEN", None)
+
+    result = subprocess.run(
+        ["bash", str(BOOTSTRAP)],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "PORTAL_GITHUB_TOKEN est requis" in result.stderr
+
+
+def test_installer_authenticates_to_ghcr_without_exposing_the_token():
+    script = (ROOT / "deploy/scripts/install-debian.sh").read_text(encoding="utf-8")
+
+    assert 'printf \'%s\' "$PORTAL_GITHUB_TOKEN" | docker login ghcr.io' in script
+    assert "--password-stdin" in script
+    assert "unset PORTAL_GITHUB_TOKEN" in script
+    assert "--password " not in script

@@ -123,8 +123,11 @@ jobs:
             --certificate-identity "$identity" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             release-manifest.json
+          install -m 0755 deploy/scripts/bootstrap-debian.sh \
+            "proxmox-vm-portal-${VERSION}-install.sh"
           sha256sum "$sbom_file" release-manifest.json \
-            release-manifest.sigstore.json > SHA256SUMS
+            release-manifest.sigstore.json \
+            "proxmox-vm-portal-${VERSION}-install.sh" > SHA256SUMS
 
       - name: Publish the GitHub release and evidence
         env:
@@ -135,6 +138,7 @@ jobs:
             "proxmox-vm-portal-${VERSION}.spdx.json"
             release-manifest.json
             release-manifest.sigstore.json
+            "proxmox-vm-portal-${VERSION}-install.sh"
             SHA256SUMS
           )
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then

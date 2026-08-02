@@ -2,8 +2,8 @@
 set -Eeuo pipefail
 umask 077
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-ROOT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+ROOT_DIR=$(CDPATH='' cd -- "$SCRIPT_DIR/../.." && pwd)
 SECRETS_DIR="$ROOT_DIR/deploy/secrets"
 ENV_FILE="$ROOT_DIR/.env.production"
 COMPOSE="$ROOT_DIR/deploy/scripts/compose.sh"
@@ -31,6 +31,7 @@ install_docker() {
     install -m 0755 -d /etc/apt/keyrings
     curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
     chmod a+r /etc/apt/keyrings/docker.asc
+    # shellcheck source=/dev/null
     . /etc/os-release
     printf 'Types: deb\nURIs: https://download.docker.com/linux/debian\nSuites: %s\nComponents: stable\nArchitectures: %s\nSigned-By: /etc/apt/keyrings/docker.asc\n' \
         "$VERSION_CODENAME" "$(dpkg --print-architecture)" > /etc/apt/sources.list.d/docker.sources
@@ -98,7 +99,7 @@ portal_image=$(setting PORTAL_IMAGE)
 case "$deploy_mode" in
     source)
         "$COMPOSE" build api
-        portal_image=${portal_image:-proxmox-vm-portal:0.17.1}
+        portal_image=${portal_image:-proxmox-vm-portal:0.18.0}
         ;;
     release)
         release_tag=$(setting PORTAL_RELEASE_TAG)
@@ -108,6 +109,16 @@ case "$deploy_mode" in
             echo "PORTAL_IMAGE, PORTAL_RELEASE_TAG et PORTAL_RELEASE_REPOSITORY sont requis en mode release." >&2
             exit 1
         }
+        if [[ -n ${PORTAL_GITHUB_TOKEN:-} ]]; then
+            github_username=${PORTAL_GITHUB_USERNAME:-}
+            [[ $github_username =~ ^[A-Za-z0-9-]+$ ]] || {
+                echo "PORTAL_GITHUB_USERNAME est requis pour l'authentification GHCR." >&2
+                exit 1
+            }
+            printf '%s' "$PORTAL_GITHUB_TOKEN" | docker login ghcr.io \
+                --username "$github_username" --password-stdin
+            unset PORTAL_GITHUB_TOKEN
+        fi
         "$SCRIPT_DIR/verify-published-image.sh" "$portal_image" "$release_tag" \
             "$release_repository" "${release_transparency:-private}"
         docker pull "$portal_image"
