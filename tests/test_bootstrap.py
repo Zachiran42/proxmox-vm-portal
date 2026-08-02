@@ -9,8 +9,8 @@ BOOTSTRAP = ROOT / "deploy/scripts/bootstrap-debian.sh"
 def test_private_bootstrap_is_pinned_and_defensive():
     script = BOOTSTRAP.read_text(encoding="utf-8")
 
-    assert 'RELEASE_TAG="v0.18.1"' in script
-    assert 'RELEASE_VERSION="0.18.1"' in script
+    assert 'RELEASE_TAG="v0.18.2"' in script
+    assert 'RELEASE_VERSION="0.18.2"' in script
     assert 'TARGET_DIR="/opt/proxmox-vm-portal"' in script
     assert "mktemp -d /tmp/proxmox-vm-portal." in script
     assert "--proto '=https' --tlsv1.2" in script
@@ -18,8 +18,11 @@ def test_private_bootstrap_is_pinned_and_defensive():
     assert '"$API_ROOT/tarball/$RELEASE_TAG"' in script
     assert "manifest_digest =~ ^sha256:" in script
     assert "manifest_commit =~ ^[0-9a-f]{40}$" in script
-    assert "archive_commit =~ ^[0-9a-f]{7,40}$" in script
-    assert 'manifest_commit == "$archive_commit"*' in script
+    assert '"$API_ROOT/git/ref/tags/$RELEASE_TAG"' in script
+    assert '"$API_ROOT/git/tags/$tag_object"' in script
+    assert "Le tag de release doit être annoté" in script
+    assert 'object.sha\' "$tag_json") == "$manifest_commit"' in script
+    assert 'archive_commit == "$tag_object"' in script
     assert "Les liens symboliques sont interdits" in script
     assert "[[ ! -e $TARGET_DIR ]]" in script
     assert "PORTAL_DEPLOY_MODE release" in script

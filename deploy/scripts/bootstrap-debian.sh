@@ -3,8 +3,8 @@ set -Eeuo pipefail
 umask 077
 
 REPOSITORY="hugofelix088-spec/proxmox-vm-portal"
-RELEASE_TAG="v0.18.1"
-RELEASE_VERSION="0.18.1"
+RELEASE_TAG="v0.18.2"
+RELEASE_VERSION="0.18.2"
 TARGET_DIR="/opt/proxmox-vm-portal"
 API_ROOT="https://api.github.com/repos/$REPOSITORY"
 work_dir=""
@@ -52,6 +52,8 @@ release_json="$work_dir/release.json"
 manifest_file="$work_dir/release-manifest.json"
 archive_file="$work_dir/source.tar.gz"
 extract_dir="$work_dir/source"
+ref_json="$work_dir/tag-ref.json"
+tag_json="$work_dir/tag-object.json"
 
 github_curl application/vnd.github+json \
     "$API_ROOT/releases/tags/$RELEASE_TAG" --output "$release_json"
@@ -76,6 +78,19 @@ manifest_commit=$(jq -r '.commit' "$manifest_file")
 [[ $manifest_commit =~ ^[0-9a-f]{40}$ ]] || fail "Commit de manifeste invalide."
 
 github_curl application/vnd.github+json \
+    "$API_ROOT/git/ref/tags/$RELEASE_TAG" --output "$ref_json"
+tag_object=$(jq -r '.object.sha' "$ref_json")
+[[ $(jq -r '.object.type' "$ref_json") == tag && $tag_object =~ ^[0-9a-f]{40}$ ]] || fail \
+    "Le tag de release doit être annoté."
+github_curl application/vnd.github+json \
+    "$API_ROOT/git/tags/$tag_object" --output "$tag_json"
+[[ $(jq -r '.tag' "$tag_json") == "$RELEASE_TAG" ]] || fail "Objet tag inattendu."
+[[ $(jq -r '.object.type' "$tag_json") == commit ]] || fail \
+    "Le tag de release ne désigne pas directement un commit."
+[[ $(jq -r '.object.sha' "$tag_json") == "$manifest_commit" ]] || fail \
+    "Le tag de release ne correspond pas au commit du manifeste."
+
+github_curl application/vnd.github+json \
     "$API_ROOT/tarball/$RELEASE_TAG" --output "$archive_file"
 if tar -tzf "$archive_file" | grep -Eq '(^|/)\.\.(/|$)|^/'; then
     fail "L'archive GitHub contient un chemin non sûr."
@@ -87,8 +102,8 @@ mapfile -t archive_roots < <(find "$extract_dir" -mindepth 1 -maxdepth 1 -type d
 source_dir=${archive_roots[0]}
 archive_commit=${source_dir##*/}
 archive_commit=${archive_commit##*-}
-[[ $archive_commit =~ ^[0-9a-f]{7,40}$ && $manifest_commit == "$archive_commit"* ]] || fail \
-    "L'archive GitHub ne correspond pas au commit du manifeste."
+[[ $archive_commit == "$tag_object" ]] || fail \
+    "L'archive GitHub ne correspond pas à l'objet tag vérifié."
 [[ -f $source_dir/deploy/scripts/install-debian.sh ]] || fail "Installateur absent de l'archive."
 [[ -z $(find "$source_dir" -type l -print -quit) ]] || fail "Les liens symboliques sont interdits."
 
