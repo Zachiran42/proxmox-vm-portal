@@ -102,6 +102,7 @@ def test_transport_and_http_errors_never_include_secret_or_token():
         {},
         {"html_url": "http://pwpush.example/p/token"},
         {"html_url": "not-a-url"},
+        {"html_url": "https://attacker.example/p/token"},
     ],
 )
 def test_push_rejects_invalid_credential_link(data):

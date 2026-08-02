@@ -37,6 +37,10 @@ def test_portal_shell_loads_self_hosted_assets_and_strict_csp(app):
     assert response.status_code == 200
     assert 'lang="fr"' in html
     assert "Images de machines" in html
+    assert "Mes machines" in html
+    assert 'id="vm-form"' in html
+    assert 'id="job-list"' in html
+    assert "Password Pusher" in html
     assert 'data-local-auth="true"' in html
     assert 'data-oidc="false"' in html
     assert 'src="/static/portal.js"' in html

@@ -104,7 +104,12 @@ class PasswordPusherClient:
                 "Le lien Password Pusher est invalide."
             )
         parsed_url = urlparse(url)
-        if parsed_url.scheme != "https" or not parsed_url.netloc:
+        configured_url = urlparse(self.base_url)
+        if (
+            parsed_url.scheme != "https"
+            or not parsed_url.netloc
+            or parsed_url.netloc != configured_url.netloc
+        ):
             raise PasswordPusherProtocolError(
                 "Le lien Password Pusher est invalide."
             )

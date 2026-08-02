@@ -163,6 +163,54 @@ def test_worker_submits_and_reconciles_successful_proxmox_task(app, pve_client):
         assert event.outcome == "success"
 
 
+def test_owner_can_list_recent_jobs_with_safe_vm_details(app, pve_client):
+    client, job_id = enqueue(app)
+
+    response = client.get("/api/jobs")
+
+    assert response.status_code == 200
+    assert response.get_json()["jobs"] == [
+        {
+            "id": job_id,
+            "vm_id": response.get_json()["jobs"][0]["vm_id"],
+            "status": "queued",
+            "stage": "create",
+            "error_code": None,
+            "created_at": response.get_json()["jobs"][0]["created_at"],
+            "updated_at": response.get_json()["jobs"][0]["updated_at"],
+            "vm": {
+                "name": "worker-vm-01",
+                "node": "pve-a",
+                "vmid": None,
+                "profile": "debian-12",
+                "cpu": 2,
+                "ram_mb": 4096,
+                "disk_gb": 40,
+                "guest_username": None,
+            },
+        }
+    ]
+
+
+def test_job_history_never_lists_another_owners_jobs(app):
+    enqueue(app)
+    with app.app_context():
+        user = User(
+            username="history-user",
+            password_hash=generate_password_hash("history-user-strong-password"),
+            role="user",
+        )
+        db.session.add(user)
+        db.session.commit()
+        user_id = user.id
+    client = app.test_client()
+    with client.session_transaction() as portal_session:
+        portal_session["user_id"] = user_id
+        portal_session["authentication"] = "local"
+
+    assert client.get("/api/jobs").get_json() == {"jobs": []}
+
+
 def test_running_task_is_rescheduled_before_success(app, pve_client):
     pve_client.task_statuses = [
         {"status": "running"},

@@ -729,6 +729,20 @@ def create_app(
             )
         )
 
+    @app.get("/api/jobs")
+    @login_required
+    def list_jobs():
+        jobs = db.session.scalars(
+            select(ProvisioningJob)
+            .join(ProvisioningJob.allocation)
+            .where(VMAllocation.owner_id == g.current_user.id)
+            .order_by(ProvisioningJob.created_at.desc())
+            .limit(25)
+        ).all()
+        return jsonify(
+            jobs=[job.public_dict(include_credentials=True) for job in jobs]
+        )
+
     @app.post("/api/vms")
     @login_required
     @csrf_protected

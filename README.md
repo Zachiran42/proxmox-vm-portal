@@ -54,7 +54,9 @@ flask --app 'portal:create_app' worker
 
 L'interface Web est disponible sur `/`. Un administrateur peut y publier,
 contrôler, suspendre et réactiver les profils d'images ; les autres rôles voient
-le catalogue actif en lecture seule.
+le catalogue actif en lecture seule. Chaque utilisateur dispose d'un assistant
+de création de VM, d'une vue de ses quotas et d'un historique privé actualisé
+automatiquement. Le lien Password Pusher n'y apparaît que pour le propriétaire.
 
 En production, servez l'application derrière TLS avec un serveur WSGI et conservez `PORTAL_SESSION_COOKIE_SECURE=true`. N'activez pas le mode debug.
 
@@ -94,7 +96,7 @@ Construction reproductible des templates Debian depuis l'ISO :
 
 Endpoints : `GET /healthz`, `GET /`, `POST /login`, `POST /logout`,
 `GET /api/me`, `GET /api/nodes`, `GET /api/nodes/<node>/isos`,
-`GET /api/image-profiles`, `POST /api/vms`, `GET /api/jobs/<id>`,
+`GET /api/image-profiles`, `POST /api/vms`, `GET /api/jobs`, `GET /api/jobs/<id>`,
 `GET|POST /api/admin/users`, `GET /api/admin/audit-events`,
 `GET|POST /api/admin/image-profiles`, `PATCH /api/admin/image-profiles/<slug>`,
 `GET /auth/oidc/login` et `GET /auth/oidc/callback`.

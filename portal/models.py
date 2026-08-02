@@ -217,9 +217,22 @@ class ProvisioningJob(db.Model):
             "id": self.id,
             "vm_id": self.allocation_id,
             "status": self.status,
+            "stage": self.stage,
             "error_code": self.error_code,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
+            "vm": {
+                "name": self.allocation.name,
+                "node": self.allocation.node,
+                "vmid": self.allocation.vmid,
+                "profile": self.allocation.profile.slug
+                if self.allocation.profile is not None
+                else None,
+                "cpu": self.allocation.cpu,
+                "ram_mb": self.allocation.ram_mb,
+                "disk_gb": self.allocation.disk_gb,
+                "guest_username": self.allocation.guest_username,
+            },
         }
         if include_credentials and self.allocation.credential_url:
             result["guest_access"] = {

@@ -47,7 +47,8 @@
     <aside class="sidebar">
       <div class="sidebar-brand"><div class="brand-mark">P</div><div><strong>Portail</strong><span>Proxmox</span></div></div>
       <nav aria-label="Navigation principale">
-        <a class="nav-link active" href="#catalogue" aria-current="page"><span>◫</span> Images</a>
+        <a class="nav-link active" href="#machines" data-view="machines" aria-current="page"><span>▣</span> Machines</a>
+        <a class="nav-link" href="#images" data-view="images"><span>◫</span> Images</a>
       </nav>
       <div class="sidebar-footer">
         <div class="service-state"><span></span> Services opérationnels</div>
@@ -55,7 +56,7 @@
       </div>
     </aside>
 
-    <main class="content" id="catalogue">
+    <main class="content" id="machines">
       <header class="topbar">
         <span class="mobile-title">Portail Proxmox</span>
         <div class="user-menu">
@@ -65,7 +66,35 @@
         </div>
       </header>
 
-      <div class="page">
+      <div class="mobile-tabs" aria-label="Navigation mobile">
+        <button class="active" type="button" data-view="machines">Machines</button>
+        <button type="button" data-view="images">Images</button>
+      </div>
+
+      <div class="page" id="machines-view">
+        <div class="page-heading">
+          <div><span class="eyebrow">Provisionnement libre-service</span><h1>Mes machines</h1><p>Créez une VM à partir du catalogue approuvé et suivez sa préparation.</p></div>
+          <button class="button button-primary" type="button" id="open-vm-dialog">+ Créer une VM</button>
+        </div>
+
+        <section class="quota-grid" aria-label="Utilisation des quotas">
+          <article><div><span>Machines</span><strong id="quota-vms">0 / 0</strong></div><progress id="quota-vms-progress" max="100" value="0"></progress></article>
+          <article><div><span>vCPU</span><strong id="quota-cpu">0 / 0</strong></div><progress id="quota-cpu-progress" max="100" value="0"></progress></article>
+          <article><div><span>Mémoire</span><strong id="quota-ram">0 / 0</strong></div><progress id="quota-ram-progress" max="100" value="0"></progress></article>
+          <article><div><span>Stockage</span><strong id="quota-disk">0 / 0</strong></div><progress id="quota-disk-progress" max="100" value="0"></progress></article>
+        </section>
+
+        <section class="catalogue-section jobs-section" aria-labelledby="jobs-title">
+          <div class="section-heading">
+            <div><h2 id="jobs-title">Demandes récentes</h2><p id="job-count">Chargement de vos machines…</p></div>
+            <button class="icon-button" type="button" id="refresh-jobs" aria-label="Actualiser les demandes">↻</button>
+          </div>
+          <div class="job-list" id="job-list" aria-live="polite"></div>
+          <div class="empty-state" id="jobs-empty" hidden><span>▣</span><h3>Aucune machine demandée</h3><p>Votre première VM apparaîtra ici dès sa soumission.</p></div>
+        </section>
+      </div>
+
+      <div class="page" id="images-view" hidden>
         <div class="page-heading">
           <div><span class="eyebrow">Catalogue approuvé</span><h1>Images de machines</h1><p>Publiez uniquement des sources validées et prêtes à être provisionnées.</p></div>
           <button class="button button-primary" type="button" id="open-profile-dialog">+ Nouvelle image</button>
@@ -88,6 +117,58 @@
       </div>
     </main>
   </div>
+
+  <dialog id="vm-dialog" aria-labelledby="vm-dialog-title">
+    <form id="vm-form">
+      <div class="dialog-heading">
+        <div><span class="eyebrow">Nouvelle demande</span><h2 id="vm-dialog-title">Créer une machine</h2></div>
+        <button class="close-button" type="button" id="close-vm-dialog" aria-label="Fermer">×</button>
+      </div>
+      <p class="dialog-intro">Les ressources sont réservées dès la soumission pour garantir vos quotas.</p>
+
+      <section class="wizard-step" aria-labelledby="vm-step-source">
+        <div class="step-number">1</div>
+        <div class="step-content">
+          <h3 id="vm-step-source">Image et placement</h3>
+          <div class="form-row">
+            <div><label for="vm-profile">Image</label><select id="vm-profile" name="profile" required></select></div>
+            <div><label for="vm-node">Nœud Proxmox</label><select id="vm-node" name="node" required></select></div>
+          </div>
+          <label for="vm-name">Nom de la machine</label>
+          <input id="vm-name" name="name" maxlength="63" pattern="[a-z][a-z0-9-]{0,62}" placeholder="web-projet-01" required>
+        </div>
+      </section>
+
+      <section class="wizard-step" aria-labelledby="vm-step-resources">
+        <div class="step-number">2</div>
+        <div class="step-content">
+          <h3 id="vm-step-resources">Ressources</h3>
+          <div class="resource-row">
+            <div><label for="vm-cpu">vCPU</label><input id="vm-cpu" name="cpu" type="number" min="1" max="32" value="2" required></div>
+            <div><label for="vm-ram">Mémoire (Mio)</label><input id="vm-ram" name="ram_mb" type="number" min="512" max="131072" step="256" value="4096" required></div>
+            <div><label for="vm-disk">Disque (Gio)</label><input id="vm-disk" name="disk_gb" type="number" min="8" max="2048" value="40" required></div>
+          </div>
+          <p class="quota-preview" id="quota-preview">Cette demande respecte vos quotas actuels.</p>
+        </div>
+      </section>
+
+      <section class="wizard-step" id="guest-access-step" aria-labelledby="vm-step-access" hidden>
+        <div class="step-number">3</div>
+        <div class="step-content">
+          <h3 id="vm-step-access">Compte sudo invité</h3>
+          <label for="vm-guest-username">Identifiant Linux non-root</label>
+          <input id="vm-guest-username" name="guest_username" maxlength="32" pattern="[a-z_][a-z0-9_-]{0,31}" placeholder="hugo">
+          <p class="field-help">Le mot de passe éphémère sera transmis par un lien Password Pusher visible seulement dans votre session.</p>
+        </div>
+      </section>
+
+      <p class="form-error" id="vm-error" role="alert" hidden></p>
+      <div class="dialog-actions">
+        <button class="button button-secondary" type="button" id="cancel-vm">Annuler</button>
+        <button class="button button-primary" type="submit" id="submit-vm">Réserver et créer</button>
+      </div>
+    </form>
+  </dialog>
 
   <dialog id="profile-dialog" aria-labelledby="dialog-title">
     <form id="profile-form">
