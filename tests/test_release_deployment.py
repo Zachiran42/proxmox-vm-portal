@@ -143,3 +143,18 @@ def test_cosign_verification_rejects_another_repository_before_docker(tmp_path):
     assert result.returncode == 1
     assert "ne correspond pas" in result.stderr
     assert not log.exists()
+
+
+def test_version_check_does_not_require_a_tag_on_a_branch_push(tmp_path):
+    environment, _ = fake_docker_environment(tmp_path)
+    environment["GITHUB_REF_TYPE"] = "branch"
+    environment["GITHUB_SHA"] = "0" * 40
+
+    result = run_script(
+        "deploy/scripts/verify-release.sh",
+        "v0.17.0",
+        environment=environment,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "cohérente" in result.stdout

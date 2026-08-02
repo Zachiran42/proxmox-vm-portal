@@ -28,7 +28,11 @@ expect_exact .env.production.example "^PORTAL_IMAGE=proxmox-vm-portal:$regex_ver
 expect_exact deploy/scripts/install-debian.sh "proxmox-vm-portal:$regex_version" "L'image de l'installateur"
 expect_exact deploy/testing/test-debian-install.sh "proxmox-vm-portal:$regex_version" "L'image du test Debian"
 
-if [[ -n ${GITHUB_SHA:-} ]]; then
+if [[ ${GITHUB_REF_TYPE:-} == tag ]]; then
+    [[ -n ${GITHUB_SHA:-} ]] || {
+        echo "GITHUB_SHA est obligatoire lors d'une release par tag." >&2
+        exit 1
+    }
     [[ $(git -C "$ROOT_DIR" cat-file -t "$tag") == tag ]] || {
         echo "Le tag $tag doit être annoté." >&2
         exit 1
