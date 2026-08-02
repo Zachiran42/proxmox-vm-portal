@@ -6,6 +6,7 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 ROOT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
 SECRETS_DIR="$ROOT_DIR/deploy/secrets"
 ENV_FILE="$ROOT_DIR/.env.production"
+COMPOSE="$ROOT_DIR/deploy/scripts/compose.sh"
 
 if [[ $EUID -ne 0 ]]; then
     echo "Exécutez ce script avec sudo sur Debian." >&2
@@ -91,11 +92,34 @@ fi
 if [[ ,$profiles, == *,pwpush,* ]]; then
     install -m 0644 deploy/caddy/sites/pwpush.caddy.disabled deploy/caddy/sites/pwpush.caddy
 fi
-docker compose --env-file "$ENV_FILE" -f compose.yml build api
+deploy_mode=$(setting PORTAL_DEPLOY_MODE)
+deploy_mode=${deploy_mode:-source}
+portal_image=$(setting PORTAL_IMAGE)
+case "$deploy_mode" in
+    source)
+        "$COMPOSE" build api
+        portal_image=${portal_image:-proxmox-vm-portal:0.17.0}
+        ;;
+    release)
+        release_tag=$(setting PORTAL_RELEASE_TAG)
+        release_repository=$(setting PORTAL_RELEASE_REPOSITORY)
+        release_transparency=$(setting PORTAL_RELEASE_TRANSPARENCY)
+        [[ -n $portal_image && -n $release_tag && -n $release_repository ]] || {
+            echo "PORTAL_IMAGE, PORTAL_RELEASE_TAG et PORTAL_RELEASE_REPOSITORY sont requis en mode release." >&2
+            exit 1
+        }
+        "$SCRIPT_DIR/verify-published-image.sh" "$portal_image" "$release_tag" \
+            "$release_repository" "${release_transparency:-private}"
+        docker pull "$portal_image"
+        ;;
+    *)
+        echo "PORTAL_DEPLOY_MODE doit valoir source ou release." >&2
+        exit 1
+        ;;
+esac
 if [[ ${PORTAL_INSTALL_VALIDATE_ONLY:-0} == 1 ]]; then
-    portal_image=$(setting PORTAL_IMAGE)
-    docker image inspect "${portal_image:-proxmox-vm-portal:0.16.0}" >/dev/null
-    echo "Validation Debian terminée après la construction de l'image."
+    docker image inspect "$portal_image" >/dev/null
+    echo "Validation Debian terminée après la préparation de l'image."
     exit 0
 fi
 if [[ ! -s $SECRETS_DIR/portal_admin_password_hash ]]; then
@@ -105,18 +129,18 @@ if [[ ! -s $SECRETS_DIR/portal_admin_password_hash ]]; then
     echo
     [[ $admin_password == "$admin_confirmation" ]] || { echo "Les mots de passe diffèrent." >&2; exit 1; }
     [[ ${#admin_password} -ge 16 ]] || { echo "Mot de passe trop court." >&2; exit 1; }
-    printf '%s' "$admin_password" | docker run --rm -i "$(grep '^PORTAL_IMAGE=' "$ENV_FILE" | cut -d= -f2-)" \
+    printf '%s' "$admin_password" | docker run --rm -i "$portal_image" \
         python -c 'import sys; from werkzeug.security import generate_password_hash; print(generate_password_hash(sys.stdin.read(), method="scrypt"))' \
         > "$SECRETS_DIR/portal_admin_password_hash"
     unset admin_password admin_confirmation
 fi
 
-docker compose --env-file "$ENV_FILE" -f compose.yml config --quiet
-docker compose --env-file "$ENV_FILE" -f compose.yml up -d --wait
-user_count=$(docker compose --env-file "$ENV_FILE" -f compose.yml exec -T db \
+"$COMPOSE" config --quiet
+"$COMPOSE" up -d --wait
+user_count=$("$COMPOSE" exec -T db \
     psql -U portal -d portal -tAc 'SELECT count(*) FROM users')
 if [[ $user_count == 0 ]]; then
-    docker compose --env-file "$ENV_FILE" -f compose.yml exec -T api \
+    "$COMPOSE" exec -T api \
         flask --app portal:create_app bootstrap-admin
 else
     echo "Bootstrap administrateur ignoré: la base contient déjà un utilisateur."

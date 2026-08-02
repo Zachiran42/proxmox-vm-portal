@@ -1,6 +1,6 @@
-# Revue de sécurité — phase 7
+# Revue de sécurité — état cumulé
 
-Date : 1er août 2026. Version examinée : 0.7.0.
+Date : 2 août 2026. Version examinée : 0.17.0.
 
 ## Résultat
 
@@ -19,7 +19,10 @@ véritable cluster Proxmox.
 | Bandit | aucun constat actif |
 | pip-audit sur `requirements.lock` | aucune vulnérabilité connue |
 | Gitleaks sur tout l'historique | aucun secret détecté après une exclusion étroite et documentée du JDBC Keycloak |
-| Docker Scout sur `proxmox-vm-portal:0.7.0` | 0 critique, 0 élevée, 0 moyenne, 0 faible |
+| Docker Scout sur `proxmox-vm-portal:0.17.0` | 0 critique, 0 élevée, 0 moyenne, 0 faible |
+| Actionlint et contrôleur de release | workflows valides, actions par SHA et cohérence SemVer |
+| Vérification de déploiement | image GHCR par digest et identité OIDC exacte obligatoires en mode release |
+| Image Cosign v3.0.6 épinglée | signature officielle, certificat et entrée de transparence vérifiés |
 
 La base d'image est `python:3.13.14-alpine3.24` épinglée par digest. Les
 dépendances Python transitives sont verrouillées avec leurs hashes dans
@@ -55,10 +58,13 @@ un redémarrage du noyau, les ACL d'un Proxmox réel ni une restauration de volu
   groupe ou autres ;
 - image Alpine minimale, digest épinglé, dépendances avec hashes et règle
   Gitleaks versionnée.
+- image et manifeste de release signés par identité OIDC, avec SBOM et provenance ;
+- installation et mise à jour refusant les images publiées sans digest ni
+  signature correspondant au dépôt et au tag approuvés.
 
 ## Décision
 
-La version 0.7.0 peut servir aux essais privés et à la recette. La publication
+La version 0.17.0 peut servir aux essais privés et à la recette. La publication
 open source et l'exposition Internet restent conditionnées aux six risques
 résiduels du modèle de menaces, en priorité le test sur VM Debian réelle, les
 ACL Proxmox, la MFA et le pentest indépendant.

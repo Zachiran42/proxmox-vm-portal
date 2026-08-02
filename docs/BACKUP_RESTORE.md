@@ -16,6 +16,11 @@ La sauvegarde inclut les secrets afin de préserver les clés de chiffrement ; e
 doit donc rester chiffrée à tout moment. Une sauvegarde uniquement présente sur
 la VM source n'est pas une sauvegarde.
 
+Les identifiants du registre Docker ne sont pas inclus. Après restauration d'un
+déploiement `release` privé sur un autre serveur, authentifiez de nouveau le
+compte root auprès de GHCR avant de relancer la stack ; la vérification Cosign
+échoue fermement si elle ne peut pas lire la signature distante.
+
 ## Restauration
 
 Sur une instance configurée et arrêtée pour maintenance :

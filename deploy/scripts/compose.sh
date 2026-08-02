@@ -10,4 +10,27 @@ if [ ! -f "$ENV_FILE" ]; then
     exit 1
 fi
 
-exec docker compose --project-directory "$ROOT_DIR" --env-file "$ENV_FILE" -f "$ROOT_DIR/compose.yml" "$@"
+env_value() { sed -n "s/^$1=//p" "$ENV_FILE" | tail -n 1; }
+deploy_mode=${PORTAL_DEPLOY_MODE:-$(env_value PORTAL_DEPLOY_MODE)}
+deploy_mode=${deploy_mode:-source}
+
+case "$deploy_mode" in
+    source)
+        exec docker compose --project-directory "$ROOT_DIR" --env-file "$ENV_FILE" \
+            -f "$ROOT_DIR/compose.yml" "$@"
+        ;;
+    release)
+        portal_image=$(env_value PORTAL_IMAGE)
+        if ! printf '%s\n' "$portal_image" \
+            | grep -Eq '^ghcr\.io/[a-z0-9_.-]+/[a-z0-9_.-]+@sha256:[0-9a-f]{64}$'; then
+            echo "En mode release, PORTAL_IMAGE doit être une référence GHCR par digest." >&2
+            exit 1
+        fi
+        exec docker compose --project-directory "$ROOT_DIR" --env-file "$ENV_FILE" \
+            -f "$ROOT_DIR/compose.yml" -f "$ROOT_DIR/deploy/compose.release.yml" "$@"
+        ;;
+    *)
+        echo "PORTAL_DEPLOY_MODE doit valoir source ou release." >&2
+        exit 1
+        ;;
+esac

@@ -72,3 +72,15 @@ cosign verify-blob --insecure-ignore-tlog=true \
 Cette vérification confirme l'identité du workflow et l'intégrité des artefacts.
 Elle ne remplace pas l'approbation du commit, la CI, la recette de préproduction
 ni l'épinglage du digest lors du déploiement.
+
+## Déploiement automatisé du digest
+
+Après téléchargement du manifeste et authentification de Docker auprès de GHCR,
+reporter son champ `image` suivi de son champ `digest` dans `PORTAL_IMAGE`, puis
+configurer le tag et le dépôt attendus. `install-debian.sh`, `update.sh` et la
+recette de préproduction appellent `verify-published-image.sh` avant exécution.
+
+L'override `deploy/compose.release.yml` retire les constructions locales des
+services `migrate`, `api` et `worker`. Le wrapper `compose.sh` refuse donc le mode
+release si `PORTAL_IMAGE` n'est pas une référence GHCR contenant exactement un
+digest SHA-256.

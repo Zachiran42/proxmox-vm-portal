@@ -42,7 +42,7 @@ ou au fournisseur d'identité reste hors de la barrière de sécurité applicati
 | Fuite du mot de passe invité | Élevé | secret aléatoire non persisté, hash cloud-init, lien expirant réservé au propriétaire | Moyen selon Password Pusher |
 | Altération ou effacement des audits | Élevé | table PostgreSQL append-only par trigger, API en lecture contrôlée | Moyen pour un administrateur DB |
 | Archive de restauration malveillante | Élevé | chiffrement age, répertoire temporaire protégé, rejet des chemins absolus, traversées et liens | Faible |
-| Mise à jour ou dépendance compromise | Critique | commit attendu explicite, base Docker par digest, verrou Python avec hashes, scans, SBOM, provenance et signature OIDC de l'image/manifeste | Faible si le digest et l'identité sont vérifiés |
+| Mise à jour ou dépendance compromise | Critique | commit attendu explicite, base Docker par digest, verrou Python avec hashes, scans, SBOM, provenance, signature OIDC et déploiement refusant toute image sans digest/signature valides | Faible si le dépôt et l'identité approuvés restent protégés |
 | Déni de service par provisionnement | Élevé | quotas, file asynchrone, limites de requête et de connexion | Moyen ; capacité PVE à superviser |
 | Dépôt local modifiable lors de l'installation | Élevé | installateur root refusant tout fichier modifiable par groupe/autres | Faible |
 

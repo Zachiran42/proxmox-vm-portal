@@ -92,8 +92,9 @@ d'administrateur, jamais une URL libre fournie par un utilisateur.
 
 1. Durcir l'API existante et exposer l'inventaire Proxmox en lecture seule.
 2. Ajouter PostgreSQL, migrations, utilisateurs, rôles, quotas et audit. **Livré.**
-3. Ajouter Keycloak/OIDC puis la fédération LDAP/LDAPS. **Intégration OIDC et
-   guide de fédération livrés ; déploiement Keycloak à venir.**
+3. Ajouter Keycloak/OIDC puis la fédération LDAP/LDAPS. **Intégration OIDC,
+   realm et déploiement Keycloak optionnel, guide LDAP/LDAPS livrés ; activation
+   et recette MFA sur l'environnement réel encore requises.**
 4. Introduire la file de travaux, le suivi Proxmox et les profils d'images.
    **Livré : profils ISO, clones cloud-init et construction Debian 13 sans
    assistance par Packer/Preseed avec somme ISO épinglée. Le démarrage, l’arrêt,
@@ -119,3 +120,6 @@ d'administrateur, jamais une URL libre fournie par un utilisateur.
 11. Sécuriser la chaîne de publication. **Livré : image GHCR signée sans clé
     persistante, provenance BuildKit maximale, SBOM SPDX, manifeste signé,
     contrôles de cohérence SemVer et surveillance Dependabot.**
+12. Fermer la chaîne jusqu'au serveur. **Livré : installation, mise à jour et
+    qualification d'une image GHCR exclusivement par digest, après vérification
+    Cosign de l'identité exacte du workflow de release.**

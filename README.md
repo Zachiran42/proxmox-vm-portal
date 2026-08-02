@@ -41,6 +41,9 @@ stocké dans le dépôt.
 - Les tags de release construisent une image GHCR signée par identité OIDC, avec
   provenance `mode=max`, SBOM SPDX, manifeste signé et sommes SHA-256. Aucune clé
   de signature longue durée n'est stockée dans GitHub.
+- Le mode de déploiement `release` refuse les tags d'image mutables, vérifie la
+  signature et l'identité OIDC avec Cosign, puis exécute uniquement le digest
+  GHCR approuvé sans reconstruire le code local.
 - Les profils cloud-init clonés créent un compte nominatif non-root ; son secret
   aléatoire n'est jamais persisté et seul un lien Password Pusher expirant est
   remis au propriétaire.

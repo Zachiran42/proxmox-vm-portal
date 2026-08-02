@@ -35,3 +35,22 @@ def test_dockerfile_contains_oci_traceability_labels():
     assert "org.opencontainers.image.source" in dockerfile
     assert "org.opencontainers.image.revision" in dockerfile
     assert "org.opencontainers.image.version" in dockerfile
+
+
+def test_release_operations_verify_before_pull_or_qualification():
+    install = (ROOT / "deploy/scripts/install-debian.sh").read_text(encoding="utf-8")
+    update = (ROOT / "deploy/scripts/update.sh").read_text(encoding="utf-8")
+    qualify = (ROOT / "deploy/scripts/qualify-preproduction.sh").read_text(
+        encoding="utf-8"
+    )
+    override = (ROOT / "deploy/compose.release.yml").read_text(encoding="utf-8")
+    release_update = update.split("release)", maxsplit=1)[1]
+
+    assert install.index("verify-published-image.sh") < install.index(
+        'docker pull "$portal_image"'
+    )
+    assert release_update.index("verify-published-image.sh") < release_update.index(
+        '"$COMPOSE" pull'
+    )
+    assert "verify-published-image.sh" in qualify
+    assert override.count("build: !reset null") == 3

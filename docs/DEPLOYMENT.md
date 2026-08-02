@@ -23,6 +23,31 @@ issue du `release-manifest.json` et vérifiez d'abord sa signature selon
 `docs/RELEASES.md`. Un tag, y compris `latest`, reste mutable et ne constitue pas
 une preuve d'approbation.
 
+Deux modes sont disponibles :
+
+- `PORTAL_DEPLOY_MODE=source` construit localement le commit Git approuvé ;
+- `PORTAL_DEPLOY_MODE=release` supprime les directives Compose `build`, vérifie
+  la signature distante puis tire uniquement l'image GHCR par digest.
+
+Pour le mode release privé, authentifiez le compte root de la VM avec un token
+GitHub limité à `read:packages`, puis configurez `.env.production` :
+
+```bash
+sudo docker login ghcr.io
+
+PORTAL_DEPLOY_MODE=release
+PORTAL_IMAGE=ghcr.io/hugofelix088-spec/proxmox-vm-portal@sha256:DIGEST_RELEASE
+PORTAL_RELEASE_TAG=v0.17.0
+PORTAL_RELEASE_REPOSITORY=hugofelix088-spec/proxmox-vm-portal
+PORTAL_RELEASE_TRANSPARENCY=private
+```
+
+Le digest provient de `release-manifest.json`. L'installateur exécute Cosign
+v3.0.6 depuis son image officielle épinglée par digest, avec racine en lecture
+seule, capacités supprimées et configuration Docker montée en lecture seule.
+Le mode `public` interdit l'ignorance du journal Rekor ; ne l'activez qu'après
+avoir publié les signatures avec transparence lors du passage open source.
+
 ## Installation
 
 ```bash

@@ -54,6 +54,16 @@ for secret in portal_db_password portal_database_url portal_session_secret \
 done
 
 check "Configuration Compose valide" "$COMPOSE" config --quiet
+deploy_mode=$(sed -n 's/^PORTAL_DEPLOY_MODE=//p' "$ROOT_DIR/.env.production" | tail -n 1)
+if [[ $deploy_mode == release ]]; then
+    portal_image=$(sed -n 's/^PORTAL_IMAGE=//p' "$ROOT_DIR/.env.production" | tail -n 1)
+    release_tag=$(sed -n 's/^PORTAL_RELEASE_TAG=//p' "$ROOT_DIR/.env.production" | tail -n 1)
+    release_repository=$(sed -n 's/^PORTAL_RELEASE_REPOSITORY=//p' "$ROOT_DIR/.env.production" | tail -n 1)
+    release_transparency=$(sed -n 's/^PORTAL_RELEASE_TRANSPARENCY=//p' "$ROOT_DIR/.env.production" | tail -n 1)
+    check "Signature de l'image publiée" "$SCRIPT_DIR/verify-published-image.sh" \
+        "$portal_image" "$release_tag" "$release_repository" \
+        "${release_transparency:-private}"
+fi
 for service in db api worker proxy; do
     container=$($COMPOSE ps -q "$service" 2>/dev/null)
     if [[ -z $container ]]; then

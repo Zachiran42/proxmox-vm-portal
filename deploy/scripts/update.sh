@@ -19,8 +19,28 @@ if [[ $remote_commit != "$expected_commit" ]]; then
     exit 1
 fi
 git -C "$ROOT_DIR" merge --ff-only "$remote_commit"
-"$COMPOSE" pull --ignore-buildable
-"$COMPOSE" build --pull api
+env_value() { sed -n "s/^$1=//p" "$ROOT_DIR/.env.production" | tail -n 1; }
+deploy_mode=$(env_value PORTAL_DEPLOY_MODE)
+deploy_mode=${deploy_mode:-source}
+case "$deploy_mode" in
+    source)
+        "$COMPOSE" pull --ignore-buildable
+        "$COMPOSE" build --pull api
+        ;;
+    release)
+        portal_image=$(env_value PORTAL_IMAGE)
+        release_tag=$(env_value PORTAL_RELEASE_TAG)
+        release_repository=$(env_value PORTAL_RELEASE_REPOSITORY)
+        release_transparency=$(env_value PORTAL_RELEASE_TRANSPARENCY)
+        "$SCRIPT_DIR/verify-published-image.sh" "$portal_image" "$release_tag" \
+            "$release_repository" "${release_transparency:-private}"
+        "$COMPOSE" pull
+        ;;
+    *)
+        echo "PORTAL_DEPLOY_MODE doit valoir source ou release." >&2
+        exit 1
+        ;;
+esac
 "$COMPOSE" run --rm migrate
 "$COMPOSE" up -d --wait --remove-orphans
 "$COMPOSE" exec -T api python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5)"

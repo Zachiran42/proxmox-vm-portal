@@ -1,0 +1,7 @@
+services:
+  migrate:
+    build: !reset null
+  api:
+    build: !reset null
+  worker:
+    build: !reset null
