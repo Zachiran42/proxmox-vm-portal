@@ -44,6 +44,7 @@ def test_portal_shell_loads_self_hosted_assets_and_strict_csp(app):
     assert 'id="service-grid"' in html
     assert 'id="incident-list"' in html
     assert 'id="incident-dialog"' in html
+    assert 'href="/api/admin/audit-events.csv"' in html
     assert 'id="job-list"' in html
     assert "Password Pusher" in html
     assert 'id="admin-view"' in html

@@ -1,0 +1,42 @@
+groups:
+  - name: proxmox-vm-portal
+    rules:
+      - alert: PortalUnavailable
+        expr: absent(portal_up) == 1
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: Portail Proxmox indisponible
+          description: Prometheus ne peut plus collecter les métriques du portail.
+
+      - alert: PortalWorkerUnavailable
+        expr: portal_worker_last_seen_seconds < 0 or portal_worker_last_seen_seconds > 30
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: Worker du portail absent
+          description: Aucun heartbeat récent du worker de provisionnement.
+
+      - alert: PortalProxmoxUnavailable
+        expr: portal_proxmox_reachable == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: API Proxmox inaccessible depuis le portail
+          description: La collecte d’inventaire Proxmox échoue.
+
+      - alert: PortalManualInterventionRequired
+        expr: portal_jobs{status="attention"} + portal_vm_operations{status="attention"} > 0
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: Intervention manuelle requise dans le portail
+          description: Un travail ambigu attend une vérification administrateur.
+
+      - alert: PortalQueueBacklog
+        expr: portal_jobs{status="queued"} + portal_vm_operations{status="queued"} > 20
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: File du portail en attente
+          description: Plus de vingt travaux restent en file depuis dix minutes.

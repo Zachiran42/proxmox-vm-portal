@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+import json
 import os
 import secrets
 import socket
@@ -10,6 +12,7 @@ from functools import wraps
 from hashlib import sha256
 from hmac import compare_digest
 from hmac import new as hmac_new
+from io import StringIO
 from typing import Any
 
 import click
@@ -17,6 +20,7 @@ from authlib.integrations.base_client.errors import OAuthError
 from authlib.integrations.flask_client import OAuth
 from flask import (
     Flask,
+    Response,
     g,
     jsonify,
     redirect,
@@ -46,6 +50,7 @@ from .models import (
     WorkerHeartbeat,
     db,
 )
+from .observability import render_prometheus_metrics
 from .oidc import (
     OIDCIdentity,
     OIDCIdentityError,
@@ -94,6 +99,7 @@ def create_app(
         PORTAL_ADMIN_USERNAME=os.environ.get("PORTAL_ADMIN_USERNAME", "").strip(),
         PORTAL_ADMIN_PASSWORD_HASH=environment_value("PORTAL_ADMIN_PASSWORD_HASH"),
         PORTAL_SESSION_SECRET=environment_value("PORTAL_SESSION_SECRET", strip=False),
+        PORTAL_METRICS_TOKEN=environment_value("PORTAL_METRICS_TOKEN"),
         PORTAL_LOCAL_AUTH_ENABLED=_bool_environment(
             "PORTAL_LOCAL_AUTH_ENABLED", True
         ),
@@ -172,6 +178,7 @@ def create_app(
     _validate_identity_configuration(app)
     _validate_job_configuration(app)
     _validate_login_throttle_configuration(app)
+    _validate_observability_configuration(app)
     password_pusher = _configure_password_pusher(app, password_pusher_client)
 
     db.init_app(app)
@@ -335,6 +342,23 @@ def create_app(
     @app.get("/healthz")
     def healthz():
         return jsonify(status="ok")
+
+    @app.get("/metrics")
+    def metrics():
+        expected = app.config["PORTAL_METRICS_TOKEN"]
+        if not expected:
+            return jsonify(error="not_found"), 404
+        authorization = request.headers.get("Authorization", "")
+        supplied = authorization[7:] if authorization.startswith("Bearer ") else ""
+        if not supplied or not compare_digest(expected, supplied):
+            response = jsonify(error="metrics_authentication_required")
+            response.status_code = 401
+            response.headers["WWW-Authenticate"] = "Bearer"
+            return response
+        return Response(
+            render_prometheus_metrics(client),
+            content_type="text/plain; version=0.0.4; charset=utf-8",
+        )
 
     @app.get("/")
     def home():
@@ -785,6 +809,56 @@ def create_app(
             select(AuditEvent).order_by(AuditEvent.created_at.desc()).limit(100)
         ).all()
         return jsonify(events=[event.public_dict() for event in events])
+
+    @app.get("/api/admin/audit-events.csv")
+    @login_required
+    @role_required("admin")
+    def export_audit_events():
+        raw_limit = request.args.get("limit", "1000")
+        try:
+            limit = int(raw_limit)
+        except ValueError:
+            return jsonify(errors={"limit": "Entier requis."}), 400
+        if not 1 <= limit <= 5000:
+            return jsonify(errors={"limit": "Valeur requise entre 1 et 5000."}), 400
+        events = db.session.scalars(
+            select(AuditEvent).order_by(AuditEvent.created_at.desc()).limit(limit)
+        ).all()
+        output = StringIO(newline="")
+        writer = csv.writer(output, lineterminator="\n")
+        writer.writerow(
+            (
+                "created_at",
+                "action",
+                "outcome",
+                "actor_user_id",
+                "target_type",
+                "target_id",
+                "request_id",
+                "details",
+            )
+        )
+        for event in events:
+            writer.writerow(
+                _csv_safe_cell(value)
+                for value in (
+                    event.created_at.isoformat(),
+                    event.action,
+                    event.outcome,
+                    event.actor_user_id,
+                    event.target_type,
+                    event.target_id,
+                    event.request_id,
+                    json.dumps(event.details, ensure_ascii=False, sort_keys=True),
+                )
+            )
+        return Response(
+            output.getvalue(),
+            content_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": 'attachment; filename="portal-audit.csv"'
+            },
+        )
 
     @app.get("/api/admin/operations")
     @login_required
@@ -1251,6 +1325,13 @@ def _quota_usage(user_id: int) -> dict[str, int]:
     }
 
 
+def _csv_safe_cell(value: object) -> str:
+    text = "" if value is None else str(value)
+    if text.startswith(("=", "+", "-", "@", "\t", "\r")):
+        return "'" + text
+    return text
+
+
 def _validate_identity_configuration(app: Flask) -> None:
     oidc_keys = (
         "PORTAL_OIDC_ISSUER",
@@ -1315,6 +1396,12 @@ def _validate_login_throttle_configuration(app: Flask) -> None:
         raise ValueError(
             "PORTAL_LOGIN_IP_MAX_FAILURES doit être supérieur ou égal au seuil par compte."
         )
+
+
+def _validate_observability_configuration(app: Flask) -> None:
+    token = app.config["PORTAL_METRICS_TOKEN"]
+    if token and len(token) < 32:
+        raise ValueError("PORTAL_METRICS_TOKEN doit contenir au moins 32 caractères.")
 
 
 def _login_throttle_keys(app: Flask, username: str) -> tuple[str, str]:

@@ -1,0 +1,13 @@
+scrape_configs:
+  - job_name: proxmox-vm-portal
+    scheme: https
+    metrics_path: /metrics
+    bearer_token_file: /run/secrets/portal_metrics_token
+    static_configs:
+      - targets: [portal.example.com]
+    # Pour une PKI interne uniquement : montez sa CA et décommentez.
+    # tls_config:
+    #   ca_file: /etc/prometheus/internal-ca.pem
+
+rule_files:
+  - /etc/prometheus/rules/proxmox-vm-portal.yml

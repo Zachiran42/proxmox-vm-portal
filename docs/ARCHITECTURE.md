@@ -114,3 +114,5 @@ d'administrateur, jamais une URL libre fournie par un utilisateur.
 9. Superviser la file et les dépendances. **Livré : heartbeat des workers,
    état Proxmox, incidents centralisés et reprise manuelle limitée au suivi d’un
    UPID existant.**
+10. Exposer l’observabilité externe. **Livré : métriques Prometheus protégées,
+    règles Alertmanager versionnées et export CSV sécurisé du journal d’audit.**

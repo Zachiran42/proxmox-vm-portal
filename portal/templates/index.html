@@ -160,6 +160,7 @@
               <select id="audit-outcome"><option value="">Tous les résultats</option><option value="success">Succès</option><option value="failure">Échec</option><option value="denied">Refus</option></select>
               <label class="sr-only" for="audit-search">Rechercher</label>
               <input id="audit-search" type="search" placeholder="Rechercher une action…" maxlength="80">
+              <a class="icon-button export-button" href="/api/admin/audit-events.csv" download="portal-audit.csv" aria-label="Exporter le journal en CSV">↓</a>
               <button class="icon-button" type="button" id="refresh-audit" aria-label="Actualiser le journal">↻</button>
             </div>
           </div>

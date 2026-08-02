@@ -35,6 +35,9 @@ stocké dans le dépôt.
 - L’administration expose la santé de PostgreSQL, du worker et de Proxmox ainsi
   que les travaux ambigus. Un suivi ne peut être repris qu’avec son UPID existant
   et une clôture en échec exige la confirmation exacte du nom de la VM.
+- Les métriques Prometheus utilisent un jeton Bearer dédié et ne contiennent
+  aucun identifiant individuel. Les alertes email/webhook sont déléguées à
+  Alertmanager afin de ne jamais bloquer le worker.
 - Les profils cloud-init clonés créent un compte nominatif non-root ; son secret
   aléatoire n'est jamais persisté et seul un lien Password Pusher expirant est
   remis au propriétaire.
@@ -69,6 +72,7 @@ L'espace Administration permet de créer et suspendre les comptes locaux,
 d'ajuster leurs rôles et quotas et de consulter les 100 derniers événements
 d'audit. Il centralise aussi l’état des services et les interventions manuelles
 sur les travaux ambigus. Les rôles des identités OIDC restent gérés dans Keycloak.
+Le journal d’audit peut être exporté en CSV neutralisé pour les tableurs.
 
 En production, servez l'application derrière TLS avec un serveur WSGI et conservez `PORTAL_SESSION_COOKIE_SECURE=true`. N'activez pas le mode debug.
 
@@ -105,13 +109,15 @@ Exploitation de la file de travaux : [`docs/JOBS.md`](docs/JOBS.md).
 Préparation sécurisée des templates et remise des accès : [`docs/GUEST_ACCESS.md`](docs/GUEST_ACCESS.md).
 Construction reproductible des templates Debian depuis l'ISO :
 [`docs/IMAGE_FACTORY.md`](docs/IMAGE_FACTORY.md).
+Métriques, règles d’alerte et export d’audit :
+[`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md).
 
-Endpoints : `GET /healthz`, `GET /`, `POST /login`, `POST /logout`,
+Endpoints : `GET /healthz`, `GET /metrics`, `GET /`, `POST /login`, `POST /logout`,
 `GET /api/me`, `GET /api/nodes`, `GET /api/nodes/<node>/isos`,
 `GET /api/image-profiles`, `POST /api/vms`, `POST /api/vms/<id>/actions`,
 `GET /api/jobs`, `GET /api/jobs/<id>`,
 `GET|POST /api/admin/users`, `PATCH /api/admin/users/<id>`,
-`GET /api/admin/audit-events`,
+`GET /api/admin/audit-events`, `GET /api/admin/audit-events.csv`,
 `GET /api/admin/operations`, `POST /api/admin/incidents/<kind>/<id>/actions`,
 `GET|POST /api/admin/image-profiles`, `PATCH /api/admin/image-profiles/<slug>`,
 `GET /auth/oidc/login` et `GET /auth/oidc/callback`.

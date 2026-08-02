@@ -32,7 +32,9 @@ sudo bash deploy/scripts/install-debian.sh
 Avant le lancement, renseigner au minimum `PORTAL_DOMAIN`, `ACME_EMAIL`,
 `PVE_API_URL`, `PVE_TOKEN_ID`, `BACKUP_AGE_RECIPIENT` et
 `BACKUP_DIRECTORY`. Les secrets sont générés ou demandés sans être inscrits dans
-`.env.production`, puis conservés avec le mode 0600 sous `deploy/secrets/`.
+`.env.production`, puis conservés avec le mode 0600 sous `deploy/secrets/`. Le
+jeton `portal_metrics_token` généré est destiné exclusivement au scraper
+Prometheus ; ne le placez ni dans une URL ni dans la configuration Git.
 Caddy obtient et renouvelle automatiquement le certificat public. Pour un nom
 interne, installez une CA interne dans Caddy et dans les clients avant ouverture
 aux utilisateurs ; ne désactivez jamais la vérification TLS.

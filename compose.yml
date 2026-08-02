@@ -7,6 +7,7 @@ x-portal-environment: &portal-environment
   PVE_TOKEN_SECRET_FILE: /run/secrets/pve_token_secret
   PORTAL_OIDC_CLIENT_SECRET_FILE: /run/secrets/portal_oidc_client_secret
   PORTAL_PWPUSH_API_TOKEN_FILE: /run/secrets/portal_pwpush_api_token
+  PORTAL_METRICS_TOKEN_FILE: /run/secrets/portal_metrics_token
   PVE_API_URL: ${PVE_API_URL:?PVE_API_URL est requis}
   PVE_TOKEN_ID: ${PVE_TOKEN_ID:?PVE_TOKEN_ID est requis}
   PORTAL_ADMIN_USERNAME: ${PORTAL_ADMIN_USERNAME:-admin}
@@ -28,7 +29,7 @@ x-portal-environment: &portal-environment
   PORTAL_SESSION_COOKIE_SECURE: "true"
 
 x-portal-service: &portal-service
-  image: ${PORTAL_IMAGE:-proxmox-vm-portal:0.14.0}
+  image: ${PORTAL_IMAGE:-proxmox-vm-portal:0.15.0}
   build:
     context: .
   restart: unless-stopped
@@ -47,6 +48,7 @@ x-portal-service: &portal-service
     - pve_token_secret
     - portal_oidc_client_secret
     - portal_pwpush_api_token
+    - portal_metrics_token
   networks: [backend, edge]
   logging:
     driver: json-file
@@ -228,6 +230,7 @@ secrets:
   pve_token_secret: {file: "${SECRETS_DIR:-./deploy/secrets}/pve_token_secret"}
   portal_oidc_client_secret: {file: "${SECRETS_DIR:-./deploy/secrets}/portal_oidc_client_secret"}
   portal_pwpush_api_token: {file: "${SECRETS_DIR:-./deploy/secrets}/portal_pwpush_api_token"}
+  portal_metrics_token: {file: "${SECRETS_DIR:-./deploy/secrets}/portal_metrics_token"}
   keycloak_db_password: {file: "${SECRETS_DIR:-./deploy/secrets}/keycloak_db_password"}
   keycloak_admin_password: {file: "${SECRETS_DIR:-./deploy/secrets}/keycloak_admin_password"}
   pwpush_master_key: {file: "${SECRETS_DIR:-./deploy/secrets}/pwpush_master_key"}

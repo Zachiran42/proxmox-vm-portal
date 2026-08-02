@@ -64,7 +64,8 @@ done
 }
 
 for name in portal_db_password portal_session_secret keycloak_db_password \
-    keycloak_admin_password pwpush_master_key pwpush_secret_key_base; do
+    keycloak_admin_password pwpush_master_key pwpush_secret_key_base \
+    portal_metrics_token; do
     secret "$name"
 done
 for name in portal_oidc_client_secret portal_pwpush_api_token; do
@@ -93,7 +94,7 @@ fi
 docker compose --env-file "$ENV_FILE" -f compose.yml build api
 if [[ ${PORTAL_INSTALL_VALIDATE_ONLY:-0} == 1 ]]; then
     portal_image=$(setting PORTAL_IMAGE)
-    docker image inspect "${portal_image:-proxmox-vm-portal:0.14.0}" >/dev/null
+    docker image inspect "${portal_image:-proxmox-vm-portal:0.15.0}" >/dev/null
     echo "Validation Debian terminée après la construction de l'image."
     exit 0
 fi

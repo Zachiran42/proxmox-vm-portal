@@ -48,7 +48,7 @@ else
     fail "Permissions ou liens des secrets non conformes"
 fi
 for secret in portal_db_password portal_database_url portal_session_secret \
-    portal_admin_password_hash pve_token_secret; do
+    portal_admin_password_hash pve_token_secret portal_metrics_token; do
     [[ -s $SECRETS_DIR/$secret ]] \
         && pass "Secret requis présent: $secret" || fail "Secret requis absent: $secret"
 done
