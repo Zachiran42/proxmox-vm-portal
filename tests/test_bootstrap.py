@@ -24,7 +24,8 @@ def test_private_bootstrap_is_pinned_and_defensive():
     assert "PORTAL_DEPLOY_MODE release" in script
 
 
-def test_bootstrap_requires_a_token_before_network_or_filesystem_changes():
+def test_bootstrap_fails_closed_before_network_or_filesystem_changes():
+    script = BOOTSTRAP.read_text(encoding="utf-8")
     environment = os.environ.copy()
     environment.pop("PORTAL_GITHUB_TOKEN", None)
 
@@ -38,7 +39,13 @@ def test_bootstrap_requires_a_token_before_network_or_filesystem_changes():
     )
 
     assert result.returncode == 1
-    assert "PORTAL_GITHUB_TOKEN est requis" in result.stderr
+    assert result.stderr in {
+        "Exécutez ce bootstrap avec sudo.\n",
+        "PORTAL_GITHUB_TOKEN est requis tant que le dépôt et GHCR restent privés.\n",
+    }
+    assert script.index("PORTAL_GITHUB_TOKEN est requis") < script.index(
+        "apt-get update"
+    )
 
 
 def test_installer_authenticates_to_ghcr_without_exposing_the_token():
