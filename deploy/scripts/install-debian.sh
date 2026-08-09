@@ -99,7 +99,7 @@ portal_image=$(setting PORTAL_IMAGE)
 case "$deploy_mode" in
     source)
         "$COMPOSE" build api
-        portal_image=${portal_image:-proxmox-vm-portal:0.18.2}
+        portal_image=${portal_image:-proxmox-vm-portal:0.18.3}
         ;;
     release)
         release_tag=$(setting PORTAL_RELEASE_TAG)
@@ -119,7 +119,7 @@ case "$deploy_mode" in
                 --username "$github_username" --password-stdin
             unset PORTAL_GITHUB_TOKEN
         fi
-        "$SCRIPT_DIR/verify-published-image.sh" "$portal_image" "$release_tag" \
+        bash "$SCRIPT_DIR/verify-published-image.sh" "$portal_image" "$release_tag" \
             "$release_repository" "${release_transparency:-private}"
         docker pull "$portal_image"
         ;;

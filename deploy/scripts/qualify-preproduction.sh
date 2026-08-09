@@ -60,7 +60,7 @@ if [[ $deploy_mode == release ]]; then
     release_tag=$(sed -n 's/^PORTAL_RELEASE_TAG=//p' "$ROOT_DIR/.env.production" | tail -n 1)
     release_repository=$(sed -n 's/^PORTAL_RELEASE_REPOSITORY=//p' "$ROOT_DIR/.env.production" | tail -n 1)
     release_transparency=$(sed -n 's/^PORTAL_RELEASE_TRANSPARENCY=//p' "$ROOT_DIR/.env.production" | tail -n 1)
-    check "Signature de l'image publiée" "$SCRIPT_DIR/verify-published-image.sh" \
+    check "Signature de l'image publiée" bash "$SCRIPT_DIR/verify-published-image.sh" \
         "$portal_image" "$release_tag" "$release_repository" \
         "${release_transparency:-private}"
 fi

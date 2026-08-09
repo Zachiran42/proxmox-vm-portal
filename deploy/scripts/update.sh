@@ -32,7 +32,7 @@ case "$deploy_mode" in
         release_tag=$(env_value PORTAL_RELEASE_TAG)
         release_repository=$(env_value PORTAL_RELEASE_REPOSITORY)
         release_transparency=$(env_value PORTAL_RELEASE_TRANSPARENCY)
-        "$SCRIPT_DIR/verify-published-image.sh" "$portal_image" "$release_tag" \
+        bash "$SCRIPT_DIR/verify-published-image.sh" "$portal_image" "$release_tag" \
             "$release_repository" "${release_transparency:-private}"
         "$COMPOSE" pull
         ;;

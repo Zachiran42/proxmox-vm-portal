@@ -54,10 +54,13 @@ def test_release_operations_verify_before_pull_or_qualification():
     assert install.index("verify-published-image.sh") < install.index(
         'docker pull "$portal_image"'
     )
+    assert 'bash "$SCRIPT_DIR/verify-published-image.sh"' in install
     assert release_update.index("verify-published-image.sh") < release_update.index(
         '"$COMPOSE" pull'
     )
+    assert 'bash "$SCRIPT_DIR/verify-published-image.sh"' in release_update
     assert "verify-published-image.sh" in qualify
+    assert 'bash "$SCRIPT_DIR/verify-published-image.sh"' in qualify
     assert override.count("build: !reset null") == 3
 
 
