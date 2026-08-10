@@ -6,6 +6,7 @@ ROOT = Path(__file__).parents[1]
 DIGEST = "a" * 64
 REPOSITORY = "hugofelix088-spec/proxmox-vm-portal"
 IMAGE = f"ghcr.io/{REPOSITORY}@sha256:{DIGEST}"
+OFFLINE_IMAGE = f"ghcr.io/{REPOSITORY}:offline-0.19.3"
 
 
 def fake_docker_environment(tmp_path: Path) -> tuple[dict[str, str], Path]:
@@ -40,7 +41,7 @@ def test_compose_wrapper_uses_only_the_base_file_in_source_mode(tmp_path):
     environment, log = fake_docker_environment(tmp_path)
     env_file = tmp_path / "portal.env"
     env_file.write_text(
-        "PORTAL_DEPLOY_MODE=source\nPORTAL_IMAGE=proxmox-vm-portal:0.19.2\n",
+        "PORTAL_DEPLOY_MODE=source\nPORTAL_IMAGE=proxmox-vm-portal:0.19.3\n",
         encoding="utf-8",
     )
     environment["PORTAL_ENV_FILE"] = str(env_file)
@@ -75,7 +76,7 @@ def test_compose_wrapper_forbids_every_pull_in_offline_mode(tmp_path):
     environment, log = fake_docker_environment(tmp_path)
     env_file = tmp_path / "portal.env"
     env_file.write_text(
-        f"PORTAL_DEPLOY_MODE=offline\nPORTAL_IMAGE={IMAGE}\n",
+        f"PORTAL_DEPLOY_MODE=offline\nPORTAL_IMAGE={OFFLINE_IMAGE}\n",
         encoding="utf-8",
     )
     environment["PORTAL_ENV_FILE"] = str(env_file)
@@ -95,6 +96,14 @@ def test_offline_override_disables_registry_access_for_all_services():
     assert override.count("pull_policy: never") == 8
     for service in ("db", "migrate", "api", "worker", "proxy", "keycloak-db", "keycloak", "pwpush"):
         assert f"  {service}:" in override
+    for image in (
+        "postgres:17.10-bookworm",
+        "caddy:2.11.3-alpine",
+        "quay.io/keycloak/keycloak:26.7.0",
+        "pglombardo/pwpush:2.9.0",
+    ):
+        assert f"image: {image}" in override
+    assert "@sha256:" not in override
 
 
 def test_compose_wrapper_rejects_a_mutable_release_tag(tmp_path):
@@ -113,13 +122,29 @@ def test_compose_wrapper_rejects_a_mutable_release_tag(tmp_path):
     assert not log.exists()
 
 
+def test_compose_wrapper_rejects_a_digest_in_offline_mode(tmp_path):
+    environment, log = fake_docker_environment(tmp_path)
+    env_file = tmp_path / "portal.env"
+    env_file.write_text(
+        f"PORTAL_DEPLOY_MODE=offline\nPORTAL_IMAGE={IMAGE}\n",
+        encoding="utf-8",
+    )
+    environment["PORTAL_ENV_FILE"] = str(env_file)
+
+    result = run_script("deploy/scripts/compose.sh", "config", environment=environment)
+
+    assert result.returncode == 1
+    assert "référence locale" in result.stderr
+    assert not log.exists()
+
+
 def test_cosign_verification_is_exact_and_confined(tmp_path):
     environment, log = fake_docker_environment(tmp_path)
 
     result = run_script(
         "deploy/scripts/verify-published-image.sh",
         IMAGE,
-        "v0.19.2",
+        "v0.19.3",
         REPOSITORY,
         "private",
         environment=environment,
@@ -134,7 +159,7 @@ def test_cosign_verification_is_exact_and_confined(tmp_path):
     assert "--use-signed-timestamps" in arguments
     assert (
         "https://github.com/hugofelix088-spec/proxmox-vm-portal/"
-        ".github/workflows/release.yml@refs/tags/v0.19.2"
+        ".github/workflows/release.yml@refs/tags/v0.19.3"
     ) in arguments
     assert IMAGE in arguments
     assert any("cosign:v3.0.6@sha256:" in argument for argument in arguments)
@@ -146,7 +171,7 @@ def test_public_cosign_verification_requires_transparency_log(tmp_path):
     result = run_script(
         "deploy/scripts/verify-published-image.sh",
         IMAGE,
-        "v0.19.2",
+        "v0.19.3",
         REPOSITORY,
         "public",
         environment=environment,
@@ -162,7 +187,7 @@ def test_cosign_verification_rejects_another_repository_before_docker(tmp_path):
     result = run_script(
         "deploy/scripts/verify-published-image.sh",
         IMAGE,
-        "v0.19.2",
+        "v0.19.3",
         "another-owner/another-repository",
         environment=environment,
     )
@@ -179,7 +204,7 @@ def test_version_check_does_not_require_a_tag_on_a_branch_push(tmp_path):
 
     result = run_script(
         "deploy/scripts/verify-release.sh",
-        "v0.19.2",
+        "v0.19.3",
         environment=environment,
     )
 

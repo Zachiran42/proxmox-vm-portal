@@ -1,5 +1,6 @@
 services:
   db:
+    image: postgres:17.10-bookworm
     pull_policy: never
   migrate:
     pull_policy: never
@@ -8,13 +9,17 @@ services:
   worker:
     pull_policy: never
   proxy:
+    image: caddy:2.11.3-alpine
     pull_policy: never
     command: ["caddy", "run", "--config", "/etc/caddy/Caddyfile.onprem", "--adapter", "caddyfile"]
     volumes:
       - ./deploy/caddy/Caddyfile.onprem:/etc/caddy/Caddyfile.onprem:ro
   keycloak-db:
+    image: postgres:17.10-bookworm
     pull_policy: never
   keycloak:
+    image: quay.io/keycloak/keycloak:26.7.0
     pull_policy: never
   pwpush:
+    image: pglombardo/pwpush:2.9.0
     pull_policy: never

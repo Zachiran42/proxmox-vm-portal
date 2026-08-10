@@ -10,12 +10,16 @@ connecté et approuvé. Il n'est jamais copié dans le bundle ni sur la VM cible
 1. Un poste Linux amd64 connecté récupère la release privée avec un PAT classic
    temporaire `repo` + `read:packages`.
 2. Le poste vérifie le tag, le commit, la signature Sigstore de l'image et celle
-   du manifeste, puis exporte toutes les images et les paquets Debian 13.
-3. L'empreinte SHA-256 affichée est enregistrée dans la CMDB ou transmise par un
+   du manifeste, puis exporte chaque image dans une archive Docker étiquetée
+   distincte avec les paquets Debian 13.
+3. Avant de publier le bundle, la préparation supprime les images exportées,
+   recharge chaque archive et contrôle son étiquette et son identifiant local.
+4. L'empreinte SHA-256 affichée est enregistrée dans la CMDB ou transmise par un
    canal distinct du support de transfert.
-4. La VM Debian 13 vérifie cette empreinte, toutes les sommes internes et la
+5. La VM Debian 13 vérifie cette empreinte, toutes les sommes internes et la
    signature du manifeste avec Cosign en `--network none`.
-5. Compose utilise `pull_policy: never` pour chaque service. Une tentative de
+6. Compose utilise `pull_policy: never` pour chaque service et les étiquettes
+   locales consignées dans le bundle. Une tentative de
    téléchargement externe échoue donc au lieu de contourner le bundle approuvé.
 
 ## Préparation sur le poste connecté
@@ -26,7 +30,7 @@ Le poste doit utiliser Linux amd64, Git et Docker. Depuis le tag de la release :
 read -rsp "PAT GitHub du poste de préparation : " PORTAL_GITHUB_TOKEN && echo
 export PORTAL_GITHUB_TOKEN
 export PORTAL_GITHUB_USERNAME=hugofelix088-spec
-export PORTAL_RELEASE_TAG=v0.19.2
+export PORTAL_RELEASE_TAG=v0.19.3
 
 deploy/scripts/prepare-offline-bundle.sh /srv/export-portal
 
@@ -38,9 +42,9 @@ embarque les images du portail, PostgreSQL, Caddy, Keycloak, Password Pusher et
 Cosign, ainsi que Docker Engine, Compose, `age`, OpenSSL et leurs dépendances
 pour Debian 13 amd64.
 
-La CI joint également ces deux fichiers directement à la release GitHub. Un
-poste de transfert autorisé peut donc les télécharger depuis la release privée
-sans reconstruire le bundle; le PAT reste dans tous les cas absent de la VM.
+La CI joint également ces deux fichiers directement à la release GitHub
+publique. Un poste de transfert autorisé peut donc les télécharger sans
+reconstruire le bundle et sans fournir de PAT à la VM cible.
 
 Le fichier `.sha256` posé à côté de l'archive facilite le contrôle mais ne
 constitue pas à lui seul un canal de confiance. Comparez sa valeur avec celle
@@ -51,9 +55,9 @@ enregistrée dans la CMDB avant extraction.
 Après transfert par le mécanisme approuvé de l'établissement :
 
 ```bash
-sha256sum -c proxmox-vm-portal-offline-0.19.2-amd64.tar.gz.sha256
-tar -xzf proxmox-vm-portal-offline-0.19.2-amd64.tar.gz
-cd proxmox-vm-portal-offline-0.19.2-amd64
+sha256sum -c proxmox-vm-portal-offline-0.19.3-amd64.tar.gz.sha256
+tar -xzf proxmox-vm-portal-offline-0.19.3-amd64.tar.gz
+cd proxmox-vm-portal-offline-0.19.3-amd64
 sudo bash install-offline.sh
 ```
 

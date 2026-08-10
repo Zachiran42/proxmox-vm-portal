@@ -44,7 +44,7 @@ sudo docker login ghcr.io
 
 PORTAL_DEPLOY_MODE=release
 PORTAL_IMAGE=ghcr.io/hugofelix088-spec/proxmox-vm-portal@sha256:DIGEST_RELEASE
-PORTAL_RELEASE_TAG=v0.19.2
+PORTAL_RELEASE_TAG=v0.19.3
 PORTAL_RELEASE_REPOSITORY=hugofelix088-spec/proxmox-vm-portal
 PORTAL_RELEASE_TRANSPARENCY=private
 ```
@@ -73,7 +73,7 @@ printf 'header = "Authorization: Bearer %s"\n' "$PORTAL_GITHUB_TOKEN" | \
 curl --config - --proto '=https' --tlsv1.2 --fail --silent --show-error \
   -H "Accept: application/vnd.github.raw+json" \
   -H "X-GitHub-Api-Version: 2022-11-28" \
-  "https://api.github.com/repos/hugofelix088-spec/proxmox-vm-portal/contents/deploy/scripts/bootstrap-debian.sh?ref=v0.19.2" \
+  "https://api.github.com/repos/hugofelix088-spec/proxmox-vm-portal/contents/deploy/scripts/bootstrap-debian.sh?ref=v0.19.3" \
   --output "$bootstrap" && \
 bash -n "$bootstrap" && \
 sudo --preserve-env=PORTAL_GITHUB_TOKEN,PORTAL_GITHUB_USERNAME bash "$bootstrap"

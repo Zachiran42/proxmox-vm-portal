@@ -19,20 +19,26 @@ case "$deploy_mode" in
         exec docker compose --project-directory "$ROOT_DIR" --env-file "$ENV_FILE" \
             -f "$ROOT_DIR/compose.yml" "$@"
         ;;
-    release|offline)
+    release)
         portal_image=$(env_value PORTAL_IMAGE)
         if ! printf '%s\n' "$portal_image" \
             | grep -Eq '^ghcr\.io/[a-z0-9_.-]+/[a-z0-9_.-]+@sha256:[0-9a-f]{64}$'; then
-            echo "En mode release/offline, PORTAL_IMAGE doit être une référence GHCR par digest." >&2
+            echo "En mode release, PORTAL_IMAGE doit être une référence GHCR par digest." >&2
             exit 1
-        fi
-        if [ "$deploy_mode" = offline ]; then
-            exec docker compose --project-directory "$ROOT_DIR" --env-file "$ENV_FILE" \
-                -f "$ROOT_DIR/compose.yml" -f "$ROOT_DIR/deploy/compose.release.yml" \
-                -f "$ROOT_DIR/deploy/compose.offline.yml" "$@"
         fi
         exec docker compose --project-directory "$ROOT_DIR" --env-file "$ENV_FILE" \
             -f "$ROOT_DIR/compose.yml" -f "$ROOT_DIR/deploy/compose.release.yml" "$@"
+        ;;
+    offline)
+        portal_image=$(env_value PORTAL_IMAGE)
+        if ! printf '%s\n' "$portal_image" \
+            | grep -Eq '^ghcr\.io/[a-z0-9_.-]+/[a-z0-9_.-]+:offline-[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "En mode offline, PORTAL_IMAGE doit être la référence locale créée par le bundle." >&2
+            exit 1
+        fi
+        exec docker compose --project-directory "$ROOT_DIR" --env-file "$ENV_FILE" \
+            -f "$ROOT_DIR/compose.yml" -f "$ROOT_DIR/deploy/compose.release.yml" \
+            -f "$ROOT_DIR/deploy/compose.offline.yml" "$@"
         ;;
     *)
         echo "PORTAL_DEPLOY_MODE doit valoir source, release ou offline." >&2

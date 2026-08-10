@@ -5,6 +5,7 @@ umask 077
 BUNDLE_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 TARGET_DIR=/opt/proxmox-vm-portal
 COSIGN_IMAGE="ghcr.io/sigstore/cosign/cosign:v3.0.6@sha256:de9c65609e6bde17e6b48de485ee788407c9502fa08b8f4459f595b21f56cd00"
+COSIGN_OFFLINE_IMAGE=${COSIGN_IMAGE%@*}
 operation=install
 rollback_dir=""
 extract_dir=""
@@ -47,8 +48,9 @@ else
     [[ $current_mode == offline ]] || fail \
         "--update est réservé à une installation existante en mode offline."
 fi
-for required in SHA256SUMS source.tar.gz images.tar evidence/release-manifest.json \
-    evidence/release-manifest.sigstore.json evidence/sigstore-trusted-root.json; do
+for required in SHA256SUMS source.tar.gz evidence/release-manifest.json \
+    evidence/release-manifest.sigstore.json evidence/sigstore-trusted-root.json \
+    evidence/offline-images.json; do
     [[ -s $BUNDLE_DIR/$required ]] || fail "Fichier absent du bundle: $required"
 done
 
@@ -74,8 +76,8 @@ fi
 [[ -z $(dpkg --audit) ]] || fail "Des paquets Debian restent dans un état incohérent."
 systemctl enable --now docker
 
-docker load --input "$BUNDLE_DIR/images.tar" >/dev/null
 manifest="$BUNDLE_DIR/evidence/release-manifest.json"
+image_metadata="$BUNDLE_DIR/evidence/offline-images.json"
 version=$(jq -r '.version' "$manifest")
 image=$(jq -r '.image + "@" + .digest' "$manifest")
 commit=$(jq -r '.commit' "$manifest")
@@ -84,14 +86,67 @@ repository=$(jq -r '.image | sub("^ghcr.io/"; "")' "$manifest")
 [[ $image =~ ^ghcr\.io/[a-z0-9_.-]+/[a-z0-9_.-]+@sha256:[0-9a-f]{64}$ ]] || fail \
     "Image invalide dans le manifeste."
 [[ $commit =~ ^[0-9a-f]{40}$ ]] || fail "Commit invalide dans le manifeste."
-docker image inspect "$image" >/dev/null || fail "L'image signée n'est pas présente dans le bundle."
+[[ $(jq -r '.schema' "$image_metadata") == 1 ]] || fail "Catalogue d'images invalide."
+[[ $(jq -r '.signed_image' "$image_metadata") == "$image" ]] || fail \
+    "Le catalogue d'images ne correspond pas au manifeste signé."
+[[ $(jq -r '.version' "$image_metadata") == "$version" ]] || fail \
+    "Le catalogue d'images ne correspond pas à la version signée."
+[[ $(jq -r '.commit' "$image_metadata") == "$commit" ]] || fail \
+    "Le catalogue d'images ne correspond pas au commit signé."
+[[ $(jq '.images | length' "$image_metadata") -ge 3 ]] || fail \
+    "Le catalogue d'images hors ligne est incomplet."
+
+portal_image=""
+cosign_image=""
+runtime_images=0
+runtime_references=()
+while IFS=$'\t' read -r role archive reference expected_id expected_sha256; do
+    [[ $archive =~ ^[0-9]{2}\.tar$ ]] || fail "Nom d'archive d'image invalide."
+    [[ $reference =~ ^[A-Za-z0-9._:/-]+$ && $reference == *:* && $reference != *@* ]] || fail \
+        "Référence locale d'image invalide."
+    [[ $expected_id =~ ^sha256:[0-9a-f]{64}$ ]] || fail "Identifiant local d'image invalide."
+    [[ $expected_sha256 =~ ^[0-9a-f]{64}$ ]] || fail "Empreinte d'archive d'image invalide."
+    [[ -s $BUNDLE_DIR/images/$archive ]] || fail "Archive d'image absente: $archive"
+    [[ $(sha256sum "$BUNDLE_DIR/images/$archive" | cut -d' ' -f1) == "$expected_sha256" ]] || fail \
+        "L'archive d'image $archive ne correspond pas au catalogue."
+    docker load --input "$BUNDLE_DIR/images/$archive" >/dev/null
+    [[ $(docker image inspect --format '{{.Id}}' "$reference") == "$expected_id" ]] || fail \
+        "L'image rechargée $reference ne correspond pas au catalogue."
+    case "$role" in
+        portal)
+            [[ -z $portal_image ]] || fail "Plusieurs images portail sont déclarées."
+            portal_image=$reference
+            ;;
+        cosign)
+            [[ -z $cosign_image ]] || fail "Plusieurs images Cosign sont déclarées."
+            cosign_image=$reference
+            ;;
+        runtime)
+            runtime_images=$((runtime_images + 1))
+            runtime_references+=("$reference")
+            ;;
+        *) fail "Rôle d'image hors ligne invalide." ;;
+    esac
+done < <(jq -r '.images[] | [.role, .archive, .reference, .image_id, .archive_sha256] | @tsv' \
+    "$image_metadata")
+[[ $portal_image == "${image%@*}:offline-${version}" ]] || fail \
+    "La référence locale du portail est inattendue."
+[[ $cosign_image == "$COSIGN_OFFLINE_IMAGE" ]] || fail "La référence locale Cosign est inattendue."
+[[ $runtime_images -eq 4 ]] || fail "Les quatre images de service ne sont pas toutes présentes."
+expected_runtime_references=$'caddy:2.11.3-alpine\npglombardo/pwpush:2.9.0\npostgres:17.10-bookworm\nquay.io/keycloak/keycloak:26.7.0'
+[[ $(printf '%s\n' "${runtime_references[@]}" | sort) == "$expected_runtime_references" ]] || fail \
+    "Les références locales des images de service sont inattendues."
+[[ $(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' \
+    "$portal_image") == "$commit" ]] || fail "Le commit de l'image portail est inattendu."
+[[ $(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' \
+    "$portal_image") == "$version" ]] || fail "La version de l'image portail est inattendue."
 
 identity="https://github.com/${repository}/.github/workflows/release.yml@refs/tags/${tag}"
 docker run --rm --network none --read-only --cap-drop ALL \
     --user 0:0 \
     --security-opt no-new-privileges:true --tmpfs /tmp:size=32m,mode=1777 \
     --env HOME=/tmp/cosign-home \
-    --volume "$BUNDLE_DIR/evidence:/work:ro" "$COSIGN_IMAGE" verify-blob \
+    --volume "$BUNDLE_DIR/evidence:/work:ro" "$cosign_image" verify-blob \
     --trusted-root /work/sigstore-trusted-root.json \
     --bundle /work/release-manifest.sigstore.json \
     --certificate-identity "$identity" \
@@ -161,7 +216,7 @@ prompt_value() {
     printf -v "$variable" '%s' "$value"
 }
 set_env_value PORTAL_DEPLOY_MODE offline
-set_env_value PORTAL_IMAGE "$image"
+set_env_value PORTAL_IMAGE "$portal_image"
 set_env_value PORTAL_RELEASE_TAG "$tag"
 set_env_value PORTAL_RELEASE_REPOSITORY "$repository"
 set_env_value PORTAL_RELEASE_TRANSPARENCY private

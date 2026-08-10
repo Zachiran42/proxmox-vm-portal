@@ -5,7 +5,7 @@ umask 077
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 ROOT_DIR=$(CDPATH='' cd -- "${PORTAL_SOURCE_ROOT:-$SCRIPT_DIR/../..}" && pwd)
 REPOSITORY="hugofelix088-spec/proxmox-vm-portal"
-RELEASE_TAG=${PORTAL_RELEASE_TAG:-v0.19.2}
+RELEASE_TAG=${PORTAL_RELEASE_TAG:-v0.19.3}
 OUTPUT_DIR=${1:-$PWD}
 API_ROOT="https://api.github.com/repos/$REPOSITORY"
 COSIGN_IMAGE="ghcr.io/sigstore/cosign/cosign:v3.0.6@sha256:de9c65609e6bde17e6b48de485ee788407c9502fa08b8f4459f595b21f56cd00"
@@ -34,7 +34,7 @@ done
 work_dir=$(mktemp -d /tmp/proxmox-vm-portal-offline.XXXXXXXX)
 docker_config="$work_dir/docker-config"
 bundle_dir="$work_dir/proxmox-vm-portal-offline-${RELEASE_TAG#v}-amd64"
-mkdir -p "$docker_config" "$bundle_dir/evidence" "$bundle_dir/debs"
+mkdir -p "$docker_config" "$bundle_dir/evidence" "$bundle_dir/debs" "$bundle_dir/images"
 
 github_curl() {
     printf 'header = "Authorization: Bearer %s"\n' "$PORTAL_GITHUB_TOKEN" |
@@ -113,7 +113,58 @@ mapfile -t service_images < <(
 for service_image in "${service_images[@]}"; do
     docker --config "$docker_config" pull "$service_image"
 done
-docker save --output "$bundle_dir/images.tar" "$image" "$COSIGN_IMAGE" "${service_images[@]}"
+
+image_metadata="$bundle_dir/evidence/offline-images.json"
+jq -n --arg signed_image "$image" --arg version "$version" --arg commit "$commit" \
+    '{schema: 1, signed_image: $signed_image, version: $version, commit: $commit, images: []}' \
+    > "$image_metadata"
+
+add_image_archive() {
+    local role=$1 source=$2 reference=$3 archive=$4 image_id archive_sha256 temporary
+    [[ $archive =~ ^[0-9]{2}\.tar$ ]] || fail "Nom d'archive d'image invalide."
+    [[ $reference != *$'\n'* && $reference != *$'\r'* && $reference != *@* ]] || fail \
+        "Référence locale d'image invalide."
+    docker image inspect "$source" >/dev/null
+    docker tag "$source" "$reference"
+    image_id=$(docker image inspect --format '{{.Id}}' "$reference")
+    [[ $image_id =~ ^sha256:[0-9a-f]{64}$ ]] || fail "Identifiant local d'image invalide."
+    docker save --output "$bundle_dir/images/$archive" "$reference"
+    archive_sha256=$(sha256sum "$bundle_dir/images/$archive" | cut -d' ' -f1)
+    temporary=$(mktemp "$work_dir/image-metadata.XXXXXXXX")
+    jq --arg role "$role" --arg source "$source" --arg reference "$reference" \
+        --arg archive "$archive" --arg image_id "$image_id" \
+        --arg archive_sha256 "$archive_sha256" \
+        '.images += [{role: $role, source: $source, reference: $reference,
+            archive: $archive, image_id: $image_id, archive_sha256: $archive_sha256}]' \
+        "$image_metadata" > "$temporary"
+    mv "$temporary" "$image_metadata"
+}
+
+portal_offline_image="${image%@*}:offline-${version}"
+cosign_offline_image=${COSIGN_IMAGE%@*}
+add_image_archive portal "$image" "$portal_offline_image" 00.tar
+add_image_archive cosign "$COSIGN_IMAGE" "$cosign_offline_image" 01.tar
+archive_index=2
+for service_image in "${service_images[@]}"; do
+    printf -v archive_name '%02d.tar' "$archive_index"
+    add_image_archive runtime "$service_image" "${service_image%@*}" "$archive_name"
+    archive_index=$((archive_index + 1))
+done
+
+expected_images=$((2 + ${#service_images[@]}))
+[[ $(jq '.images | length' "$image_metadata") -eq $expected_images ]] || fail \
+    "Le catalogue d'images hors ligne est incomplet."
+mapfile -t exported_image_ids < <(jq -r '.images[].image_id' "$image_metadata" | sort -u)
+docker image rm --force "${exported_image_ids[@]}" >/dev/null
+while IFS=$'\t' read -r archive reference expected_id expected_sha256; do
+    [[ $(sha256sum "$bundle_dir/images/$archive" | cut -d' ' -f1) == "$expected_sha256" ]] || fail \
+        "L'archive $archive a changé avant son test de rechargement."
+    docker load --input "$bundle_dir/images/$archive" >/dev/null
+    [[ $(docker image inspect --format '{{.Id}}' "$reference") == "$expected_id" ]] || fail \
+        "L'image $reference ne survit pas à un export/import Docker."
+done < <(jq -r '.images[] | [.archive, .reference, .image_id, .archive_sha256] | @tsv' \
+    "$image_metadata")
+chmod 0444 "$image_metadata" "$bundle_dir"/images/*.tar
 
 git -C "$ROOT_DIR" archive --format=tar.gz --output "$bundle_dir/source.tar.gz" "$RELEASE_TAG"
 tar -xOf "$bundle_dir/source.tar.gz" deploy/scripts/install-offline-bundle.sh \
