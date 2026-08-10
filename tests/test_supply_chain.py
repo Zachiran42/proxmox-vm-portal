@@ -85,6 +85,8 @@ def test_offline_bundle_separates_connected_preparation_from_target_installation
     assert "verify-blob" in prepare
     assert "trusted-root create --with-default-services" in prepare
     assert "--out /work/sigstore-trusted-root.json" not in prepare
+    assert 'chmod 0444 "$bundle_dir"/evidence/*' in prepare
+    assert "PORTAL_SOURCE_ROOT" in prepare
     assert prepare.index("verify-blob") < prepare.index('pull "$image"')
     assert "docker save" in prepare
     assert "download-offline-debs.sh" in prepare
@@ -107,6 +109,19 @@ def test_offline_bundle_separates_connected_preparation_from_target_installation
     assert '"$candidate" gt "$installed"' in install
     assert "deploy/scripts/backup.sh" in install
     assert install.index("verify-blob") < install.index("deploy/scripts/backup.sh")
+
+
+def test_offline_bundle_can_complete_an_existing_immutable_release():
+    workflow = (ROOT / ".github/workflows/offline-bundle.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "workflow_dispatch:" in workflow
+    assert "release_tag:" in workflow
+    assert "PORTAL_SOURCE_ROOT:" in workflow
+    assert "packages: read" in workflow
+    assert "contents: write" in workflow
+    assert "gh release upload" in workflow
 
 
 def test_offline_bundle_contains_all_runtime_and_docker_prerequisites():

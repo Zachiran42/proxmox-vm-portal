@@ -3,7 +3,7 @@ set -Eeuo pipefail
 umask 077
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
-ROOT_DIR=$(CDPATH='' cd -- "$SCRIPT_DIR/../.." && pwd)
+ROOT_DIR=$(CDPATH='' cd -- "${PORTAL_SOURCE_ROOT:-$SCRIPT_DIR/../..}" && pwd)
 REPOSITORY="hugofelix088-spec/proxmox-vm-portal"
 RELEASE_TAG=${PORTAL_RELEASE_TAG:-v0.19.2}
 OUTPUT_DIR=${1:-$PWD}
@@ -88,6 +88,7 @@ docker run --rm --user 0:0 --read-only --cap-drop ALL \
     --env HOME=/tmp/cosign-home "$COSIGN_IMAGE" \
     trusted-root create --with-default-services \
     > "$bundle_dir/evidence/sigstore-trusted-root.json"
+chmod 0444 "$bundle_dir"/evidence/*
 docker run --rm --network none --read-only --cap-drop ALL \
     --user 0:0 \
     --security-opt no-new-privileges:true --tmpfs /tmp:size=32m,mode=1777 \
