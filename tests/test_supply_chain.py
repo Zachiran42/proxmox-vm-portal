@@ -123,6 +123,7 @@ def test_offline_bundle_can_complete_an_existing_immutable_release():
     assert "packages: read" in workflow
     assert "contents: write" in workflow
     assert "gh release upload" in workflow
+    assert '--repo "$GITHUB_REPOSITORY"' in workflow
 
 
 def test_offline_bundle_contains_all_runtime_and_docker_prerequisites():

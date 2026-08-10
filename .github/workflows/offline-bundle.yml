@@ -62,4 +62,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ inputs.release_tag }}
-        run: gh release upload "$RELEASE_TAG" "$RUNNER_TEMP"/offline-release/* --clobber
+        run: >-
+          gh release upload "$RELEASE_TAG" "$RUNNER_TEMP"/offline-release/*
+          --clobber --repo "$GITHUB_REPOSITORY"
