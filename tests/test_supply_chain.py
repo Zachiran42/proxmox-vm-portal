@@ -91,6 +91,7 @@ def test_offline_bundle_separates_connected_preparation_from_target_installation
     assert prepare.index("verify-blob") < prepare.index('pull "$image"')
     assert "docker save" in prepare
     assert "offline-images.json" in prepare
+    assert "publisher_image_id" in prepare
     assert 'docker image rm --force "${exported_image_ids[@]}"' in prepare
     assert prepare.index('docker image rm --force "${exported_image_ids[@]}"') < prepare.index(
         'docker load --input "$bundle_dir/images/$archive"'
@@ -105,6 +106,9 @@ def test_offline_bundle_separates_connected_preparation_from_target_installation
     assert "ghcr.io" in install  # immutable image identity, never contacted
     assert "offline-images.json" in install
     assert 'docker load --input "$BUNDLE_DIR/images/$archive"' in install
+    assert 'docker image inspect "$reference"' in install
+    assert "publisher_image_id" in install
+    assert "== \"$publisher_image_id\"" not in install
     assert "images.tar" not in install
     assert "expected_runtime_references" in install
     assert "--network none" in install

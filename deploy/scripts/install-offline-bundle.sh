@@ -86,7 +86,7 @@ repository=$(jq -r '.image | sub("^ghcr.io/"; "")' "$manifest")
 [[ $image =~ ^ghcr\.io/[a-z0-9_.-]+/[a-z0-9_.-]+@sha256:[0-9a-f]{64}$ ]] || fail \
     "Image invalide dans le manifeste."
 [[ $commit =~ ^[0-9a-f]{40}$ ]] || fail "Commit invalide dans le manifeste."
-[[ $(jq -r '.schema' "$image_metadata") == 1 ]] || fail "Catalogue d'images invalide."
+[[ $(jq -r '.schema' "$image_metadata") == 2 ]] || fail "Catalogue d'images invalide."
 [[ $(jq -r '.signed_image' "$image_metadata") == "$image" ]] || fail \
     "Le catalogue d'images ne correspond pas au manifeste signé."
 [[ $(jq -r '.version' "$image_metadata") == "$version" ]] || fail \
@@ -100,18 +100,19 @@ portal_image=""
 cosign_image=""
 runtime_images=0
 runtime_references=()
-while IFS=$'\t' read -r role archive reference expected_id expected_sha256; do
+while IFS=$'\t' read -r role archive reference publisher_image_id expected_sha256; do
     [[ $archive =~ ^[0-9]{2}\.tar$ ]] || fail "Nom d'archive d'image invalide."
     [[ $reference =~ ^[A-Za-z0-9._:/-]+$ && $reference == *:* && $reference != *@* ]] || fail \
         "Référence locale d'image invalide."
-    [[ $expected_id =~ ^sha256:[0-9a-f]{64}$ ]] || fail "Identifiant local d'image invalide."
+    [[ $publisher_image_id =~ ^sha256:[0-9a-f]{64}$ ]] || fail \
+        "Identifiant d'image du moteur de publication invalide."
     [[ $expected_sha256 =~ ^[0-9a-f]{64}$ ]] || fail "Empreinte d'archive d'image invalide."
     [[ -s $BUNDLE_DIR/images/$archive ]] || fail "Archive d'image absente: $archive"
     [[ $(sha256sum "$BUNDLE_DIR/images/$archive" | cut -d' ' -f1) == "$expected_sha256" ]] || fail \
         "L'archive d'image $archive ne correspond pas au catalogue."
     docker load --input "$BUNDLE_DIR/images/$archive" >/dev/null
-    [[ $(docker image inspect --format '{{.Id}}' "$reference") == "$expected_id" ]] || fail \
-        "L'image rechargée $reference ne correspond pas au catalogue."
+    docker image inspect "$reference" >/dev/null || fail \
+        "L'étiquette d'image $reference est absente après rechargement."
     case "$role" in
         portal)
             [[ -z $portal_image ]] || fail "Plusieurs images portail sont déclarées."
@@ -127,7 +128,8 @@ while IFS=$'\t' read -r role archive reference expected_id expected_sha256; do
             ;;
         *) fail "Rôle d'image hors ligne invalide." ;;
     esac
-done < <(jq -r '.images[] | [.role, .archive, .reference, .image_id, .archive_sha256] | @tsv' \
+done < <(jq -r '.images[] | [.role, .archive, .reference, .publisher_image_id,
+        .archive_sha256] | @tsv' \
     "$image_metadata")
 [[ $portal_image == "${image%@*}:offline-${version}" ]] || fail \
     "La référence locale du portail est inattendue."

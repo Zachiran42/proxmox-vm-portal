@@ -13,7 +13,10 @@ connecté et approuvé. Il n'est jamais copié dans le bundle ni sur la VM cible
    du manifeste, puis exporte chaque image dans une archive Docker étiquetée
    distincte avec les paquets Debian 13.
 3. Avant de publier le bundle, la préparation supprime les images exportées,
-   recharge chaque archive et contrôle son étiquette et son identifiant local.
+   recharge chaque archive et contrôle son étiquette. L'identifiant `.Id`
+   propre au moteur de publication est conservé pour l'audit, mais n'est pas
+   utilisé comme preuve portable car Docker peut le recalculer lors d'un
+   transfert entre ses magasins d'images OCI et classiques.
 4. L'empreinte SHA-256 affichée est enregistrée dans la CMDB ou transmise par un
    canal distinct du support de transfert.
 5. La VM Debian 13 vérifie cette empreinte, toutes les sommes internes et la
@@ -30,7 +33,7 @@ Le poste doit utiliser Linux amd64, Git et Docker. Depuis le tag de la release :
 read -rsp "PAT GitHub du poste de préparation : " PORTAL_GITHUB_TOKEN && echo
 export PORTAL_GITHUB_TOKEN
 export PORTAL_GITHUB_USERNAME=hugofelix088-spec
-export PORTAL_RELEASE_TAG=v0.19.3
+export PORTAL_RELEASE_TAG=v0.19.4
 
 deploy/scripts/prepare-offline-bundle.sh /srv/export-portal
 
@@ -55,9 +58,9 @@ enregistrée dans la CMDB avant extraction.
 Après transfert par le mécanisme approuvé de l'établissement :
 
 ```bash
-sha256sum -c proxmox-vm-portal-offline-0.19.3-amd64.tar.gz.sha256
-tar -xzf proxmox-vm-portal-offline-0.19.3-amd64.tar.gz
-cd proxmox-vm-portal-offline-0.19.3-amd64
+sha256sum -c proxmox-vm-portal-offline-0.19.4-amd64.tar.gz.sha256
+tar -xzf proxmox-vm-portal-offline-0.19.4-amd64.tar.gz
+cd proxmox-vm-portal-offline-0.19.4-amd64
 sudo bash install-offline.sh
 ```
 
