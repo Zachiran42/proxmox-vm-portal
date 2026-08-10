@@ -5,7 +5,7 @@ umask 077
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 ROOT_DIR=$(CDPATH='' cd -- "$SCRIPT_DIR/../.." && pwd)
 REPOSITORY="hugofelix088-spec/proxmox-vm-portal"
-RELEASE_TAG=${PORTAL_RELEASE_TAG:-v0.19.1}
+RELEASE_TAG=${PORTAL_RELEASE_TAG:-v0.19.2}
 OUTPUT_DIR=${1:-$PWD}
 API_ROOT="https://api.github.com/repos/$REPOSITORY"
 COSIGN_IMAGE="ghcr.io/sigstore/cosign/cosign:v3.0.6@sha256:de9c65609e6bde17e6b48de485ee788407c9502fa08b8f4459f595b21f56cd00"
@@ -85,9 +85,9 @@ identity="https://github.com/${REPOSITORY}/.github/workflows/release.yml@refs/ta
 docker pull "$COSIGN_IMAGE"
 docker run --rm --user 0:0 --read-only --cap-drop ALL \
     --security-opt no-new-privileges:true --tmpfs /tmp:size=32m,mode=1777 \
-    --env HOME=/tmp/cosign-home \
-    --volume "$bundle_dir/evidence:/work" "$COSIGN_IMAGE" \
-    trusted-root create --with-default-services --out /work/sigstore-trusted-root.json
+    --env HOME=/tmp/cosign-home "$COSIGN_IMAGE" \
+    trusted-root create --with-default-services \
+    > "$bundle_dir/evidence/sigstore-trusted-root.json"
 docker run --rm --network none --read-only --cap-drop ALL \
     --user 0:0 \
     --security-opt no-new-privileges:true --tmpfs /tmp:size=32m,mode=1777 \

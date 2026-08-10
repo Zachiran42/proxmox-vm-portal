@@ -3,8 +3,8 @@ set -Eeuo pipefail
 umask 077
 
 REPOSITORY="hugofelix088-spec/proxmox-vm-portal"
-RELEASE_TAG="v0.19.1"
-RELEASE_VERSION="0.19.1"
+RELEASE_TAG="v0.19.2"
+RELEASE_VERSION="0.19.2"
 TARGET_DIR="/opt/proxmox-vm-portal"
 API_ROOT="https://api.github.com/repos/$REPOSITORY"
 work_dir=""

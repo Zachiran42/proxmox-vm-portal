@@ -83,6 +83,8 @@ def test_offline_bundle_separates_connected_preparation_from_target_installation
 
     assert "PORTAL_GITHUB_TOKEN" in prepare
     assert "verify-blob" in prepare
+    assert "trusted-root create --with-default-services" in prepare
+    assert "--out /work/sigstore-trusted-root.json" not in prepare
     assert prepare.index("verify-blob") < prepare.index('pull "$image"')
     assert "docker save" in prepare
     assert "download-offline-debs.sh" in prepare
