@@ -82,7 +82,8 @@ def test_offline_bundle_separates_connected_preparation_from_target_installation
     )
 
     assert "PORTAL_GITHUB_TOKEN" in prepare
-    assert "verify-published-image.sh" in prepare
+    assert "verify-blob" in prepare
+    assert prepare.index("verify-blob") < prepare.index('pull "$image"')
     assert "docker save" in prepare
     assert "download-offline-debs.sh" in prepare
     assert "diff --cached --quiet" in prepare

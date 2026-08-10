@@ -26,7 +26,7 @@ Le poste doit utiliser Linux amd64, Git et Docker. Depuis le tag de la release :
 read -rsp "PAT GitHub du poste de préparation : " PORTAL_GITHUB_TOKEN && echo
 export PORTAL_GITHUB_TOKEN
 export PORTAL_GITHUB_USERNAME=hugofelix088-spec
-export PORTAL_RELEASE_TAG=v0.19.0
+export PORTAL_RELEASE_TAG=v0.19.1
 
 deploy/scripts/prepare-offline-bundle.sh /srv/export-portal
 
@@ -51,9 +51,9 @@ enregistrée dans la CMDB avant extraction.
 Après transfert par le mécanisme approuvé de l'établissement :
 
 ```bash
-sha256sum -c proxmox-vm-portal-offline-0.19.0-amd64.tar.gz.sha256
-tar -xzf proxmox-vm-portal-offline-0.19.0-amd64.tar.gz
-cd proxmox-vm-portal-offline-0.19.0-amd64
+sha256sum -c proxmox-vm-portal-offline-0.19.1-amd64.tar.gz.sha256
+tar -xzf proxmox-vm-portal-offline-0.19.1-amd64.tar.gz
+cd proxmox-vm-portal-offline-0.19.1-amd64
 sudo bash install-offline.sh
 ```
 
