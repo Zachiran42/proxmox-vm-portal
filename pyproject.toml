@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "proxmox-vm-portal"
-version = "0.18.3"
+version = "0.19.0"
 description = "Portail Web sécurisé de provisionnement Proxmox"
 requires-python = ">=3.11"
 dependencies = [

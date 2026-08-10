@@ -25,13 +25,16 @@ def test_release_build_emits_and_verifies_supply_chain_evidence():
     assert "--no-default-rekor" in workflow
     assert workflow.count('--signing-config "$signing_config"') == 2
     assert "--tlog-upload=false" not in workflow
-    assert "cosign verify --insecure-ignore-tlog=true" in workflow
+    assert "cosign verify --insecure-ignore-tlog=true --use-signed-timestamps" in workflow
+    assert workflow.count("--use-signed-timestamps") == 2
     assert "release-manifest.sigstore.json" in workflow
     assert "deploy/scripts/bootstrap-debian.sh" in workflow
     assert '"proxmox-vm-portal-${VERSION}-install.sh"' in workflow
     assert "sbom_sha256" in workflow
     assert "SHA256SUMS" in workflow
     assert "--verify-tag" in workflow
+    assert "prepare-offline-bundle.sh" in workflow
+    assert 'gh release upload "$GITHUB_REF_NAME" "$RUNNER_TEMP"/offline-release/*' in workflow
 
 
 def test_dockerfile_contains_oci_traceability_labels():
@@ -68,3 +71,54 @@ def test_ci_installs_the_checkout_editably_for_coverage():
     workflow = (ROOT / ".github/workflows/security.yml").read_text(encoding="utf-8")
 
     assert "python -m pip install --no-deps -e ." in workflow
+
+
+def test_offline_bundle_separates_connected_preparation_from_target_installation():
+    prepare = (ROOT / "deploy/scripts/prepare-offline-bundle.sh").read_text(
+        encoding="utf-8"
+    )
+    install = (ROOT / "deploy/scripts/install-offline-bundle.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "PORTAL_GITHUB_TOKEN" in prepare
+    assert "verify-published-image.sh" in prepare
+    assert "docker save" in prepare
+    assert "download-offline-debs.sh" in prepare
+    assert "diff --cached --quiet" in prepare
+    assert "spdx.json" in prepare
+    assert "PORTAL_GITHUB_TOKEN" not in install
+    assert "curl " not in install
+    assert "wget " not in install
+    assert "ghcr.io" in install  # immutable image identity, never contacted
+    assert "--network none" in install
+    assert "--use-signed-timestamps" in install
+    assert "sha256sum --check --strict" in install
+    assert install.index("sha256sum --check --strict") < install.index(
+        "dpkg --install"
+    )
+    assert install.index("verify-blob") < install.index('tar -xzf')
+    assert "PORTAL_DEPLOY_MODE offline" in install
+    assert "--update" in install
+    assert "dpkg --compare-versions" in install
+    assert '"$candidate" gt "$installed"' in install
+    assert "deploy/scripts/backup.sh" in install
+    assert install.index("verify-blob") < install.index("deploy/scripts/backup.sh")
+
+
+def test_offline_bundle_contains_all_runtime_and_docker_prerequisites():
+    downloader = (ROOT / "deploy/scripts/download-offline-debs.sh").read_text(
+        encoding="utf-8"
+    )
+
+    for package in (
+        "age",
+        "ca-certificates",
+        "jq",
+        "openssl",
+        "docker-ce",
+        "containerd.io",
+        "docker-compose-plugin",
+    ):
+        assert package in downloader
+    assert "DEBIAN-PACKAGES.tsv" in downloader

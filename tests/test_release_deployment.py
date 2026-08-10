@@ -40,7 +40,7 @@ def test_compose_wrapper_uses_only_the_base_file_in_source_mode(tmp_path):
     environment, log = fake_docker_environment(tmp_path)
     env_file = tmp_path / "portal.env"
     env_file.write_text(
-        "PORTAL_DEPLOY_MODE=source\nPORTAL_IMAGE=proxmox-vm-portal:0.18.3\n",
+        "PORTAL_DEPLOY_MODE=source\nPORTAL_IMAGE=proxmox-vm-portal:0.19.0\n",
         encoding="utf-8",
     )
     environment["PORTAL_ENV_FILE"] = str(env_file)
@@ -71,6 +71,32 @@ def test_compose_wrapper_removes_builds_for_a_digest_release(tmp_path):
     assert str(ROOT / "deploy/compose.release.yml") in arguments
 
 
+def test_compose_wrapper_forbids_every_pull_in_offline_mode(tmp_path):
+    environment, log = fake_docker_environment(tmp_path)
+    env_file = tmp_path / "portal.env"
+    env_file.write_text(
+        f"PORTAL_DEPLOY_MODE=offline\nPORTAL_IMAGE={IMAGE}\n",
+        encoding="utf-8",
+    )
+    environment["PORTAL_ENV_FILE"] = str(env_file)
+
+    result = run_script("deploy/scripts/compose.sh", "config", environment=environment)
+
+    assert result.returncode == 0, result.stderr
+    arguments = log.read_text(encoding="utf-8").splitlines()
+    assert arguments.count("-f") == 3
+    assert str(ROOT / "deploy/compose.release.yml") in arguments
+    assert str(ROOT / "deploy/compose.offline.yml") in arguments
+
+
+def test_offline_override_disables_registry_access_for_all_services():
+    override = (ROOT / "deploy/compose.offline.yml").read_text(encoding="utf-8")
+
+    assert override.count("pull_policy: never") == 8
+    for service in ("db", "migrate", "api", "worker", "proxy", "keycloak-db", "keycloak", "pwpush"):
+        assert f"  {service}:" in override
+
+
 def test_compose_wrapper_rejects_a_mutable_release_tag(tmp_path):
     environment, log = fake_docker_environment(tmp_path)
     env_file = tmp_path / "portal.env"
@@ -93,7 +119,7 @@ def test_cosign_verification_is_exact_and_confined(tmp_path):
     result = run_script(
         "deploy/scripts/verify-published-image.sh",
         IMAGE,
-        "v0.18.3",
+        "v0.19.0",
         REPOSITORY,
         "private",
         environment=environment,
@@ -105,9 +131,10 @@ def test_cosign_verification_is_exact_and_confined(tmp_path):
     assert "--cap-drop" in arguments
     assert "ALL" in arguments
     assert "--insecure-ignore-tlog=true" in arguments
+    assert "--use-signed-timestamps" in arguments
     assert (
         "https://github.com/hugofelix088-spec/proxmox-vm-portal/"
-        ".github/workflows/release.yml@refs/tags/v0.18.3"
+        ".github/workflows/release.yml@refs/tags/v0.19.0"
     ) in arguments
     assert IMAGE in arguments
     assert any("cosign:v3.0.6@sha256:" in argument for argument in arguments)
@@ -119,7 +146,7 @@ def test_public_cosign_verification_requires_transparency_log(tmp_path):
     result = run_script(
         "deploy/scripts/verify-published-image.sh",
         IMAGE,
-        "v0.18.3",
+        "v0.19.0",
         REPOSITORY,
         "public",
         environment=environment,
@@ -135,7 +162,7 @@ def test_cosign_verification_rejects_another_repository_before_docker(tmp_path):
     result = run_script(
         "deploy/scripts/verify-published-image.sh",
         IMAGE,
-        "v0.18.3",
+        "v0.19.0",
         "another-owner/another-repository",
         environment=environment,
     )
@@ -152,7 +179,7 @@ def test_version_check_does_not_require_a_tag_on_a_branch_push(tmp_path):
 
     result = run_script(
         "deploy/scripts/verify-release.sh",
-        "v0.18.3",
+        "v0.19.0",
         environment=environment,
     )
 

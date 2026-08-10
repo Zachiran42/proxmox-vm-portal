@@ -1,0 +1,20 @@
+services:
+  db:
+    pull_policy: never
+  migrate:
+    pull_policy: never
+  api:
+    pull_policy: never
+  worker:
+    pull_policy: never
+  proxy:
+    pull_policy: never
+    command: ["caddy", "run", "--config", "/etc/caddy/Caddyfile.onprem", "--adapter", "caddyfile"]
+    volumes:
+      - ./deploy/caddy/Caddyfile.onprem:/etc/caddy/Caddyfile.onprem:ro
+  keycloak-db:
+    pull_policy: never
+  keycloak:
+    pull_policy: never
+  pwpush:
+    pull_policy: never

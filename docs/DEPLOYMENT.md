@@ -23,11 +23,18 @@ issue du `release-manifest.json` et vérifiez d'abord sa signature selon
 `docs/RELEASES.md`. Un tag, y compris `latest`, reste mutable et ne constitue pas
 une preuve d'approbation.
 
-Deux modes sont disponibles :
+Trois modes sont disponibles :
 
 - `PORTAL_DEPLOY_MODE=source` construit localement le commit Git approuvé ;
 - `PORTAL_DEPLOY_MODE=release` supprime les directives Compose `build`, vérifie
   la signature distante puis tire uniquement l'image GHCR par digest.
+- `PORTAL_DEPLOY_MODE=offline` installe un bundle préalablement vérifié, charge
+  toutes les images localement et interdit chaque téléchargement de registre.
+
+Pour une infrastructure autonome ou isolée comme un CHU, n'utilisez pas
+l'installation rapide ci-dessous sur la VM cible. Suivez
+[`AIRGAP.md`](AIRGAP.md) : le PAT reste sur un poste de préparation connecté et
+la VM Debian n'a besoin ni de compte GitHub ni d'accès Internet.
 
 Pour le mode release privé, authentifiez le compte root de la VM avec un token
 GitHub limité à `read:packages`, puis configurez `.env.production` :
@@ -37,7 +44,7 @@ sudo docker login ghcr.io
 
 PORTAL_DEPLOY_MODE=release
 PORTAL_IMAGE=ghcr.io/hugofelix088-spec/proxmox-vm-portal@sha256:DIGEST_RELEASE
-PORTAL_RELEASE_TAG=v0.18.3
+PORTAL_RELEASE_TAG=v0.19.0
 PORTAL_RELEASE_REPOSITORY=hugofelix088-spec/proxmox-vm-portal
 PORTAL_RELEASE_TRANSPARENCY=private
 ```
@@ -66,7 +73,7 @@ printf 'header = "Authorization: Bearer %s"\n' "$PORTAL_GITHUB_TOKEN" | \
 curl --config - --proto '=https' --tlsv1.2 --fail --silent --show-error \
   -H "Accept: application/vnd.github.raw+json" \
   -H "X-GitHub-Api-Version: 2022-11-28" \
-  "https://api.github.com/repos/hugofelix088-spec/proxmox-vm-portal/contents/deploy/scripts/bootstrap-debian.sh?ref=v0.18.3" \
+  "https://api.github.com/repos/hugofelix088-spec/proxmox-vm-portal/contents/deploy/scripts/bootstrap-debian.sh?ref=v0.19.0" \
   --output "$bootstrap" && \
 bash -n "$bootstrap" && \
 sudo --preserve-env=PORTAL_GITHUB_TOKEN,PORTAL_GITHUB_USERNAME bash "$bootstrap"

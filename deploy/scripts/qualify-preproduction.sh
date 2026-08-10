@@ -63,6 +63,13 @@ if [[ $deploy_mode == release ]]; then
     check "Signature de l'image publiée" bash "$SCRIPT_DIR/verify-published-image.sh" \
         "$portal_image" "$release_tag" "$release_repository" \
         "${release_transparency:-private}"
+elif [[ $deploy_mode == offline ]]; then
+    release_tag=$(sed -n 's/^PORTAL_RELEASE_TAG=//p' "$ROOT_DIR/.env.production" | tail -n 1)
+    portal_image=$(sed -n 's/^PORTAL_IMAGE=//p' "$ROOT_DIR/.env.production" | tail -n 1)
+    evidence_dir="$ROOT_DIR/deploy/release-evidence/$release_tag"
+    check "Preuve du bundle hors ligne" grep -Fqx "image=$portal_image" \
+        "$evidence_dir/offline-verification.txt"
+    check "Image hors ligne présente" docker image inspect "$portal_image"
 fi
 for service in db api worker proxy; do
     container=$($COMPOSE ps -q "$service" 2>/dev/null)

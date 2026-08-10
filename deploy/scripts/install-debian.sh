@@ -99,7 +99,7 @@ portal_image=$(setting PORTAL_IMAGE)
 case "$deploy_mode" in
     source)
         "$COMPOSE" build api
-        portal_image=${portal_image:-proxmox-vm-portal:0.18.3}
+        portal_image=${portal_image:-proxmox-vm-portal:0.19.0}
         ;;
     release)
         release_tag=$(setting PORTAL_RELEASE_TAG)
@@ -123,8 +123,35 @@ case "$deploy_mode" in
             "$release_repository" "${release_transparency:-private}"
         docker pull "$portal_image"
         ;;
+    offline)
+        release_tag=$(setting PORTAL_RELEASE_TAG)
+        release_repository=$(setting PORTAL_RELEASE_REPOSITORY)
+        evidence_dir="$ROOT_DIR/deploy/release-evidence/$release_tag"
+        manifest_file="$evidence_dir/release-manifest.json"
+        verification_file="$evidence_dir/offline-verification.txt"
+        [[ -n $portal_image && -n $release_tag && -n $release_repository ]] || {
+            echo "PORTAL_IMAGE, PORTAL_RELEASE_TAG et PORTAL_RELEASE_REPOSITORY sont requis en mode offline." >&2
+            exit 1
+        }
+        [[ -s $manifest_file && -s $verification_file ]] || {
+            echo "Les preuves de vérification du bundle hors ligne sont absentes." >&2
+            exit 1
+        }
+        grep -Fqx "image=$portal_image" "$verification_file" || {
+            echo "La preuve hors ligne ne correspond pas à PORTAL_IMAGE." >&2
+            exit 1
+        }
+        grep -Fqx "tag=$release_tag" "$verification_file" || {
+            echo "La preuve hors ligne ne correspond pas à PORTAL_RELEASE_TAG." >&2
+            exit 1
+        }
+        docker image inspect "$portal_image" >/dev/null || {
+            echo "L'image applicative vérifiée n'est pas chargée localement." >&2
+            exit 1
+        }
+        ;;
     *)
-        echo "PORTAL_DEPLOY_MODE doit valoir source ou release." >&2
+        echo "PORTAL_DEPLOY_MODE doit valoir source, release ou offline." >&2
         exit 1
         ;;
 esac

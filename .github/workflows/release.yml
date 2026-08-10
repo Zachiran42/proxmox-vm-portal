@@ -13,7 +13,7 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     permissions:
       contents: write
       id-token: write
@@ -80,7 +80,7 @@ jobs:
             --no-default-rekor --out "$signing_config"
           cosign sign --yes --signing-config "$signing_config" \
             "${IMAGE}@${DIGEST}"
-          cosign verify --insecure-ignore-tlog=true \
+          cosign verify --insecure-ignore-tlog=true --use-signed-timestamps \
             --certificate-identity "$identity" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             "${IMAGE}@${DIGEST}" >/dev/null
@@ -119,6 +119,7 @@ jobs:
             --bundle release-manifest.sigstore.json release-manifest.json
           identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}"
           cosign verify-blob --insecure-ignore-tlog=true \
+            --use-signed-timestamps \
             --bundle release-manifest.sigstore.json \
             --certificate-identity "$identity" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
@@ -147,3 +148,15 @@ jobs:
             gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
               --verify-tag --generate-notes --title "Proxmox VM Portal ${GITHUB_REF_NAME}"
           fi
+
+      - name: Build the autonomous Debian 13 bundle
+        env:
+          PORTAL_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PORTAL_GITHUB_USERNAME: ${{ github.actor }}
+          PORTAL_RELEASE_TAG: ${{ github.ref_name }}
+        run: deploy/scripts/prepare-offline-bundle.sh "$RUNNER_TEMP/offline-release"
+
+      - name: Attach the autonomous bundle to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "$GITHUB_REF_NAME" "$RUNNER_TEMP"/offline-release/* --clobber

@@ -1,0 +1,18 @@
+{
+    admin off
+    local_certs
+}
+
+{$PORTAL_DOMAIN} {
+    encode zstd gzip
+    header {
+        -Server
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options nosniff
+        Referrer-Policy no-referrer
+    }
+    reverse_proxy api:8000
+    log
+}
+
+import /etc/caddy/sites/*.caddy

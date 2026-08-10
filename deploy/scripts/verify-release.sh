@@ -27,6 +27,11 @@ expect_exact compose.yml "proxmox-vm-portal:$regex_version\\}" "L'image Compose 
 expect_exact .env.production.example "^PORTAL_IMAGE=proxmox-vm-portal:$regex_version$" "L'image de production"
 expect_exact deploy/scripts/install-debian.sh "proxmox-vm-portal:$regex_version" "L'image de l'installateur"
 expect_exact deploy/testing/test-debian-install.sh "proxmox-vm-portal:$regex_version" "L'image du test Debian"
+expect_exact deploy/scripts/bootstrap-debian.sh "^RELEASE_TAG=\"v$regex_version\"$" "Le tag du bootstrap"
+expect_exact deploy/scripts/bootstrap-debian.sh "^RELEASE_VERSION=\"$regex_version\"$" "La version du bootstrap"
+expect_exact deploy/scripts/prepare-offline-bundle.sh \
+    "^RELEASE_TAG=\\\${PORTAL_RELEASE_TAG:-v$regex_version\}$" \
+    "Le tag du bundle hors ligne"
 
 if [[ ${GITHUB_REF_TYPE:-} == tag ]]; then
     [[ -n ${GITHUB_SHA:-} ]] || {

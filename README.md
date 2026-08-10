@@ -96,6 +96,8 @@ sudo deploy/scripts/compose.sh ps
 Guide complet : [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md). Sauvegarde,
 restauration et mises à jour :
 [`docs/BACKUP_RESTORE.md`](docs/BACKUP_RESTORE.md).
+Pour un réseau autonome sans accès GitHub/GHCR depuis le serveur, utilisez le
+bundle vérifiable décrit dans [`docs/AIRGAP.md`](docs/AIRGAP.md).
 
 Pour tester la release privée sur une Debian vierge avec une commande `curl`
 épinglée au tag, utilisez la procédure d'installation rapide de

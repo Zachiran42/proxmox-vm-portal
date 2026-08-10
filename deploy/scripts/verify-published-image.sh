@@ -38,7 +38,7 @@ repository_lower=${repository,,}
 identity="https://github.com/${repository}/.github/workflows/release.yml@refs/tags/${release_tag}"
 docker_args=(
     run --rm --read-only --user 0:0 --cap-drop ALL
-    --security-opt no-new-privileges:true --tmpfs /tmp:size=32m,mode=1777
+    --security-opt no-new-privileges:true --tmpfs "/tmp:size=32m,mode=1777"
     --env HOME=/tmp/cosign-home
 )
 docker_config_dir=${PORTAL_DOCKER_CONFIG_DIR:-/root/.docker}
@@ -50,6 +50,7 @@ verify_args=(
     verify
     --certificate-identity "$identity"
     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+    --use-signed-timestamps
 )
 if [[ $transparency == private ]]; then
     verify_args+=(--insecure-ignore-tlog=true)
