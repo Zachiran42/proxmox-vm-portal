@@ -88,6 +88,7 @@ docker run --rm --user 0:0 --read-only --cap-drop ALL \
     --env HOME=/tmp/cosign-home "$COSIGN_IMAGE" \
     trusted-root create --with-default-services \
     > "$bundle_dir/evidence/sigstore-trusted-root.json"
+chmod 0755 "$bundle_dir" "$bundle_dir/evidence"
 chmod 0444 "$bundle_dir"/evidence/*
 docker run --rm --network none --read-only --cap-drop ALL \
     --user 0:0 \

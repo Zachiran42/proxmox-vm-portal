@@ -85,6 +85,7 @@ def test_offline_bundle_separates_connected_preparation_from_target_installation
     assert "verify-blob" in prepare
     assert "trusted-root create --with-default-services" in prepare
     assert "--out /work/sigstore-trusted-root.json" not in prepare
+    assert 'chmod 0755 "$bundle_dir" "$bundle_dir/evidence"' in prepare
     assert 'chmod 0444 "$bundle_dir"/evidence/*' in prepare
     assert "PORTAL_SOURCE_ROOT" in prepare
     assert prepare.index("verify-blob") < prepare.index('pull "$image"')
