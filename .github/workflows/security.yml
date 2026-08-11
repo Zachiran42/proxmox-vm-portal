@@ -41,6 +41,10 @@ jobs:
           bash deploy/scripts/verify-release.sh "v$version"
           docker run --rm -v "$PWD:/repo" -w /repo \
             rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+          docker run --rm -e PORTAL_DOMAIN=192.0.2.10 \
+            -v "$PWD/deploy/caddy:/etc/caddy:ro" \
+            caddy:2.11.3-alpine@sha256:86deaf5e3d3408a6ccec08fbb79989783dd26e206ae10bcf78a801dc8c9ab794 \
+            caddy validate --config /etc/caddy/Caddyfile.onprem --adapter caddyfile
           python -m json.tool deploy/proxmox/acl-policy.example.json >/dev/null
       - name: Build the production image
         run: docker build --tag proxmox-vm-portal:${{ github.sha }} .

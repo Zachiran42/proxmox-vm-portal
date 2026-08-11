@@ -72,6 +72,7 @@ def test_ci_installs_the_checkout_editably_for_coverage():
 
     assert "python -m pip install --no-deps -e ." in workflow
     assert "bash deploy/testing/test-debian-install.sh" in workflow
+    assert "caddy validate --config /etc/caddy/Caddyfile.onprem" in workflow
 
 
 def test_offline_bundle_separates_connected_preparation_from_target_installation():
@@ -169,6 +170,7 @@ def test_offline_first_boot_is_ip_based_and_defers_proxmox_configuration():
     configure = (ROOT / "deploy/scripts/configure-proxmox.sh").read_text(
         encoding="utf-8"
     )
+    caddy = (ROOT / "deploy/caddy/Caddyfile.onprem").read_text(encoding="utf-8")
 
     assert "install_profile=quick" in bundle_install
     assert "PORTAL_INSTALL_IP" in bundle_install
@@ -189,6 +191,7 @@ def test_offline_first_boot_is_ip_based_and_defers_proxmox_configuration():
     assert "harden_portal_secrets" in debian_install
     assert 'chown 10001:10001 "$path"' in debian_install
     assert 'chmod 0400 "$path"' in debian_install
+    assert "default_sni {$PORTAL_DOMAIN}" in caddy
 
 
 def test_offline_verification_records_local_and_signed_image_identities():

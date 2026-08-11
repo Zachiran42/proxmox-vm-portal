@@ -1,6 +1,7 @@
 {
     admin off
     local_certs
+    default_sni {$PORTAL_DOMAIN}
 }
 
 {$PORTAL_DOMAIN} {

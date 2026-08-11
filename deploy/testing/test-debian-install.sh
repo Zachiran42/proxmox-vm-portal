@@ -4,7 +4,7 @@ set -Eeuo pipefail
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 ROOT_DIR=$(CDPATH='' cd -- "$SCRIPT_DIR/../.." && pwd)
 CONTAINER="portal-debian-install-test-$$"
-IMAGE="proxmox-vm-portal:0.19.6"
+IMAGE="proxmox-vm-portal:0.19.7"
 
 cleanup() {
     docker rm -f "$CONTAINER" >/dev/null 2>&1 || true

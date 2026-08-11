@@ -33,7 +33,7 @@ Le poste doit utiliser Linux amd64, Git et Docker. Depuis le tag de la release :
 read -rsp "PAT GitHub du poste de préparation : " PORTAL_GITHUB_TOKEN && echo
 export PORTAL_GITHUB_TOKEN
 export PORTAL_GITHUB_USERNAME=hugofelix088-spec
-export PORTAL_RELEASE_TAG=v0.19.6
+export PORTAL_RELEASE_TAG=v0.19.7
 
 deploy/scripts/prepare-offline-bundle.sh /srv/export-portal
 
@@ -58,9 +58,9 @@ enregistrée dans la CMDB avant extraction.
 Après transfert par le mécanisme approuvé de l'établissement :
 
 ```bash
-sha256sum -c proxmox-vm-portal-offline-0.19.6-amd64.tar.gz.sha256
-tar -xzf proxmox-vm-portal-offline-0.19.6-amd64.tar.gz
-cd proxmox-vm-portal-offline-0.19.6-amd64
+sha256sum -c proxmox-vm-portal-offline-0.19.7-amd64.tar.gz.sha256
+tar -xzf proxmox-vm-portal-offline-0.19.7-amd64.tar.gz
+cd proxmox-vm-portal-offline-0.19.7-amd64
 sudo bash install-offline.sh
 ```
 
@@ -75,6 +75,10 @@ Les secrets applicatifs restent dans un répertoire root-only et chaque fichier
 monté dans le portail est lisible uniquement par l'UID non-root 10001. Cette
 combinaison permet au conteneur durci de lire ses secrets sans les exposer aux
 autres comptes de la VM.
+
+Le frontal définit également l'adresse du portail comme SNI TLS par défaut.
+Cela permet aux navigateurs et outils qui omettent le SNI lorsqu'ils contactent
+directement une adresse IP de recevoir le certificat local correspondant.
 
 Après la première connexion, remplacez le mot de passe généré depuis
 l'administration des utilisateurs puis supprimez le fichier d'identifiants
