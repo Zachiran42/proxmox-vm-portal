@@ -7,14 +7,15 @@ TARGET_DIR=/opt/proxmox-vm-portal
 COSIGN_IMAGE="ghcr.io/sigstore/cosign/cosign:v3.0.6@sha256:de9c65609e6bde17e6b48de485ee788407c9502fa08b8f4459f595b21f56cd00"
 COSIGN_OFFLINE_IMAGE=${COSIGN_IMAGE%@*}
 operation=install
+install_profile=quick
 rollback_dir=""
 extract_dir=""
-if [[ ${1:-} == --update ]]; then
-    operation=update
-elif [[ $# -ne 0 ]]; then
-    echo "Usage: $0 [--update]" >&2
-    exit 1
-fi
+case ${1:-} in
+    "") ;;
+    --production) install_profile=production ;;
+    --update) operation=update ;;
+    *) echo "Usage: $0 [--production|--update]" >&2; exit 1 ;;
+esac
 
 cleanup() {
     local status=$?
@@ -199,7 +200,8 @@ fi
 evidence_dir="$TARGET_DIR/deploy/release-evidence/$tag"
 install -d -m 0755 "$evidence_dir"
 install -m 0644 "$BUNDLE_DIR/evidence/"* "$evidence_dir/"
-printf 'image=%s\ntag=%s\ncommit=%s\n' "$image" "$tag" "$commit" \
+printf 'image=%s\nsigned_image=%s\ntag=%s\ncommit=%s\n' \
+    "$portal_image" "$image" "$tag" "$commit" \
     > "$evidence_dir/offline-verification.txt"
 chmod 0644 "$evidence_dir/offline-verification.txt"
 
@@ -224,12 +226,35 @@ set_env_value PORTAL_RELEASE_REPOSITORY "$repository"
 set_env_value PORTAL_RELEASE_TRANSPARENCY private
 
 if [[ $operation == install ]]; then
-    prompt_value PORTAL_DOMAIN "Nom DNS interne du portail" '^[A-Za-z0-9.-]+$'
-    prompt_value ACME_EMAIL "Adresse email PKI/ACME interne" '^[^[:space:]@]+@[^[:space:]@]+$'
-    prompt_value PVE_API_URL "URL HTTPS de l API Proxmox" '^https://[^[:space:]]+$'
-    prompt_value PVE_TOKEN_ID "Identifiant du token Proxmox" '^[^[:space:]]+@[^[:space:]!]+![^[:space:]]+$'
-    [[ $PVE_TOKEN_ID != root@* ]] || fail "Un token root@… est interdit."
-    prompt_value BACKUP_AGE_RECIPIENT "Destinataire age des sauvegardes" '^age1[0-9a-z]+$'
+    if [[ $install_profile == quick ]]; then
+        PORTAL_DOMAIN=${PORTAL_INSTALL_IP:-$(ip -o -4 addr show scope global | \
+            awk 'NR == 1 {sub(/\/.*/, "", $4); print $4}')}
+        [[ $PORTAL_DOMAIN =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || fail \
+            "Impossible de détecter l'adresse IPv4. Utilisez PORTAL_INSTALL_IP=x.x.x.x."
+        IFS=. read -r ip1 ip2 ip3 ip4 <<< "$PORTAL_DOMAIN"
+        for octet in "$ip1" "$ip2" "$ip3" "$ip4"; do
+            ((10#$octet >= 0 && 10#$octet <= 255)) || fail \
+                "Adresse IPv4 détectée invalide."
+        done
+        ACME_EMAIL=admin@localhost.invalid
+        PVE_API_URL=https://127.0.0.1:65535/api2/json
+        PVE_TOKEN_ID=portal@pve!unconfigured
+        backup_identity=/root/proxmox-vm-portal-backup.agekey
+        if [[ ! -s $backup_identity ]]; then
+            age-keygen -o "$backup_identity"
+            chmod 0600 "$backup_identity"
+        fi
+        BACKUP_AGE_RECIPIENT=$(age-keygen -y "$backup_identity")
+        set_env_value PORTAL_FIRST_BOOT_MODE true
+    else
+        prompt_value PORTAL_DOMAIN "Nom DNS interne du portail" '^[A-Za-z0-9.-]+$'
+        prompt_value ACME_EMAIL "Adresse email PKI/ACME interne" '^[^[:space:]@]+@[^[:space:]@]+$'
+        prompt_value PVE_API_URL "URL HTTPS de l API Proxmox" '^https://[^[:space:]]+$'
+        prompt_value PVE_TOKEN_ID "Identifiant du token Proxmox" '^[^[:space:]]+@[^[:space:]!]+![^[:space:]]+$'
+        [[ $PVE_TOKEN_ID != root@* ]] || fail "Un token root@… est interdit."
+        prompt_value BACKUP_AGE_RECIPIENT "Destinataire age des sauvegardes" '^age1[0-9a-z]+$'
+        set_env_value PORTAL_FIRST_BOOT_MODE false
+    fi
     set_env_value PORTAL_DOMAIN "$PORTAL_DOMAIN"
     set_env_value ACME_EMAIL "$ACME_EMAIL"
     set_env_value PVE_API_URL "$PVE_API_URL"

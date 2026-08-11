@@ -33,7 +33,7 @@ Le poste doit utiliser Linux amd64, Git et Docker. Depuis le tag de la release :
 read -rsp "PAT GitHub du poste de préparation : " PORTAL_GITHUB_TOKEN && echo
 export PORTAL_GITHUB_TOKEN
 export PORTAL_GITHUB_USERNAME=hugofelix088-spec
-export PORTAL_RELEASE_TAG=v0.19.4
+export PORTAL_RELEASE_TAG=v0.19.5
 
 deploy/scripts/prepare-offline-bundle.sh /srv/export-portal
 
@@ -58,15 +58,37 @@ enregistrée dans la CMDB avant extraction.
 Après transfert par le mécanisme approuvé de l'établissement :
 
 ```bash
-sha256sum -c proxmox-vm-portal-offline-0.19.4-amd64.tar.gz.sha256
-tar -xzf proxmox-vm-portal-offline-0.19.4-amd64.tar.gz
-cd proxmox-vm-portal-offline-0.19.4-amd64
+sha256sum -c proxmox-vm-portal-offline-0.19.5-amd64.tar.gz.sha256
+tar -xzf proxmox-vm-portal-offline-0.19.5-amd64.tar.gz
+cd proxmox-vm-portal-offline-0.19.5-amd64
 sudo bash install-offline.sh
 ```
 
 Cette commande ne demande aucun identifiant GitHub et ne requiert aucune route
-Internet. Elle demande uniquement la configuration locale, le token Proxmox
-non-root, le destinataire `age` et le mot de passe administrateur initial.
+Internet. Par défaut, elle détecte la première IPv4 globale de la VM, démarre le
+portail sur `https://IP_DE_LA_VM` avec la CA locale Caddy et génère les
+identifiants initiaux ainsi qu'une identité `age`. Les chemins root-only à
+consulter et à exporter sont affichés à la fin. Aucun paramètre Proxmox n'est
+demandé pour ce premier démarrage.
+
+Après la première connexion, remplacez le mot de passe généré depuis
+l'administration des utilisateurs puis supprimez le fichier d'identifiants
+root-only annoncé par l'installateur. Exportez également la clé privée `age`
+vers le coffre de sauvegarde avant de la retirer de la VM.
+
+Une fois connecté au portail, raccordez Proxmox séparément :
+
+```bash
+sudo /opt/proxmox-vm-portal/deploy/scripts/configure-proxmox.sh
+```
+
+Pour conserver l'ancien parcours entièrement paramétré avant démarrage, utilisez
+`sudo bash install-offline.sh --production`. Pour imposer une IPv4 lorsque la VM
+en possède plusieurs :
+
+```bash
+sudo PORTAL_INSTALL_IP=192.0.2.10 bash install-offline.sh
+```
 
 ## DNS, PKI et services internes
 
@@ -76,6 +98,17 @@ les profils Keycloak/Password Pusher. Exportez la racine située dans le volume
 dans le magasin de confiance des postes clients. Pour un CHU, préférez remplacer
 ce mécanisme par un certificat émis par la PKI d'entreprise avant ouverture aux
 utilisateurs.
+
+Le certificat racine local peut être exporté après installation avec :
+
+```bash
+sudo docker cp proxmox-vm-portal-proxy-1:/data/caddy/pki/authorities/local/root.crt \
+  /root/proxmox-vm-portal-local-ca.crt
+```
+
+Cette CA permet de supprimer l'avertissement du navigateur pendant la phase de
+test. Elle pourra être remplacée plus tard dans la configuration Caddy par le
+certificat et la clé émis par la PKI de l'établissement.
 
 Proxmox, LDAP/LDAPS, Keycloak, Password Pusher, DNS, NTP, SMTP, sauvegardes et
 SIEM doivent utiliser exclusivement leurs adresses internes. L'accès sortant de

@@ -156,3 +156,40 @@ def test_offline_bundle_contains_all_runtime_and_docker_prerequisites():
     ):
         assert package in downloader
     assert "DEBIAN-PACKAGES.tsv" in downloader
+
+
+def test_offline_first_boot_is_ip_based_and_defers_proxmox_configuration():
+    bundle_install = (ROOT / "deploy/scripts/install-offline-bundle.sh").read_text(
+        encoding="utf-8"
+    )
+    debian_install = (ROOT / "deploy/scripts/install-debian.sh").read_text(
+        encoding="utf-8"
+    )
+    configure = (ROOT / "deploy/scripts/configure-proxmox.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "install_profile=quick" in bundle_install
+    assert "PORTAL_INSTALL_IP" in bundle_install
+    assert "ip -o -4 addr show scope global" in bundle_install
+    assert "https://127.0.0.1:65535/api2/json" in bundle_install
+    assert "portal@pve!unconfigured" in bundle_install
+    assert "age-keygen -y" in bundle_install
+    assert "--production" in bundle_install
+    assert "PORTAL_FIRST_BOOT_MODE" in debian_install
+    assert "proxmox-vm-portal-initial-credentials.txt" in debian_install
+    assert "openssl rand -base64 24" in debian_install
+    assert "read -r -s" in configure
+    assert "root@" in configure
+    assert "--force-recreate api worker" in configure
+    assert "--password" not in configure
+    assert "unset PVE_TOKEN_SECRET" in configure
+
+
+def test_offline_verification_records_local_and_signed_image_identities():
+    install = (ROOT / "deploy/scripts/install-offline-bundle.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "signed_image=%s" in install
+    assert '"$portal_image" "$image" "$tag" "$commit"' in install

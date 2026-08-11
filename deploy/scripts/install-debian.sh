@@ -78,11 +78,15 @@ db_password=$(cat "$SECRETS_DIR/portal_db_password")
 printf 'postgresql+psycopg://portal:%s@db:5432/portal' "$db_password" > "$SECRETS_DIR/portal_database_url"
 
 if [[ ! -s $SECRETS_DIR/pve_token_secret ]]; then
-    read -rsp "Secret du token API Proxmox: " pve_secret
-    echo
-    [[ -n $pve_secret ]] || { echo "Le secret Proxmox est obligatoire." >&2; exit 1; }
-    printf '%s' "$pve_secret" > "$SECRETS_DIR/pve_token_secret"
-    unset pve_secret
+    if [[ $(setting PORTAL_FIRST_BOOT_MODE) == true ]]; then
+        secret pve_token_secret
+    else
+        read -rsp "Secret du token API Proxmox: " pve_secret
+        echo
+        [[ -n $pve_secret ]] || { echo "Le secret Proxmox est obligatoire." >&2; exit 1; }
+        printf '%s' "$pve_secret" > "$SECRETS_DIR/pve_token_secret"
+        unset pve_secret
+    fi
 fi
 
 cd "$ROOT_DIR"
@@ -99,7 +103,7 @@ portal_image=$(setting PORTAL_IMAGE)
 case "$deploy_mode" in
     source)
         "$COMPOSE" build api
-        portal_image=${portal_image:-proxmox-vm-portal:0.19.4}
+        portal_image=${portal_image:-proxmox-vm-portal:0.19.5}
         ;;
     release)
         release_tag=$(setting PORTAL_RELEASE_TAG)
@@ -161,12 +165,21 @@ if [[ ${PORTAL_INSTALL_VALIDATE_ONLY:-0} == 1 ]]; then
     exit 0
 fi
 if [[ ! -s $SECRETS_DIR/portal_admin_password_hash ]]; then
-    read -rsp "Mot de passe initial de l'administrateur (16 caractères minimum): " admin_password
-    echo
-    read -rsp "Confirmation: " admin_confirmation
-    echo
-    [[ $admin_password == "$admin_confirmation" ]] || { echo "Les mots de passe diffèrent." >&2; exit 1; }
-    [[ ${#admin_password} -ge 16 ]] || { echo "Mot de passe trop court." >&2; exit 1; }
+    if [[ $(setting PORTAL_FIRST_BOOT_MODE) == true ]]; then
+        admin_password=$(openssl rand -base64 24 | tr -d '\n')
+        initial_credentials=/root/proxmox-vm-portal-initial-credentials.txt
+        install -m 0600 /dev/null "$initial_credentials"
+        printf 'URL=https://%s\nUtilisateur=%s\nMot de passe=%s\n' \
+            "$(setting PORTAL_DOMAIN)" "$(setting PORTAL_ADMIN_USERNAME)" \
+            "$admin_password" > "$initial_credentials"
+    else
+        read -rsp "Mot de passe initial de l'administrateur (16 caractères minimum): " admin_password
+        echo
+        read -rsp "Confirmation: " admin_confirmation
+        echo
+        [[ $admin_password == "$admin_confirmation" ]] || { echo "Les mots de passe diffèrent." >&2; exit 1; }
+        [[ ${#admin_password} -ge 16 ]] || { echo "Mot de passe trop court." >&2; exit 1; }
+    fi
     printf '%s' "$admin_password" | docker run --rm -i "$portal_image" \
         python -c 'import sys; from werkzeug.security import generate_password_hash; print(generate_password_hash(sys.stdin.read(), method="scrypt"))' \
         > "$SECRETS_DIR/portal_admin_password_hash"
@@ -185,4 +198,9 @@ else
 fi
 
 echo "Installation terminée. Vérifiez https://$(grep '^PORTAL_DOMAIN=' "$ENV_FILE" | cut -d= -f2-)"
+if [[ $(setting PORTAL_FIRST_BOOT_MODE) == true ]]; then
+    echo "Identifiants initiaux: /root/proxmox-vm-portal-initial-credentials.txt"
+    echo "Clé privée de sauvegarde à exporter hors de la VM: /root/proxmox-vm-portal-backup.agekey"
+    echo "Configurez ensuite Proxmox avec: $ROOT_DIR/deploy/scripts/configure-proxmox.sh"
+fi
 echo "Configurez DNS, pare-feu hôte, ACL Proxmox et sauvegardes hors site selon docs/DEPLOYMENT.md."
