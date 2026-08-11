@@ -41,14 +41,24 @@ class PVEClient:
     api_url: str
     token_id: str
     token_secret: str
+    ca_certificate: str = ""
 
     @classmethod
     def from_environment(cls) -> PVEClient:
         values = {
             key: environment_value(key)
-            for key in ("PVE_API_URL", "PVE_TOKEN_ID", "PVE_TOKEN_SECRET")
+            for key in (
+                "PVE_API_URL",
+                "PVE_TOKEN_ID",
+                "PVE_TOKEN_SECRET",
+                "PVE_CA_CERT",
+            )
         }
-        missing = [key for key, value in values.items() if not value]
+        missing = [
+            key
+            for key in ("PVE_API_URL", "PVE_TOKEN_ID", "PVE_TOKEN_SECRET")
+            if not values[key]
+        ]
         if missing:
             raise ValueError("Variables d'environnement manquantes: " + ", ".join(missing))
         if not values["PVE_API_URL"].startswith("https://"):
@@ -57,7 +67,12 @@ class PVEClient:
             raise ValueError("Un token root est interdit; utilisez un compte de service restreint.")
         if "!" not in values["PVE_TOKEN_ID"]:
             raise ValueError("PVE_TOKEN_ID doit être un identifiant de token PVE.")
-        return cls(values["PVE_API_URL"].rstrip("/"), values["PVE_TOKEN_ID"], values["PVE_TOKEN_SECRET"])
+        return cls(
+            values["PVE_API_URL"].rstrip("/"),
+            values["PVE_TOKEN_ID"],
+            values["PVE_TOKEN_SECRET"],
+            values["PVE_CA_CERT"],
+        )
 
     @property
     def authorization_header(self) -> str:
@@ -72,7 +87,12 @@ class PVEClient:
             headers={"Authorization": self.authorization_header, "Content-Type": "application/json"},
         )
         try:
-            with urlopen(request, timeout=10) as response:  # nosec B310
+            options: dict[str, Any] = {"timeout": 10}
+            if self.ca_certificate:
+                context = ssl.create_default_context()
+                context.load_verify_locations(cadata=self.ca_certificate)
+                options["context"] = context
+            with urlopen(request, **options) as response:  # nosec B310
                 return json.load(response).get("data")
         except HTTPError as error:
             raise PVEHTTPError(error.code, self._http_error_message(error), error.url) from error

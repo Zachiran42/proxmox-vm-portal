@@ -39,6 +39,24 @@ def test_request_sends_token_auth_header_and_json_payload(client):
     assert urlopen.call_args.kwargs == {"timeout": 10}
 
 
+def test_request_adds_private_ca_without_replacing_system_trust():
+    client = PVEClient(
+        api_url="https://pve.example:8006/api2/json",
+        token_id="portal@pve!provisioner",
+        token_secret="test-secret",
+        ca_certificate="-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----",
+    )
+    with (
+        patch("portal.pve.ssl.create_default_context") as create_context,
+        patch("portal.pve.urlopen", return_value=pve_response("101")) as urlopen,
+    ):
+        assert client._request("/cluster/nextid") == 101
+
+    context = create_context.return_value
+    context.load_verify_locations.assert_called_once_with(cadata=client.ca_certificate)
+    assert urlopen.call_args.kwargs == {"timeout": 10, "context": context}
+
+
 def test_request_wraps_http_errors_with_status_and_pve_message(client):
     error = HTTPError(
         "https://pve.example/api2/json/cluster/nextid",
@@ -334,7 +352,7 @@ def test_create_vm_rejects_invalid_vmid(client, vmid):
     ],
 )
 def test_from_environment_rejects_invalid_configuration(monkeypatch, environment, message):
-    for name in ("PVE_API_URL", "PVE_TOKEN_ID", "PVE_TOKEN_SECRET"):
+    for name in ("PVE_API_URL", "PVE_TOKEN_ID", "PVE_TOKEN_SECRET", "PVE_CA_CERT"):
         monkeypatch.delenv(name, raising=False)
     for name, value in environment.items():
         monkeypatch.setenv(name, value)

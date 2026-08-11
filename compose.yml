@@ -5,6 +5,7 @@ x-portal-environment: &portal-environment
   PORTAL_SESSION_SECRET_FILE: /run/secrets/portal_session_secret
   PORTAL_ADMIN_PASSWORD_HASH_FILE: /run/secrets/portal_admin_password_hash
   PVE_TOKEN_SECRET_FILE: /run/secrets/pve_token_secret
+  PVE_CA_CERT_FILE: /run/secrets/pve_ca_cert
   PORTAL_OIDC_CLIENT_SECRET_FILE: /run/secrets/portal_oidc_client_secret
   PORTAL_PWPUSH_API_TOKEN_FILE: /run/secrets/portal_pwpush_api_token
   PORTAL_METRICS_TOKEN_FILE: /run/secrets/portal_metrics_token
@@ -29,7 +30,7 @@ x-portal-environment: &portal-environment
   PORTAL_SESSION_COOKIE_SECURE: "true"
 
 x-portal-service: &portal-service
-  image: ${PORTAL_IMAGE:-proxmox-vm-portal:0.19.7}
+  image: ${PORTAL_IMAGE:-proxmox-vm-portal:0.19.8}
   build:
     context: .
   restart: unless-stopped
@@ -46,6 +47,7 @@ x-portal-service: &portal-service
     - portal_session_secret
     - portal_admin_password_hash
     - pve_token_secret
+    - pve_ca_cert
     - portal_oidc_client_secret
     - portal_pwpush_api_token
     - portal_metrics_token
@@ -228,6 +230,7 @@ secrets:
   portal_session_secret: {file: "${SECRETS_DIR:-./deploy/secrets}/portal_session_secret"}
   portal_admin_password_hash: {file: "${SECRETS_DIR:-./deploy/secrets}/portal_admin_password_hash"}
   pve_token_secret: {file: "${SECRETS_DIR:-./deploy/secrets}/pve_token_secret"}
+  pve_ca_cert: {file: "${SECRETS_DIR:-./deploy/secrets}/pve_ca_cert"}
   portal_oidc_client_secret: {file: "${SECRETS_DIR:-./deploy/secrets}/portal_oidc_client_secret"}
   portal_pwpush_api_token: {file: "${SECRETS_DIR:-./deploy/secrets}/portal_pwpush_api_token"}
   portal_metrics_token: {file: "${SECRETS_DIR:-./deploy/secrets}/portal_metrics_token"}

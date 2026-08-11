@@ -192,6 +192,11 @@ def test_offline_first_boot_is_ip_based_and_defers_proxmox_configuration():
     assert 'chown 10001:10001 "$path"' in debian_install
     assert 'chmod 0400 "$path"' in debian_install
     assert "default_sni {$PORTAL_DOMAIN}" in caddy
+    assert "PVE_CA_CERT_FILE: /run/secrets/pve_ca_cert" in (
+        ROOT / "compose.yml"
+    ).read_text(encoding="utf-8")
+    assert "tls_probe" in configure
+    assert 'grep -q -- \'PRIVATE KEY\'' in configure
 
 
 def test_offline_verification_records_local_and_signed_image_identities():

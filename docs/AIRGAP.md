@@ -33,7 +33,7 @@ Le poste doit utiliser Linux amd64, Git et Docker. Depuis le tag de la release :
 read -rsp "PAT GitHub du poste de préparation : " PORTAL_GITHUB_TOKEN && echo
 export PORTAL_GITHUB_TOKEN
 export PORTAL_GITHUB_USERNAME=hugofelix088-spec
-export PORTAL_RELEASE_TAG=v0.19.7
+export PORTAL_RELEASE_TAG=v0.19.8
 
 deploy/scripts/prepare-offline-bundle.sh /srv/export-portal
 
@@ -58,9 +58,9 @@ enregistrée dans la CMDB avant extraction.
 Après transfert par le mécanisme approuvé de l'établissement :
 
 ```bash
-sha256sum -c proxmox-vm-portal-offline-0.19.7-amd64.tar.gz.sha256
-tar -xzf proxmox-vm-portal-offline-0.19.7-amd64.tar.gz
-cd proxmox-vm-portal-offline-0.19.7-amd64
+sha256sum -c proxmox-vm-portal-offline-0.19.8-amd64.tar.gz.sha256
+tar -xzf proxmox-vm-portal-offline-0.19.8-amd64.tar.gz
+cd proxmox-vm-portal-offline-0.19.8-amd64
 sudo bash install-offline.sh
 ```
 
@@ -90,6 +90,15 @@ Une fois connecté au portail, raccordez Proxmox séparément :
 ```bash
 sudo /opt/proxmox-vm-portal/deploy/scripts/configure-proxmox.sh
 ```
+
+Le script vérifie TLS avant d'enregistrer le token. Si Proxmox utilise sa CA de
+cluster ou une PKI privée non encore approuvée, transférez uniquement le
+certificat public de la CA sur la VM du portail. Le script demande alors son
+chemin, rejette tout fichier contenant une clé privée et vérifie la chaîne ainsi
+que le nom ou l'adresse du serveur. Cette CA complète le magasin système pour la
+seule connexion Proxmox ; les autres connexions HTTPS conservent leurs autorités
+de confiance habituelles. Ne contournez jamais ce contrôle avec `-k` ou une
+désactivation de la vérification TLS.
 
 Pour conserver l'ancien parcours entièrement paramétré avant démarrage, utilisez
 `sudo bash install-offline.sh --production`. Pour imposer une IPv4 lorsque la VM
