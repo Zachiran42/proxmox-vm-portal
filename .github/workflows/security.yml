@@ -66,6 +66,14 @@ jobs:
             hashicorp/packer:1.14.3@sha256:0b9feae59276b3d72e2488d6884a281e3eab31f58d0ef9790e8f012846965dba \
             -c 'packer init debian-13.pkr.hcl && packer fmt -check debian-13.pkr.hcl && packer validate debian-13.pkr.hcl'
 
+  debian-installer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Validate installation and non-root secret access on Debian 13
+        run: bash deploy/testing/test-debian-install.sh
+
   secrets:
     runs-on: ubuntu-latest
     timeout-minutes: 10

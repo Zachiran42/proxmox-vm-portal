@@ -71,6 +71,7 @@ def test_ci_installs_the_checkout_editably_for_coverage():
     workflow = (ROOT / ".github/workflows/security.yml").read_text(encoding="utf-8")
 
     assert "python -m pip install --no-deps -e ." in workflow
+    assert "bash deploy/testing/test-debian-install.sh" in workflow
 
 
 def test_offline_bundle_separates_connected_preparation_from_target_installation():
@@ -184,6 +185,10 @@ def test_offline_first_boot_is_ip_based_and_defers_proxmox_configuration():
     assert "--force-recreate api worker" in configure
     assert "--password" not in configure
     assert "unset PVE_TOKEN_SECRET" in configure
+    assert 'chown 10001:10001 "$SECRET_FILE"' in configure
+    assert "harden_portal_secrets" in debian_install
+    assert 'chown 10001:10001 "$path"' in debian_install
+    assert 'chmod 0400 "$path"' in debian_install
 
 
 def test_offline_verification_records_local_and_signed_image_identities():

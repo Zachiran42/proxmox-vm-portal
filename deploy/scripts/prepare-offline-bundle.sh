@@ -5,7 +5,7 @@ umask 077
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 ROOT_DIR=$(CDPATH='' cd -- "${PORTAL_SOURCE_ROOT:-$SCRIPT_DIR/../..}" && pwd)
 REPOSITORY="hugofelix088-spec/proxmox-vm-portal"
-RELEASE_TAG=${PORTAL_RELEASE_TAG:-v0.19.5}
+RELEASE_TAG=${PORTAL_RELEASE_TAG:-v0.19.6}
 OUTPUT_DIR=${1:-$PWD}
 API_ROOT="https://api.github.com/repos/$REPOSITORY"
 COSIGN_IMAGE="ghcr.io/sigstore/cosign/cosign:v3.0.6@sha256:de9c65609e6bde17e6b48de485ee788407c9502fa08b8f4459f595b21f56cd00"
@@ -69,8 +69,9 @@ commit=$(jq -r '.commit' "$manifest")
     "Le tag Git local ne correspond pas au commit signé."
 [[ $(git -C "$ROOT_DIR" rev-parse HEAD) == "$commit" ]] || fail \
     "Le poste de préparation doit avoir extrait exactement $RELEASE_TAG."
-git -C "$ROOT_DIR" diff --quiet && git -C "$ROOT_DIR" diff --cached --quiet || fail \
-    "Les fichiers suivis du checkout de préparation sont modifiés; export refusé."
+if ! git -C "$ROOT_DIR" diff --quiet || ! git -C "$ROOT_DIR" diff --cached --quiet; then
+    fail "Les fichiers suivis du checkout de préparation sont modifiés; export refusé."
+fi
 
 sbom_name=$(jq -r '.sbom.file' "$manifest")
 sbom_sha256=$(jq -r '.sbom.sha256' "$manifest")

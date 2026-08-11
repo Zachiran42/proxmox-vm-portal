@@ -15,7 +15,7 @@ cleanup() {
     if [[ $status -ne 0 && -n $rollback_dir && -d $rollback_dir ]]; then
         install -m 0600 "$rollback_dir/environment" "$ENV_FILE"
         if [[ -s $rollback_dir/token ]]; then
-            install -m 0600 "$rollback_dir/token" "$SECRET_FILE"
+            install -m 0400 -o 10001 -g 10001 "$rollback_dir/token" "$SECRET_FILE"
         else
             rm -f -- "$SECRET_FILE"
         fi
@@ -60,6 +60,8 @@ set_env_value PVE_TOKEN_ID "$PVE_TOKEN_ID"
 set_env_value PORTAL_FIRST_BOOT_MODE false
 install -m 0600 /dev/null "$SECRET_FILE"
 printf '%s' "$PVE_TOKEN_SECRET" > "$SECRET_FILE"
+chown 10001:10001 "$SECRET_FILE"
+chmod 0400 "$SECRET_FILE"
 unset PVE_TOKEN_SECRET
 
 "$COMPOSE" config --quiet

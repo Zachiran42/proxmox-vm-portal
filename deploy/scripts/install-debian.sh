@@ -46,6 +46,19 @@ secret() {
     chmod 0600 "$path"
 }
 
+harden_portal_secrets() {
+    local name path
+    for name in portal_database_url portal_session_secret \
+        portal_admin_password_hash pve_token_secret portal_oidc_client_secret \
+        portal_pwpush_api_token portal_metrics_token; do
+        path="$SECRETS_DIR/$name"
+        if [[ -e $path ]]; then
+            chown 10001:10001 "$path"
+            chmod 0400 "$path"
+        fi
+    done
+}
+
 install_docker
 command -v age >/dev/null || { apt-get update && apt-get install -y age; }
 command -v openssl >/dev/null || { apt-get update && apt-get install -y openssl; }
@@ -103,7 +116,7 @@ portal_image=$(setting PORTAL_IMAGE)
 case "$deploy_mode" in
     source)
         "$COMPOSE" build api
-        portal_image=${portal_image:-proxmox-vm-portal:0.19.5}
+        portal_image=${portal_image:-proxmox-vm-portal:0.19.6}
         ;;
     release)
         release_tag=$(setting PORTAL_RELEASE_TAG)
@@ -159,6 +172,7 @@ case "$deploy_mode" in
         exit 1
         ;;
 esac
+harden_portal_secrets
 if [[ ${PORTAL_INSTALL_VALIDATE_ONLY:-0} == 1 ]]; then
     docker image inspect "$portal_image" >/dev/null
     echo "Validation Debian terminée après la préparation de l'image."
@@ -185,6 +199,7 @@ if [[ ! -s $SECRETS_DIR/portal_admin_password_hash ]]; then
         > "$SECRETS_DIR/portal_admin_password_hash"
     unset admin_password admin_confirmation
 fi
+harden_portal_secrets
 
 "$COMPOSE" config --quiet
 "$COMPOSE" up -d --wait

@@ -44,7 +44,7 @@ sudo docker login ghcr.io
 
 PORTAL_DEPLOY_MODE=release
 PORTAL_IMAGE=ghcr.io/hugofelix088-spec/proxmox-vm-portal@sha256:DIGEST_RELEASE
-PORTAL_RELEASE_TAG=v0.19.5
+PORTAL_RELEASE_TAG=v0.19.6
 PORTAL_RELEASE_REPOSITORY=hugofelix088-spec/proxmox-vm-portal
 PORTAL_RELEASE_TRANSPARENCY=private
 ```
@@ -73,7 +73,7 @@ printf 'header = "Authorization: Bearer %s"\n' "$PORTAL_GITHUB_TOKEN" | \
 curl --config - --proto '=https' --tlsv1.2 --fail --silent --show-error \
   -H "Accept: application/vnd.github.raw+json" \
   -H "X-GitHub-Api-Version: 2022-11-28" \
-  "https://api.github.com/repos/hugofelix088-spec/proxmox-vm-portal/contents/deploy/scripts/bootstrap-debian.sh?ref=v0.19.5" \
+  "https://api.github.com/repos/hugofelix088-spec/proxmox-vm-portal/contents/deploy/scripts/bootstrap-debian.sh?ref=v0.19.6" \
   --output "$bootstrap" && \
 bash -n "$bootstrap" && \
 sudo --preserve-env=PORTAL_GITHUB_TOKEN,PORTAL_GITHUB_USERNAME bash "$bootstrap"
@@ -103,8 +103,10 @@ sudo bash deploy/scripts/install-debian.sh
 Avant le lancement, renseigner au minimum `PORTAL_DOMAIN`, `ACME_EMAIL`,
 `PVE_API_URL`, `PVE_TOKEN_ID`, `BACKUP_AGE_RECIPIENT` et
 `BACKUP_DIRECTORY`. Les secrets sont générés ou demandés sans être inscrits dans
-`.env.production`, puis conservés avec le mode 0600 sous `deploy/secrets/`. Le
-jeton `portal_metrics_token` généré est destiné exclusivement au scraper
+`.env.production`, puis conservés sous `deploy/secrets/`, dont le répertoire
+reste accessible uniquement à root. Les fichiers montés dans les services du
+portail appartiennent à l'UID applicatif 10001 avec le mode 0400 ; les autres
+secrets restent root-only. Le jeton `portal_metrics_token` généré est destiné exclusivement au scraper
 Prometheus ; ne le placez ni dans une URL ni dans la configuration Git.
 Caddy obtient et renouvelle automatiquement le certificat public. Pour un nom
 interne, installez une CA interne dans Caddy et dans les clients avant ouverture

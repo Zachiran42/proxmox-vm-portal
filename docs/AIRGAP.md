@@ -33,7 +33,7 @@ Le poste doit utiliser Linux amd64, Git et Docker. Depuis le tag de la release :
 read -rsp "PAT GitHub du poste de préparation : " PORTAL_GITHUB_TOKEN && echo
 export PORTAL_GITHUB_TOKEN
 export PORTAL_GITHUB_USERNAME=hugofelix088-spec
-export PORTAL_RELEASE_TAG=v0.19.5
+export PORTAL_RELEASE_TAG=v0.19.6
 
 deploy/scripts/prepare-offline-bundle.sh /srv/export-portal
 
@@ -58,9 +58,9 @@ enregistrée dans la CMDB avant extraction.
 Après transfert par le mécanisme approuvé de l'établissement :
 
 ```bash
-sha256sum -c proxmox-vm-portal-offline-0.19.5-amd64.tar.gz.sha256
-tar -xzf proxmox-vm-portal-offline-0.19.5-amd64.tar.gz
-cd proxmox-vm-portal-offline-0.19.5-amd64
+sha256sum -c proxmox-vm-portal-offline-0.19.6-amd64.tar.gz.sha256
+tar -xzf proxmox-vm-portal-offline-0.19.6-amd64.tar.gz
+cd proxmox-vm-portal-offline-0.19.6-amd64
 sudo bash install-offline.sh
 ```
 
@@ -70,6 +70,11 @@ portail sur `https://IP_DE_LA_VM` avec la CA locale Caddy et génère les
 identifiants initiaux ainsi qu'une identité `age`. Les chemins root-only à
 consulter et à exporter sont affichés à la fin. Aucun paramètre Proxmox n'est
 demandé pour ce premier démarrage.
+
+Les secrets applicatifs restent dans un répertoire root-only et chaque fichier
+monté dans le portail est lisible uniquement par l'UID non-root 10001. Cette
+combinaison permet au conteneur durci de lire ses secrets sans les exposer aux
+autres comptes de la VM.
 
 Après la première connexion, remplacez le mot de passe généré depuis
 l'administration des utilisateurs puis supprimez le fichier d'identifiants
