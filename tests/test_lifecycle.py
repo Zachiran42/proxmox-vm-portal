@@ -227,6 +227,54 @@ def test_worker_classifies_operation_failures_and_ambiguous_results(app, pve_cli
         )
 
 
+def test_worker_reconciles_manual_start_and_requires_stop_before_delete(app, pve_client):
+    vm_id = seed_vm(app)
+    client = app.test_client()
+    login(client)
+    pve_client.vm_statuses[("pve-a", 101)] = "running"
+
+    assert request_action(client, vm_id, "start").status_code == 202
+    assert run_step(app, pve_client) is True
+    with app.app_context():
+        operation = db.session.scalar(select(VMOperation))
+        allocation = db.session.get(VMAllocation, vm_id)
+        assert operation.status == "succeeded"
+        assert allocation.status == "running"
+    assert pve_client.starts == []
+
+    assert request_action(client, vm_id, "stop").status_code == 202
+    assert run_step(app, pve_client) is True
+    assert run_step(app, pve_client) is True
+    assert request_action(
+        client, vm_id, "delete", confirm_name="lifecycle-vm"
+    ).status_code == 202
+    pve_client.vm_statuses[("pve-a", 101)] = "running"
+    assert run_step(app, pve_client) is True
+    with app.app_context():
+        latest = db.session.scalars(
+            select(VMOperation).order_by(VMOperation.created_at.desc())
+        ).first()
+        allocation = db.session.get(VMAllocation, vm_id)
+        assert latest.error_code == "vm_must_be_stopped"
+        assert allocation.status == "running"
+
+
+def test_worker_marks_unknown_state_for_reconciliation_failure(app, pve_client):
+    vm_id = seed_vm(app)
+    client = app.test_client()
+    login(client)
+    pve_client.get_vm_status = lambda _node, _vmid: (_ for _ in ()).throw(
+        PVETransportError("timeout")
+    )
+
+    assert request_action(client, vm_id, "start").status_code == 202
+    assert run_step(app, pve_client) is True
+    with app.app_context():
+        operation = db.session.scalar(select(VMOperation))
+        assert operation.status == "attention"
+        assert operation.error_code == "pve_status_unknown"
+
+
 def test_operation_polling_reschedules_running_and_transport_failures(app, pve_client):
     vm_id = seed_vm(app)
     client = app.test_client()

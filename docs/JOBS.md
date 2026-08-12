@@ -37,9 +37,16 @@ secret valide.
 
 Les opérations `start`, `stop`, `reboot` et `delete` utilisent la table
 `vm_operations`. Un index unique partiel interdit deux opérations actives sur
-une même VM. Le worker revalide l’état et le VMID avant soumission, puis suit le
-`UPID` comme pour le provisionnement. Un crash pendant la soumission place
-l’opération en revue manuelle afin de ne jamais la rejouer aveuglément.
+une même VM. Avant chaque soumission, le worker lit l'état réel de la VM dans
+Proxmox et réconcilie la base locale. Un démarrage déjà réalisé hors portail est
+donc traité comme une réussite idempotente. Une suppression est refusée avec un
+message explicite tant que Proxmox indique que la VM tourne. Le worker suit
+ensuite le `UPID` comme pour le provisionnement. Un crash pendant la soumission
+place l’opération en revue manuelle afin de ne jamais la rejouer aveuglément.
+
+Les actions Proxmox sans paramètre envoient un objet JSON vide (`{}`). Cela est
+nécessaire avec Proxmox VE 9 : annoncer `application/json` avec un corps vide
+provoque sinon une réponse HTTP 500 lors du décodage.
 
 Une suppression réussie passe l’allocation à `deleted`, efface le lien de remise
 d’accès restant et libère alors seulement CPU, RAM, disque et compteur de VM.

@@ -10,8 +10,8 @@ def main() -> None:
     confirmation = getpass.getpass("Confirmation: ")
     if password != confirmation:
         raise SystemExit("Les mots de passe ne correspondent pas.")
-    if len(password) < 16:
-        raise SystemExit("Le mot de passe doit contenir au moins 16 caractères.")
+    if not password:
+        raise SystemExit("Le mot de passe ne peut pas être vide.")
     print(generate_password_hash(password, method="scrypt"))
 
 

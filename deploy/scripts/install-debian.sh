@@ -116,7 +116,7 @@ portal_image=$(setting PORTAL_IMAGE)
 case "$deploy_mode" in
     source)
         "$COMPOSE" build api
-        portal_image=${portal_image:-proxmox-vm-portal:0.19.8}
+        portal_image=${portal_image:-proxmox-vm-portal:0.19.9}
         ;;
     release)
         release_tag=$(setting PORTAL_RELEASE_TAG)
@@ -180,19 +180,19 @@ if [[ ${PORTAL_INSTALL_VALIDATE_ONLY:-0} == 1 ]]; then
 fi
 if [[ ! -s $SECRETS_DIR/portal_admin_password_hash ]]; then
     if [[ $(setting PORTAL_FIRST_BOOT_MODE) == true ]]; then
-        admin_password=$(openssl rand -base64 24 | tr -d '\n')
+        admin_password='admin'
         initial_credentials=/root/proxmox-vm-portal-initial-credentials.txt
         install -m 0600 /dev/null "$initial_credentials"
         printf 'URL=https://%s\nUtilisateur=%s\nMot de passe=%s\n' \
             "$(setting PORTAL_DOMAIN)" "$(setting PORTAL_ADMIN_USERNAME)" \
             "$admin_password" > "$initial_credentials"
     else
-        read -rsp "Mot de passe initial de l'administrateur (16 caractères minimum): " admin_password
+        read -rsp "Mot de passe initial de l'administrateur: " admin_password
         echo
         read -rsp "Confirmation: " admin_confirmation
         echo
         [[ $admin_password == "$admin_confirmation" ]] || { echo "Les mots de passe diffèrent." >&2; exit 1; }
-        [[ ${#admin_password} -ge 16 ]] || { echo "Mot de passe trop court." >&2; exit 1; }
+        [[ -n $admin_password ]] || { echo "Le mot de passe ne peut pas être vide." >&2; exit 1; }
     fi
     printf '%s' "$admin_password" | docker run --rm -i "$portal_image" \
         python -c 'import sys; from werkzeug.security import generate_password_hash; print(generate_password_hash(sys.stdin.read(), method="scrypt"))' \

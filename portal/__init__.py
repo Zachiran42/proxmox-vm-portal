@@ -244,6 +244,12 @@ def create_app(
                 session.clear()
                 return jsonify(error="authentication_required"), 401
             g.current_user = user
+            if user.must_change_password and request.endpoint not in {
+                "me",
+                "change_own_password",
+                "logout",
+            }:
+                return jsonify(error="password_change_required"), 403
             return view(*args, **kwargs)
 
         return wrapped
@@ -312,6 +318,7 @@ def create_app(
                 username=username,
                 password_hash=password_hash,
                 role="admin",
+                must_change_password=True,
                 quota_vms=100,
                 quota_cpu=512,
                 quota_ram_mb=1048576,
@@ -320,6 +327,49 @@ def create_app(
         )
         db.session.commit()
         click.echo(f"Administrateur {username!r} créé.")
+
+    @app.cli.command("reset-admin-password")
+    @click.option(
+        "--username",
+        default=None,
+        help="Administrateur local à réinitialiser (admin configuré par défaut).",
+    )
+    @click.option(
+        "--password",
+        prompt="Nouveau mot de passe administrateur",
+        confirmation_prompt="Confirmation",
+        hide_input=True,
+    )
+    def reset_admin_password_command(username: str | None, password: str):
+        """Réinitialise localement un administrateur sans modifier les autres comptes."""
+        if not app.config["PORTAL_LOCAL_AUTH_ENABLED"]:
+            raise click.ClickException("L'authentification locale est désactivée.")
+        if not 1 <= len(password) <= 256:
+            raise click.ClickException(
+                "Le mot de passe doit contenir entre 1 et 256 caractères."
+            )
+
+        selected_username = username or app.config["PORTAL_ADMIN_USERNAME"]
+        user = db.session.scalar(
+            select(User).where(User.username == selected_username)
+        )
+        if user is None:
+            raise click.ClickException(
+                f"Le compte {selected_username!r} est introuvable."
+            )
+        if user.role != "admin":
+            raise click.ClickException(
+                f"Le compte {selected_username!r} n'est pas administrateur."
+            )
+        if user.auth_provider != "local":
+            raise click.ClickException(
+                f"Le compte {selected_username!r} est géré par une identité externe."
+            )
+
+        user.password_hash = generate_password_hash(password, method="scrypt")
+        user.must_change_password = False
+        db.session.commit()
+        click.echo(f"Mot de passe de l'administrateur {selected_username!r} modifié.")
 
     @app.cli.command("worker")
     @click.option("--once", is_flag=True, help="Traite une seule étape puis quitte.")
@@ -338,6 +388,34 @@ def create_app(
                 return
             if not processed:
                 time.sleep(app.config["PORTAL_JOB_POLL_SECONDS"])
+
+    @app.cli.command("check-proxmox")
+    def check_proxmox_command():
+        """Valide TLS, le token et la permission de lecture du cluster."""
+        try:
+            nodes = client.list_nodes()
+        except PVEHTTPError as error:
+            if error.status == 401:
+                raise click.ClickException(
+                    "Token Proxmox refusé (identifiant ou secret invalide)."
+                ) from error
+            if error.status == 403:
+                raise click.ClickException(
+                    "Token Proxmox reconnu mais permission Sys.Audit absente."
+                ) from error
+            raise click.ClickException(
+                f"Proxmox a retourné l'erreur HTTP {error.status}."
+            ) from error
+        except PVETransportError as error:
+            raise click.ClickException(
+                "Connexion TLS à Proxmox impossible; vérifiez l'URL et la CA."
+            ) from error
+        except PVEProtocolError as error:
+            raise click.ClickException("Réponse Proxmox invalide.") from error
+        click.echo(
+            "Connexion Proxmox validée; nœuds visibles: "
+            + (", ".join(nodes) if nodes else "aucun")
+        )
 
     @app.get("/healthz")
     def healthz():
@@ -568,6 +646,39 @@ def create_app(
             usage=_quota_usage(g.current_user.id),
             csrf_token=session["csrf_token"],
         )
+
+    @app.post("/api/me/password")
+    @login_required
+    @csrf_protected
+    def change_own_password():
+        if g.current_user.auth_provider != "local":
+            return jsonify(error="external_identity_managed"), 409
+        payload = request.get_json(silent=True)
+        password = payload.get("password") if isinstance(payload, dict) else None
+        if not isinstance(password, str) or not 1 <= len(password) <= 256:
+            return jsonify(
+                errors={
+                    "password": (
+                        "Le mot de passe doit contenir entre 1 et 256 caractères."
+                    )
+                }
+            ), 400
+        if check_password_hash(g.current_user.password_hash, password):
+            return jsonify(error="password_reuse"), 400
+
+        g.current_user.password_hash = generate_password_hash(
+            password, method="scrypt"
+        )
+        g.current_user.must_change_password = False
+        _add_audit(
+            action="user.password_change",
+            target_type="user",
+            target_id=str(g.current_user.id),
+            outcome="success",
+            actor_user_id=g.current_user.id,
+        )
+        db.session.commit()
+        return jsonify(status="password_changed", user=g.current_user.public_dict())
 
     @app.get("/api/nodes")
     @login_required

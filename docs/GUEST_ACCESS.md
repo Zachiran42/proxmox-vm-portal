@@ -43,12 +43,12 @@ un clone avant de publier son profil :
 
 ```json
 {
-  "slug": "debian-12-cloud",
-  "label": "Debian 12 Cloud",
+  "slug": "debian-13-cloud",
+  "label": "Debian 13 Cloud",
   "description": "Template durci et validé",
   "source_type": "cloud_init",
-  "template_node": "pve-a",
-  "template_vmid": 9000
+  "template_node": "pve-03",
+  "template_vmid": 9130
 }
 ```
 

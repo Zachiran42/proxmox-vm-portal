@@ -9,7 +9,12 @@ from werkzeug.security import generate_password_hash
 from portal import create_app
 from portal.jobs import process_next_job
 from portal.models import AuditEvent, ProvisioningJob, User, VMAllocation, db
-from portal.pve import FakePVEClient
+from portal.pve import (
+    FakePVEClient,
+    PVEHTTPError,
+    PVEProtocolError,
+    PVETransportError,
+)
 
 ADMIN_PASSWORD = "correct-horse-battery-staple"
 USER_PASSWORD = "another-strong-password"
@@ -36,6 +41,71 @@ def app(pve_client):
     with app.app_context():
         db.session.remove()
         db.engine.dispose()
+
+
+def test_reset_admin_password(app):
+    runner = app.test_cli_runner()
+    new_password = "eight888"
+    result = runner.invoke(
+        args=["reset-admin-password"],
+        input=f"{new_password}\n{new_password}\n",
+    )
+    assert result.exit_code == 0
+    assert "modifié" in result.output
+
+    client = app.test_client()
+    response = client.post(
+        "/login",
+        json={"username": "admin", "password": new_password},
+    )
+    assert response.status_code == 200
+
+
+def test_reset_admin_password_rejects_non_admin(app):
+    with app.app_context():
+        db.session.add(
+            User(
+                username="regular-user",
+                password_hash=generate_password_hash("regular-password-strong"),
+                role="user",
+            )
+        )
+        db.session.commit()
+
+    runner = app.test_cli_runner()
+    result = runner.invoke(
+        args=["reset-admin-password", "--username", "regular-user"],
+        input="new-regular-password\nnew-regular-password\n",
+    )
+    assert result.exit_code != 0
+    assert "n'est pas administrateur" in result.output
+
+
+def test_check_proxmox_cli_reports_visible_nodes(app):
+    result = app.test_cli_runner().invoke(args=["check-proxmox"])
+
+    assert result.exit_code == 0
+    assert "pve-a" in result.output
+
+
+@pytest.mark.parametrize(
+    ("error", "message"),
+    [
+        (PVEHTTPError(401, "upstream-sensitive"), "Token Proxmox refusé"),
+        (PVEHTTPError(403, "upstream-sensitive"), "permission Sys.Audit absente"),
+        (PVEHTTPError(500, "upstream-sensitive"), "erreur HTTP 500"),
+        (PVETransportError("upstream-sensitive"), "Connexion TLS"),
+        (PVEProtocolError("upstream-sensitive"), "Réponse Proxmox invalide"),
+    ],
+)
+def test_check_proxmox_cli_explains_failures(app, pve_client, error, message):
+    pve_client.list_nodes = lambda: (_ for _ in ()).throw(error)
+
+    result = app.test_cli_runner().invoke(args=["check-proxmox"])
+
+    assert result.exit_code != 0
+    assert message in result.output
+    assert "upstream-sensitive" not in result.output
 
 
 def login(client, username="admin", password=ADMIN_PASSWORD):
@@ -83,6 +153,7 @@ def test_admin_can_create_and_list_users_without_exposing_password(app):
         "role": "user",
         "authentication": "local",
         "is_active": True,
+        "must_rotate_credentials": False,
         "quota": {"vms": 2, "cpu": 4, "ram_mb": 8192, "disk_gb": 100},
     }
     assert [user["username"] for user in listed.get_json()["users"]] == ["admin", "alice"]
@@ -117,6 +188,7 @@ def test_admin_can_update_local_role_quotas_status_and_password(app):
         "role": "operator",
         "authentication": "local",
         "is_active": False,
+        "must_rotate_credentials": False,
         "quota": {"vms": 5, "cpu": 12, "ram_mb": 24576, "disk_gb": 400},
     }
     assert "password" not in json.dumps(response.get_json())
@@ -207,7 +279,7 @@ def test_duplicate_username_is_rejected_and_audited(app):
     ("change", "field"),
     [
         ({"username": "INVALID"}, "username"),
-        ({"password": "too-short"}, "password"),
+        ({"password": ""}, "password"),
         ({"role": "root"}, "role"),
         ({"quota": {"vms": -1, "cpu": 4, "ram_mb": 8192, "disk_gb": 100}}, "quota.vms"),
         ({"extra": True}, "unknown"),
@@ -228,7 +300,7 @@ def test_user_creation_validation(app, change, field):
     [
         ({"role": "root"}, "role"),
         ({"is_active": "yes"}, "is_active"),
-        ({"password": "short"}, "password"),
+        ({"password": ""}, "password"),
         ({"quota": {"vms": -1, "cpu": 4, "ram_mb": 8192, "disk_gb": 100}}, "quota.vms"),
         ({"unexpected": True}, "unknown"),
     ],

@@ -101,6 +101,7 @@ def test_oidc_login_provisions_user_and_does_not_persist_tokens():
         "role": "user",
         "authentication": "oidc",
         "is_active": True,
+        "must_rotate_credentials": False,
         "quota": {"vms": 3, "cpu": 8, "ram_mb": 16384, "disk_gb": 200},
     }
     assert fake.redirect_calls[0][0] == oidc_config()["PORTAL_OIDC_REDIRECT_URI"]

@@ -382,13 +382,30 @@ def _submit_operation(pve_client, operation_id: str, poll_seconds: int) -> None:
     if operation is None:
         return
     allocation = operation.allocation
-    allowed_states = {
-        "start": {"accepted", "stopped"},
-        "stop": {"accepted", "running"},
-        "reboot": {"running"},
-        "delete": {"accepted", "stopped"},
-    }
-    if allocation.vmid is None or allocation.status not in allowed_states[operation.action]:
+    if allocation.vmid is None:
+        _fail_operation(operation, "lifecycle_invalid_state")
+        return
+
+    try:
+        actual_status = pve_client.get_vm_status(allocation.node, allocation.vmid)
+    except PVETransportError:
+        _attention_operation(operation, "pve_status_unknown")
+        return
+    except (PVEHTTPError, PVEProtocolError):
+        _attention_operation(operation, "pve_status_unknown")
+        return
+
+    allocation.status = actual_status
+    if operation.action == "start" and actual_status == "running":
+        _complete_operation(operation)
+        return
+    if operation.action == "stop" and actual_status == "stopped":
+        _complete_operation(operation)
+        return
+    if operation.action == "delete" and actual_status == "running":
+        _fail_operation(operation, "vm_must_be_stopped")
+        return
+    if operation.action == "reboot" and actual_status != "running":
         _fail_operation(operation, "lifecycle_invalid_state")
         return
 

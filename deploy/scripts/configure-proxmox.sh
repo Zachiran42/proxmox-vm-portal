@@ -105,5 +105,8 @@ fi
 unset PVE_TOKEN_SECRET
 
 "$COMPOSE" config --quiet
+echo "Vérification chiffrée de l'API et du token Proxmox…"
+"$COMPOSE" run --rm --no-deps api \
+    flask --app portal:create_app check-proxmox
 "$COMPOSE" up -d --wait --force-recreate api worker
-echo "Configuration Proxmox appliquée."
+echo "Configuration Proxmox validée et appliquée."

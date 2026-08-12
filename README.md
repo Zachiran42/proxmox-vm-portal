@@ -67,6 +67,31 @@ flask --app 'portal:create_app' run
 flask --app 'portal:create_app' worker
 ```
 
+Récupération d'un administrateur local existant (saisie masquée, sans
+modifier les autres comptes ni la base) :
+
+```bash
+sudo /opt/proxmox-vm-portal/deploy/scripts/reset-admin-password.sh
+```
+
+Une installation plug-and-play neuve utilise temporairement `admin/admin`.
+Après cette première authentification, le portail bloque toutes les fonctions
+jusqu'au choix d'un nouveau mot de passe. Sa longueur est laissée à la politique
+de l'administrateur ; l'interface refuse uniquement une valeur vide et une
+réutilisation du mot de passe temporaire.
+
+Le raccordement Proxmox est interactif et valide automatiquement l'URL, la CA,
+le token et la permission `Sys.Audit` avant de redémarrer le portail :
+
+```bash
+sudo /opt/proxmox-vm-portal/deploy/scripts/configure-proxmox.sh
+sudo /opt/proxmox-vm-portal/deploy/scripts/check-proxmox.sh
+```
+
+Avec une CA Proxmox historique, le client conserve la validation de chaîne, du
+nom d'hôte et `CERT_REQUIRED`, mais désactive uniquement `X509_STRICT` pour
+accepter l'absence ancienne de l'extension `keyUsage`.
+
 L'interface Web est disponible sur `/`. Un administrateur peut y publier,
 contrôler, suspendre et réactiver les profils d'images ; les autres rôles voient
 le catalogue actif en lecture seule. Chaque utilisateur dispose d'un assistant
@@ -127,7 +152,7 @@ Publication, SBOM, provenance et vérification des signatures :
 [`docs/RELEASES.md`](docs/RELEASES.md).
 
 Endpoints : `GET /healthz`, `GET /metrics`, `GET /`, `POST /login`, `POST /logout`,
-`GET /api/me`, `GET /api/nodes`, `GET /api/nodes/<node>/isos`,
+`GET /api/me`, `POST /api/me/password`, `GET /api/nodes`, `GET /api/nodes/<node>/isos`,
 `GET /api/image-profiles`, `POST /api/vms`, `POST /api/vms/<id>/actions`,
 `GET /api/jobs`, `GET /api/jobs/<id>`,
 `GET|POST /api/admin/users`, `PATCH /api/admin/users/<id>`,
@@ -167,3 +192,10 @@ Un profil cloud-init utilise à la place `source_type: "cloud_init"`,
 `guest_username` Linux non-root. Le lien `guest_access.password_url` n'est
 retourné qu'au propriétaire du travail. Lors de la publication, le portail
 vérifie immédiatement que le VMID désigne bien un template Proxmox disponible.
+
+La recette `images/packer/debian-13.pkr.hcl` construit automatiquement le
+template Debian 13.6 durci depuis l'ISO officielle vérifiée. Après sa promotion,
+un utilisateur choisit simplement « Debian 13 Cloud », ses ressources et son
+nom de compte : le portail clone le système déjà installé, configure cloud-init,
+démarre la VM et remet le secret expirant. Voir `docs/IMAGE_FACTORY.md` et
+`docs/GUEST_ACCESS.md`.

@@ -51,6 +51,7 @@ class User(db.Model):
     external_subject: Mapped[str | None] = mapped_column(db.String(255))
     role: Mapped[str] = mapped_column(db.String(16), nullable=False, default="user")
     is_active: Mapped[bool] = mapped_column(nullable=False, default=True)
+    must_change_password: Mapped[bool] = mapped_column(nullable=False, default=False)
     quota_vms: Mapped[int] = mapped_column(nullable=False, default=3)
     quota_cpu: Mapped[int] = mapped_column(nullable=False, default=8)
     quota_ram_mb: Mapped[int] = mapped_column(nullable=False, default=16384)
@@ -68,6 +69,7 @@ class User(db.Model):
             "role": self.role,
             "authentication": self.auth_provider,
             "is_active": self.is_active,
+            "must_rotate_credentials": self.must_change_password,
             "quota": {
                 "vms": self.quota_vms,
                 "cpu": self.quota_cpu,

@@ -232,9 +232,9 @@ class UserCreateRequest:
         quota = data.get("quota")
         if not isinstance(username, str) or not _NAME.fullmatch(username):
             errors["username"] = "Identifiant invalide."
-        if not isinstance(password, str) or not 14 <= len(password) <= 256:
+        if not isinstance(password, str) or not 1 <= len(password) <= 256:
             errors["password"] = (  # nosec B105
-                "Le mot de passe doit contenir entre 14 et 256 caractères."
+                "Le mot de passe doit contenir entre 1 et 256 caractères."
             )
         if role not in {"admin", "operator", "user"}:
             errors["role"] = "Rôle invalide."
@@ -297,10 +297,10 @@ class UserUpdateRequest:
         is_active = data.get("is_active")
         quota = data.get("quota")
         if password is not None and (
-            not isinstance(password, str) or not 14 <= len(password) <= 256
+            not isinstance(password, str) or not 1 <= len(password) <= 256
         ):
             errors["password"] = (  # nosec B105
-                "Le mot de passe doit contenir entre 14 et 256 caractères."
+                "Le mot de passe doit contenir entre 1 et 256 caractères."
             )
         if role not in {"admin", "operator", "user"}:
             errors["role"] = "Rôle invalide."

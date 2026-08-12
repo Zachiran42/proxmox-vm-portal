@@ -50,7 +50,7 @@ def test_secret_cli_generates_scrypt_hash(monkeypatch, capsys):
     ("answers", "message"),
     [
         (("a-strong-admin-password", "different-password"), "correspondent pas"),
-        (("too-short", "too-short"), "au moins 16"),
+        (("", ""), "ne peut pas être vide"),
     ],
 )
 def test_secret_cli_rejects_invalid_password(monkeypatch, answers, message):

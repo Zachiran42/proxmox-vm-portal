@@ -5,6 +5,8 @@ const elements = Object.fromEntries(
   [
     "login-screen", "login-form", "local-login-fields", "login-error", "login-button",
     "login-separator", "oidc-login", "app-shell", "user-avatar", "user-name", "user-role",
+    "first-password-dialog", "first-password-form", "first-password", "first-password-confirmation",
+    "first-password-error", "save-first-password",
     "logout-button", "open-profile-dialog", "refresh-profiles", "profile-grid", "empty-state",
     "profile-count", "stat-active", "stat-cloud", "stat-disabled", "profile-dialog",
     "profile-form", "close-profile-dialog", "cancel-profile", "profile-label", "profile-slug",
@@ -51,6 +53,8 @@ function errorMessage(payload, fallback) {
     self_admin_protection: "Vous ne pouvez pas désactiver ou rétrograder votre propre compte administrateur.",
     last_admin_protection: "Le dernier administrateur actif doit être conservé.",
     external_identity_managed: "Le rôle et le mot de passe de cette identité sont gérés dans Keycloak.",
+    password_change_required: "Vous devez modifier le mot de passe temporaire.",
+    password_reuse: "Choisissez un mot de passe différent du mot de passe temporaire.",
     vm_not_ready: "Cette machine n’est pas encore prête.",
     confirmation_mismatch: "Le nom saisi ne correspond pas à la machine.",
     lifecycle_invalid_state: "Cette action n’est pas disponible dans l’état actuel.",
@@ -103,6 +107,7 @@ function showLogin() {
   window.clearTimeout(state.pollTimer);
   state.csrfToken = "";
   state.user = null;
+  if (elements["first-password-dialog"].open) elements["first-password-dialog"].close();
   elements["app-shell"].hidden = true;
   elements["login-screen"].hidden = false;
   document.getElementById("username")?.focus();
@@ -113,6 +118,13 @@ function showApplication(session) {
   state.usage = session.usage || {};
   state.csrfToken = session.csrf_token;
   elements["login-screen"].hidden = true;
+  if (session.user.must_rotate_credentials) {
+    elements["app-shell"].hidden = true;
+    if (!elements["first-password-dialog"].open) elements["first-password-dialog"].showModal();
+    elements["first-password"].focus();
+    return;
+  }
+  if (elements["first-password-dialog"].open) elements["first-password-dialog"].close();
   elements["app-shell"].hidden = false;
   elements["user-name"].textContent = session.user.username;
   elements["user-role"].textContent = { admin: "administrateur", operator: "opérateur", user: "utilisateur" }[session.user.role] || session.user.role;
@@ -163,6 +175,30 @@ async function logout() {
     if (error.status !== 401 && error.status !== 403) showToast(error.message);
   }
   showLogin();
+}
+
+async function saveFirstPassword(event) {
+  event.preventDefault();
+  showError(elements["first-password-error"], "");
+  const password = elements["first-password"].value;
+  const confirmation = elements["first-password-confirmation"].value;
+  if (password !== confirmation) {
+    showError(elements["first-password-error"], "Les mots de passe diffèrent.");
+    return;
+  }
+  setBusy(elements["save-first-password"], true, "Enregistrement…");
+  try {
+    await api("/api/me/password", {
+      method: "POST",
+      body: JSON.stringify({ password })
+    });
+    elements["first-password-form"].reset();
+    showApplication(await api("/api/me"));
+  } catch (error) {
+    showError(elements["first-password-error"], error.message);
+  } finally {
+    setBusy(elements["save-first-password"], false, "");
+  }
 }
 
 function switchView(view) {
@@ -348,6 +384,10 @@ const jobErrorLabels = {
   pve_inventory_invalid: "Inventaire Proxmox invalide",
   pve_create_unknown: "État Proxmox à vérifier",
   pve_start_unknown: "Démarrage à vérifier",
+  pve_status_unknown: "État réel Proxmox indisponible",
+  pve_operation_rejected: "Action refusée par Proxmox",
+  pve_operation_failed: "Action échouée dans Proxmox",
+  vm_must_be_stopped: "Arrêtez la VM avant de la supprimer",
   password_pusher_not_configured: "Remise d’accès indisponible",
   password_pusher_unavailable: "Password Pusher indisponible"
 };
@@ -949,6 +989,8 @@ function configureAuthenticationChoices() {
 }
 
 elements["login-form"].addEventListener("submit", login);
+elements["first-password-form"].addEventListener("submit", saveFirstPassword);
+elements["first-password-dialog"].addEventListener("cancel", (event) => event.preventDefault());
 elements["logout-button"].addEventListener("click", logout);
 document.querySelectorAll("[data-view]").forEach((control) => control.addEventListener("click", (event) => {
   event.preventDefault();

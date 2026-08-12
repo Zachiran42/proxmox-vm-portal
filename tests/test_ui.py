@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import select
 from werkzeug.security import generate_password_hash
 
 from portal import create_app
-from portal.models import db
+from portal.models import User, db
 from portal.pve import FakePVEClient
 
 
@@ -49,6 +50,7 @@ def test_portal_shell_loads_self_hosted_assets_and_strict_csp(app):
     assert "Password Pusher" in html
     assert 'id="admin-view"' in html
     assert 'id="user-form"' in html
+    assert 'id="first-password-dialog"' in html
     assert 'id="audit-list"' in html
     assert 'data-local-auth="true"' in html
     assert 'data-oidc="false"' in html
@@ -89,3 +91,28 @@ def test_authenticated_session_can_restore_its_csrf_token(app):
     assert restored.status_code == 200
     assert restored.get_json()["csrf_token"] == login.get_json()["csrf_token"]
     assert restored.get_json()["user"]["role"] == "admin"
+
+
+def test_temporary_admin_password_must_be_changed_before_access(app):
+    with app.app_context():
+        admin = db.session.execute(select(User).where(User.username == "admin")).scalar_one()
+        admin.must_change_password = True
+        db.session.commit()
+
+    client = app.test_client()
+    login = client.post(
+        "/login",
+        json={"username": "admin", "password": "correct-horse-battery-staple"},
+    )
+    csrf_token = login.get_json()["csrf_token"]
+    assert login.get_json()["user"]["must_rotate_credentials"] is True
+    assert client.get("/api/image-profiles").status_code == 403
+
+    changed = client.post(
+        "/api/me/password",
+        headers={"X-CSRF-Token": csrf_token},
+        json={"password": "x"},
+    )
+    assert changed.status_code == 200
+    assert changed.get_json()["user"]["must_rotate_credentials"] is False
+    assert client.get("/api/image-profiles").status_code == 200

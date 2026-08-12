@@ -43,6 +43,26 @@
     </div>
   </section>
 
+  <dialog id="first-password-dialog" aria-labelledby="first-password-title">
+    <form id="first-password-form">
+      <div class="dialog-heading">
+        <div>
+          <span class="eyebrow">Première connexion</span>
+          <h2 id="first-password-title">Choisissez votre mot de passe</h2>
+        </div>
+      </div>
+      <p class="dialog-intro">Le compte temporaire <strong>admin/admin</strong> doit être personnalisé avant d'accéder au portail. La politique de complexité reste sous la responsabilité de l'administrateur.</p>
+      <label for="first-password">Nouveau mot de passe</label>
+      <input id="first-password" name="password" type="password" maxlength="256" autocomplete="new-password" required>
+      <label for="first-password-confirmation">Confirmation</label>
+      <input id="first-password-confirmation" name="confirmation" type="password" maxlength="256" autocomplete="new-password" required>
+      <p class="form-error" id="first-password-error" role="alert" hidden></p>
+      <div class="dialog-actions">
+        <button class="button button-primary" type="submit" id="save-first-password">Enregistrer et continuer</button>
+      </div>
+    </form>
+  </dialog>
+
   <div class="app-shell" id="app-shell" hidden>
     <aside class="sidebar">
       <div class="sidebar-brand"><div class="brand-mark">P</div><div><strong>Portail</strong><span>Proxmox</span></div></div>
@@ -237,7 +257,7 @@
         <div><label for="managed-role">Rôle</label><select id="managed-role" name="role" required><option value="user">Utilisateur</option><option value="operator">Opérateur</option><option value="admin">Administrateur</option></select></div>
       </div>
       <label for="managed-password">Mot de passe <span id="password-optional" hidden>(laisser vide pour conserver l’actuel)</span></label>
-      <input id="managed-password" name="password" type="password" minlength="14" maxlength="256" autocomplete="new-password" required>
+      <input id="managed-password" name="password" type="password" maxlength="256" autocomplete="new-password" required>
       <p class="field-help" id="identity-help">Le mot de passe n’est jamais retourné par l’API ni écrit dans l’audit.</p>
 
       <fieldset class="quota-editor">

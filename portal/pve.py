@@ -91,6 +91,11 @@ class PVEClient:
             if self.ca_certificate:
                 context = ssl.create_default_context()
                 context.load_verify_locations(cadata=self.ca_certificate)
+                # Python 3.13 active X509_STRICT par défaut. Les CA historiques
+                # de Proxmox peuvent ne pas contenir l'extension keyUsage, tout
+                # en restant des ancres explicitement approuvées par l'admin.
+                # On conserve CERT_REQUIRED et la vérification du nom d'hôte.
+                context.verify_flags &= ~ssl.VERIFY_X509_STRICT
                 options["context"] = context
             with urlopen(request, **options) as response:  # nosec B310
                 return json.load(response).get("data")
@@ -278,13 +283,13 @@ class PVEClient:
         )
 
     def start_vm(self, node: str, vmid: int) -> str:
-        return self._vm_task(node, vmid, "status/start", method="POST")
+        return self._vm_task(node, vmid, "status/start", method="POST", payload={})
 
     def stop_vm(self, node: str, vmid: int) -> str:
-        return self._vm_task(node, vmid, "status/shutdown", method="POST")
+        return self._vm_task(node, vmid, "status/shutdown", method="POST", payload={})
 
     def reboot_vm(self, node: str, vmid: int) -> str:
-        return self._vm_task(node, vmid, "status/reboot", method="POST")
+        return self._vm_task(node, vmid, "status/reboot", method="POST", payload={})
 
     def delete_vm(self, node: str, vmid: int) -> str:
         return self._vm_task(
@@ -312,6 +317,17 @@ class PVEClient:
             raise PVEProtocolError("L'identifiant de tâche PVE est invalide.")
         return result
 
+    def get_vm_status(self, node: str, vmid: int) -> str:
+        result = self._request(
+            f"/nodes/{quote(node, safe='')}/qemu/{vmid}/status/current"
+        )
+        if not isinstance(result, dict) or result.get("status") not in {
+            "running",
+            "stopped",
+        }:
+            raise PVEProtocolError("L'état de la VM Proxmox est invalide.")
+        return result["status"]
+
 
 @dataclass
 class FakePVEClient:
@@ -326,6 +342,7 @@ class FakePVEClient:
     stops: list[tuple[str, int]] = field(default_factory=list)
     reboots: list[tuple[str, int]] = field(default_factory=list)
     deletions: list[tuple[str, int]] = field(default_factory=list)
+    vm_statuses: dict[tuple[str, int], str] = field(default_factory=dict)
 
     def is_iso_available(self, node: str, iso: str) -> bool:
         return iso in self.accessible_isos.get(node, set())
@@ -348,15 +365,20 @@ class FakePVEClient:
             return self.task_statuses.pop(0)
         return self.task_statuses[0]
 
+    def get_vm_status(self, node: str, vmid: int) -> str:
+        return self.vm_statuses.get((node, vmid), "stopped")
+
     def configure_cloud_init_vm(self, **configuration: Any) -> None:
         self.configurations.append(configuration)
 
     def start_vm(self, node: str, vmid: int) -> str:
         self.starts.append((node, vmid))
+        self.vm_statuses[(node, vmid)] = "running"
         return f"UPID:fake:start:{len(self.starts)}"
 
     def stop_vm(self, node: str, vmid: int) -> str:
         self.stops.append((node, vmid))
+        self.vm_statuses[(node, vmid)] = "stopped"
         return f"UPID:fake:stop:{len(self.stops)}"
 
     def reboot_vm(self, node: str, vmid: int) -> str:

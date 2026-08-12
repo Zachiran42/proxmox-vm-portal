@@ -181,7 +181,10 @@ def test_offline_first_boot_is_ip_based_and_defers_proxmox_configuration():
     assert "--production" in bundle_install
     assert "PORTAL_FIRST_BOOT_MODE" in debian_install
     assert "proxmox-vm-portal-initial-credentials.txt" in debian_install
-    assert "openssl rand -base64 24" in debian_install
+    assert "admin_password='admin'" in debian_install
+    assert "must_change_password=True" in (
+        ROOT / "portal/__init__.py"
+    ).read_text(encoding="utf-8")
     assert "read -r -s" in configure
     assert "root@" in configure
     assert "--force-recreate api worker" in configure

@@ -44,7 +44,7 @@ sudo docker login ghcr.io
 
 PORTAL_DEPLOY_MODE=release
 PORTAL_IMAGE=ghcr.io/hugofelix088-spec/proxmox-vm-portal@sha256:DIGEST_RELEASE
-PORTAL_RELEASE_TAG=v0.19.8
+PORTAL_RELEASE_TAG=v0.19.9
 PORTAL_RELEASE_REPOSITORY=hugofelix088-spec/proxmox-vm-portal
 PORTAL_RELEASE_TRANSPARENCY=private
 ```
@@ -73,7 +73,7 @@ printf 'header = "Authorization: Bearer %s"\n' "$PORTAL_GITHUB_TOKEN" | \
 curl --config - --proto '=https' --tlsv1.2 --fail --silent --show-error \
   -H "Accept: application/vnd.github.raw+json" \
   -H "X-GitHub-Api-Version: 2022-11-28" \
-  "https://api.github.com/repos/hugofelix088-spec/proxmox-vm-portal/contents/deploy/scripts/bootstrap-debian.sh?ref=v0.19.8" \
+  "https://api.github.com/repos/hugofelix088-spec/proxmox-vm-portal/contents/deploy/scripts/bootstrap-debian.sh?ref=v0.19.9" \
   --output "$bootstrap" && \
 bash -n "$bootstrap" && \
 sudo --preserve-env=PORTAL_GITHUB_TOKEN,PORTAL_GITHUB_USERNAME bash "$bootstrap"
@@ -118,6 +118,29 @@ Commandes courantes :
 sudo deploy/scripts/compose.sh ps
 sudo deploy/scripts/compose.sh logs --tail=200 api worker proxy
 sudo deploy/scripts/compose.sh up -d --wait
+```
+
+En mode plug-and-play, le premier accès utilise `admin/admin`. Le portail exige
+immédiatement un nouveau mot de passe et interdit les autres fonctions tant que
+ce changement n'est pas terminé. Pour récupérer un administrateur local sans
+modifier la base ni les autres comptes :
+
+```bash
+sudo /opt/proxmox-vm-portal/deploy/scripts/reset-admin-password.sh
+```
+
+Raccordement ou rotation du token Proxmox :
+
+```bash
+sudo /opt/proxmox-vm-portal/deploy/scripts/configure-proxmox.sh
+```
+
+Le script refuse de conserver la nouvelle configuration si la CA, le token ou
+la permission minimale `Sys.Audit` ne permettent pas de lire les nœuds. Le test
+peut être rejoué sans ressaisir le secret :
+
+```bash
+sudo /opt/proxmox-vm-portal/deploy/scripts/check-proxmox.sh
 ```
 
 ## Keycloak interne optionnel

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import ssl
 from unittest.mock import patch
 from urllib.error import HTTPError
 
@@ -50,10 +51,17 @@ def test_request_adds_private_ca_without_replacing_system_trust():
         patch("portal.pve.ssl.create_default_context") as create_context,
         patch("portal.pve.urlopen", return_value=pve_response("101")) as urlopen,
     ):
+        create_context.return_value.verify_flags = (
+            ssl.VERIFY_X509_STRICT | ssl.VERIFY_X509_PARTIAL_CHAIN
+        )
         assert client._request("/cluster/nextid") == 101
 
     context = create_context.return_value
     context.load_verify_locations.assert_called_once_with(cadata=client.ca_certificate)
+    assert not context.verify_flags & ssl.VERIFY_X509_STRICT
+    assert context.verify_flags & ssl.VERIFY_X509_PARTIAL_CHAIN
+    assert context.check_hostname is not False
+    assert context.verify_mode != ssl.CERT_NONE
     assert urlopen.call_args.kwargs == {"timeout": 10, "context": context}
 
 
@@ -101,6 +109,17 @@ def test_template_inventory_requires_template_flag(client):
     with patch.object(client, "_request", return_value=[]):
         with pytest.raises(PVEProtocolError, match="template"):
             client.is_template_available("pve-a", 9000)
+
+
+@pytest.mark.parametrize("status", ["running", "stopped"])
+def test_get_vm_status_validates_proxmox_state(client, status):
+    with patch.object(client, "_request", return_value={"status": status}) as request:
+        assert client.get_vm_status("pve-a", 101) == status
+    request.assert_called_once_with("/nodes/pve-a/qemu/101/status/current")
+
+    with patch.object(client, "_request", return_value={"status": "paused"}):
+        with pytest.raises(PVEProtocolError, match="VM Proxmox"):
+            client.get_vm_status("pve-a", 101)
 
 
 def test_list_nodes_returns_only_online_nodes_sorted(client):
@@ -238,6 +257,10 @@ def test_configure_cloud_init_and_start_use_exact_allowlisted_payloads(client):
     assert request.call_args_list[2].args == (
         "/nodes/pve-a/qemu/101/status/start",
     )
+    assert request.call_args_list[2].kwargs == {
+        "method": "POST",
+        "payload": {},
+    }
 
 
 def test_lifecycle_methods_use_exact_proxmox_endpoints(client):
@@ -253,9 +276,17 @@ def test_lifecycle_methods_use_exact_proxmox_endpoints(client):
     assert request.call_args_list[0].args == (
         "/nodes/pve-a/qemu/101/status/shutdown",
     )
+    assert request.call_args_list[0].kwargs == {
+        "method": "POST",
+        "payload": {},
+    }
     assert request.call_args_list[1].args == (
         "/nodes/pve-a/qemu/101/status/reboot",
     )
+    assert request.call_args_list[1].kwargs == {
+        "method": "POST",
+        "payload": {},
+    }
     assert request.call_args_list[2].args == ("/nodes/pve-a/qemu/101",)
     assert request.call_args_list[2].kwargs == {
         "method": "DELETE",
