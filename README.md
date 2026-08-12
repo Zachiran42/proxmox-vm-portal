@@ -44,9 +44,10 @@ stocké dans le dépôt.
 - Le mode de déploiement `release` refuse les tags d'image mutables, vérifie la
   signature et l'identité OIDC avec Cosign, puis exécute uniquement le digest
   GHCR approuvé sans reconstruire le code local.
-- Les profils cloud-init clonés créent un compte nominatif non-root ; son secret
-  aléatoire n'est jamais persisté et seul un lien Password Pusher expirant est
-  remis au propriétaire.
+- Les profils cloud-init clonés créent un compte nominatif non-root. L'utilisateur
+  choisit son mot de passe SSH selon une longueur minimale administrable, sans
+  règle de complexité imposée. Le secret reste chiffré pendant le travail puis
+  est supprimé dès son injection dans cloud-init.
 
 Le token de service PVE doit être limité par ACL aux nœuds, stockages et opérations requis. N'utilisez jamais `root@pam`.
 
@@ -96,7 +97,7 @@ L'interface Web est disponible sur `/`. Un administrateur peut y publier,
 contrôler, suspendre et réactiver les profils d'images ; les autres rôles voient
 le catalogue actif en lecture seule. Chaque utilisateur dispose d'un assistant
 de création de VM, d'une vue de ses quotas et d'un historique privé actualisé
-automatiquement. Le lien Password Pusher n'y apparaît que pour le propriétaire.
+automatiquement. L'identifiant SSH apparaît seulement dans l'espace du propriétaire.
 Les machines prêtes peuvent être démarrées, arrêtées et redémarrées depuis cette
 vue. La suppression définitive exige de saisir le nom exact de la VM.
 L'espace Administration permet de créer et suspendre les comptes locaux,
@@ -189,13 +190,13 @@ avec `POST /api/admin/image-profiles`, par exemple :
 
 Un profil cloud-init utilise à la place `source_type: "cloud_init"`,
 `template_node` et `template_vmid`. La demande de VM doit alors inclure un
-`guest_username` Linux non-root. Le lien `guest_access.password_url` n'est
-retourné qu'au propriétaire du travail. Lors de la publication, le portail
+`guest_username` Linux non-root et un `guest_password` choisi par l'utilisateur.
+Le mot de passe n'est jamais retourné par l'API. Lors de la publication, le portail
 vérifie immédiatement que le VMID désigne bien un template Proxmox disponible.
 
 La recette `images/packer/debian-13.pkr.hcl` construit automatiquement le
 template Debian 13.6 durci depuis l'ISO officielle vérifiée. Après sa promotion,
 un utilisateur choisit simplement « Debian 13 Cloud », ses ressources et son
 nom de compte : le portail clone le système déjà installé, configure cloud-init,
-démarre la VM et remet le secret expirant. Voir `docs/IMAGE_FACTORY.md` et
+démarre la VM. Voir `docs/IMAGE_FACTORY.md` et
 `docs/GUEST_ACCESS.md`.

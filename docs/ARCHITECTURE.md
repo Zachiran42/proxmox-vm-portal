@@ -61,13 +61,11 @@ Le compte créé dans la VM est nominatif et membre de `sudo`; la connexion SSH
 directe de `root` et l'authentification SSH de `root` par mot de passe restent
 désactivées. Une clé SSH est préférable. Si un mot de passe initial est demandé :
 
-1. le worker génère un secret aléatoire à usage unique ;
-2. seul son hash est injecté dans cloud-init ou le profil sans assistance ;
-3. le secret clair est envoyé immédiatement à une instance Password Pusher
-   explicitement configurée ;
-4. le portail ne conserve que le lien de partage et ses métadonnées ;
-5. le lien expire après un nombre de vues et une durée courts ;
-6. l'utilisateur doit changer le mot de passe à la première connexion.
+1. l'utilisateur choisit son secret selon la longueur minimale configurée ;
+2. le portail le conserve uniquement chiffré pendant la file asynchrone ;
+3. le worker l'injecte dans cloud-init via l'API TLS Proxmox ;
+4. le chiffré est supprimé dès que la configuration est acceptée ;
+5. le secret n'est jamais retourné par l'API, écrit dans l'audit ou les logs.
 
 Le choix interne/externe de Password Pusher est une configuration
 d'administrateur, jamais une URL libre fournie par un utilisateur.

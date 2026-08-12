@@ -40,6 +40,18 @@ def test_request_sends_token_auth_header_and_json_payload(client):
     assert urlopen.call_args.kwargs == {"timeout": 10}
 
 
+def test_request_sends_delete_without_body_or_content_type(client):
+    with patch("portal.pve.urlopen", return_value=pve_response('"UPID:pve:delete"')) as urlopen:
+        result = client._request("/nodes/pve-a/qemu/101", method="DELETE")
+
+    sent_request = urlopen.call_args.args[0]
+    assert result == "UPID:pve:delete"
+    assert sent_request.method == "DELETE"
+    assert sent_request.data is None
+    assert sent_request.get_header("Content-type") is None
+    assert sent_request.get_header("Authorization") == "PVEAPIToken=portal@pve!provisioner=test-secret"
+
+
 def test_request_adds_private_ca_without_replacing_system_trust():
     client = PVEClient(
         api_url="https://pve.example:8006/api2/json",
@@ -290,7 +302,7 @@ def test_lifecycle_methods_use_exact_proxmox_endpoints(client):
     assert request.call_args_list[2].args == ("/nodes/pve-a/qemu/101",)
     assert request.call_args_list[2].kwargs == {
         "method": "DELETE",
-        "payload": {"purge": 1, "destroy-unreferenced-disks": 1},
+        "payload": None,
     }
 
 

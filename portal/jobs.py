@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import secrets
 from datetime import UTC, datetime, timedelta
 
+from flask import current_app
 from sqlalchemy import select
 
+from .guest_secrets import GuestSecretError, decrypt_guest_password
 from .models import AuditEvent, ProvisioningJob, VMOperation, WorkerHeartbeat, db
-from .password_pusher import PasswordPusherError
 from .pve import PVEHTTPError, PVEProtocolError, PVETransportError
 
 
@@ -190,41 +190,39 @@ def _bootstrap_cloud_init_access(
     if not allocation.guest_username or allocation.vmid is None:
         _attention(job, "guest_bootstrap_invalid")
         return
-    if password_pusher is None:
-        _attention(job, "password_pusher_not_configured")
+    if not job.guest_password_ciphertext:
+        _attention(job, "guest_password_unavailable")
         return
 
-    if not allocation.credential_url:
-        job.credential_attempts += 1
-        password = secrets.token_urlsafe(24)
-        try:
-            pve_client.configure_cloud_init_vm(
-                node=allocation.node,
-                vmid=allocation.vmid,
-                cpu=allocation.cpu,
-                ram_mb=allocation.ram_mb,
-                disk_gb=allocation.disk_gb,
-                username=allocation.guest_username,
-                password=password,
-            )
-        except PVETransportError:
-            _retry_guest_access(job, poll_seconds, "pve_guest_config_unavailable")
-            return
-        except (PVEHTTPError, PVEProtocolError):
-            _attention(job, "pve_guest_config_failed")
-            return
-        try:
-            pushed = password_pusher.push(
-                password, note=f"Accès initial à la VM {allocation.name}"
-            )
-        except PasswordPusherError:
-            _retry_guest_access(job, poll_seconds, "password_pusher_unavailable")
-            return
-        allocation.credential_url = pushed.url
-        allocation.credential_created_at = datetime.now(UTC)
-        allocation.credential_expire_days = pushed.expire_after_days
-        allocation.credential_expire_views = pushed.expire_after_views
-        db.session.commit()
+    job.credential_attempts += 1
+    try:
+        password = decrypt_guest_password(
+            job.guest_password_ciphertext,
+            current_app.config["PORTAL_SESSION_SECRET"],
+        )
+    except GuestSecretError:
+        _attention(job, "guest_password_unavailable")
+        return
+    try:
+        pve_client.configure_cloud_init_vm(
+            node=allocation.node,
+            vmid=allocation.vmid,
+            cpu=allocation.cpu,
+            ram_mb=allocation.ram_mb,
+            disk_gb=allocation.disk_gb,
+            username=allocation.guest_username,
+            password=password,
+        )
+    except PVETransportError:
+        _retry_guest_access(job, poll_seconds, "pve_guest_config_unavailable")
+        return
+    except (PVEHTTPError, PVEProtocolError):
+        _attention(job, "pve_guest_config_failed")
+        return
+    finally:
+        password = ""  # nosec B105
+    job.guest_password_ciphertext = None
+    db.session.commit()
 
     job.status = "submitting"
     job.error_code = None
@@ -281,6 +279,7 @@ def _fail(job: ProvisioningJob, error_code: str) -> None:
     job.locked_at = None
     job.locked_by = None
     job.allocation.status = "failed"
+    job.guest_password_ciphertext = None
     _audit(job, "failure", {"error_code": error_code})
     db.session.commit()
 

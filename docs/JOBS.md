@@ -28,10 +28,9 @@ signifier que Proxmox a accepté la VM sans que le portail reçoive le UPID. Le
 travail passe alors en `attention` et n'est jamais soumis une seconde fois.
 
 Pour un profil cloud-init, le premier UPID suit le clone du template. Le worker
-configure ensuite le compte invité, remet le secret à Password Pusher et suit
-un second UPID de démarrage. Une remise échouée remplace le mot de passe avant
-chaque nouvelle tentative ; un éventuel lien orphelin ne contient donc plus un
-secret valide.
+déchiffre ensuite le mot de passe choisi, configure le compte invité puis efface
+le chiffré avant de suivre le second UPID de démarrage. Une erreur de transport
+est rejouée avec le même secret afin de garder le choix de l'utilisateur.
 
 ## Cycle de vie
 
@@ -44,12 +43,16 @@ message explicite tant que Proxmox indique que la VM tourne. Le worker suit
 ensuite le `UPID` comme pour le provisionnement. Un crash pendant la soumission
 place l’opération en revue manuelle afin de ne jamais la rejouer aveuglément.
 
-Les actions Proxmox sans paramètre envoient un objet JSON vide (`{}`). Cela est
-nécessaire avec Proxmox VE 9 : annoncer `application/json` avec un corps vide
-provoque sinon une réponse HTTP 500 lors du décodage.
+Les actions Proxmox `POST` sans paramètre envoient un objet JSON vide (`{}`).
+Cela évite avec Proxmox VE 9 une réponse HTTP 500 lors du décodage. À l'inverse,
+la suppression `DELETE` est envoyée sans corps et sans `Content-Type`, car PVE 9
+refuse explicitement tout contenu sur cette méthode.
 
 Une suppression réussie passe l’allocation à `deleted`, efface le lien de remise
 d’accès restant et libère alors seulement CPU, RAM, disque et compteur de VM.
+La requête standard détruit la VM et ses disques référencés. Le portail n'active
+pas `purge` ni `destroy-unreferenced-disks`, afin de ne jamais étendre la
+suppression aux configurations ou volumes annexes.
 
 ## Exploitation
 

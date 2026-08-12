@@ -39,7 +39,7 @@ ou au fournisseur d'identité reste hors de la barrière de sécurité applicati
 | Élévation de rôle ou accès à la VM d'autrui | Critique | rôles côté serveur, contrôle de propriété, quotas transactionnels, audit | Moyen jusqu'au pentest |
 | Injection de paramètres Proxmox | Critique | profils publiés, listes d'autorisation et validation stricte, aucun shell Proxmox | Faible |
 | Compromission du token Proxmox | Critique | secret monté par fichier, refus de root, HTTPS, ACL minimales documentées | Élevé si ACL réelles trop larges |
-| Fuite du mot de passe invité | Élevé | secret aléatoire non persisté, hash cloud-init, lien expirant réservé au propriétaire | Moyen selon Password Pusher |
+| Fuite du mot de passe invité | Élevé | secret choisi chiffré pendant la file, jamais journalisé ni retourné, chiffré supprimé après injection cloud-init | Moyen pendant le provisionnement |
 | Altération ou effacement des audits | Élevé | table PostgreSQL append-only par trigger, API en lecture contrôlée | Moyen pour un administrateur DB |
 | Archive de restauration malveillante | Élevé | chiffrement age, répertoire temporaire protégé, rejet des chemins absolus, traversées et liens | Faible |
 | Mise à jour ou dépendance compromise | Critique | commit attendu explicite, base Docker par digest, verrou Python avec hashes, scans, SBOM, provenance, signature OIDC et déploiement refusant toute image sans digest/signature valides | Faible si le dépôt et l'identité approuvés restent protégés |

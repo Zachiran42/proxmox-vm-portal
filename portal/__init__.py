@@ -38,11 +38,13 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from .config import environment_value
+from .guest_secrets import encrypt_guest_password
 from .jobs import process_next_job
 from .models import (
     ACTIVE_VM_STATUSES,
     AuditEvent,
     ImageProfile,
+    PortalSetting,
     ProvisioningJob,
     User,
     VMAllocation,
@@ -644,6 +646,9 @@ def create_app(
         return jsonify(
             user=g.current_user.public_dict(),
             usage=_quota_usage(g.current_user.id),
+            settings={
+                "guest_password_min_length": _guest_password_min_length()
+            },
             csrf_token=session["csrf_token"],
         )
 
@@ -796,6 +801,58 @@ def create_app(
                 for user in users
             ]
         )
+
+    @app.get("/api/admin/settings")
+    @login_required
+    @role_required("admin")
+    def get_admin_settings():
+        return jsonify(
+            settings={
+                "guest_password_min_length": _guest_password_min_length()
+            }
+        )
+
+    @app.patch("/api/admin/settings")
+    @login_required
+    @role_required("admin")
+    @csrf_protected
+    def update_admin_settings():
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict) or set(payload) != {
+            "guest_password_min_length"
+        }:
+            return jsonify(errors={"body": "Paramètre non autorisé."}), 400
+        minimum = payload.get("guest_password_min_length")
+        if type(minimum) is not int or not 1 <= minimum <= 256:
+            return (
+                jsonify(
+                    errors={
+                        "guest_password_min_length": (  # nosec B105
+                            "Valeur entière requise entre 1 et 256."
+                        )
+                    }
+                ),
+                400,
+            )
+        setting = db.session.get(PortalSetting, "guest_password_min_length")
+        previous = _guest_password_min_length()
+        if setting is None:
+            setting = PortalSetting(
+                key="guest_password_min_length", value=str(minimum)
+            )
+            db.session.add(setting)
+        else:
+            setting.value = str(minimum)
+        _add_audit(
+            action="settings.update",
+            target_type="settings",
+            target_id="guest_password_min_length",
+            outcome="success",
+            actor_user_id=g.current_user.id,
+            details={"previous": previous, "current": minimum},
+        )
+        db.session.commit()
+        return jsonify(settings={"guest_password_min_length": minimum})
 
     @app.post("/api/admin/users")
     @login_required
@@ -1238,7 +1295,30 @@ def create_app(
                 ),
                 400,
             )
-        if profile.source_type == "iso" and vm_request.guest_username:
+        if profile.source_type == "cloud_init" and vm_request.guest_password is None:
+            return jsonify(
+                errors={"guest_password": "Mot de passe SSH requis."}  # nosec B105
+            ), 400
+        minimum = _guest_password_min_length()
+        if (
+            profile.source_type == "cloud_init"
+            and vm_request.guest_password is not None
+            and len(vm_request.guest_password) < minimum
+        ):
+            return (
+                jsonify(
+                    errors={
+                        "guest_password": (
+                            f"Le mot de passe SSH doit contenir au moins {minimum} "
+                            "caractères."
+                        )
+                    }
+                ),
+                400,
+            )
+        if profile.source_type == "iso" and (
+            vm_request.guest_username or vm_request.guest_password is not None
+        ):
             return (
                 jsonify(
                     errors={
@@ -1247,9 +1327,6 @@ def create_app(
                 ),
                 400,
             )
-        if profile.source_type == "cloud_init" and password_pusher is None:
-            return jsonify(error="password_pusher_unavailable"), 503
-
         allocation, job, reservation_error = _reserve_allocation(
             g.current_user.id, vm_request, profile
         )
@@ -1392,6 +1469,10 @@ def create_app(
             status="queued",
         )
         job = ProvisioningJob(allocation=allocation)
+        if vm_request.guest_password is not None:
+            job.guest_password_ciphertext = encrypt_guest_password(
+                vm_request.guest_password, app.config["PORTAL_SESSION_SECRET"]
+            )
         db.session.add(allocation)
         db.session.add(job)
         try:
@@ -1434,6 +1515,17 @@ def _quota_usage(user_id: int) -> dict[str, int]:
         "ram_mb": int(row[2]),
         "disk_gb": int(row[3]),
     }
+
+
+def _guest_password_min_length() -> int:
+    setting = db.session.get(PortalSetting, "guest_password_min_length")
+    if setting is None:
+        return 8
+    try:
+        value = int(setting.value)
+    except ValueError:
+        return 8
+    return value if 1 <= value <= 256 else 8
 
 
 def _csv_safe_cell(value: object) -> str:

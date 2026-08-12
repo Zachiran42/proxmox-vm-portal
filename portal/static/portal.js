@@ -1,6 +1,6 @@
 "use strict";
 
-const state = { csrfToken: "", user: null, usage: {}, profiles: [], nodes: [], jobs: [], users: [], auditEvents: [], operations: null, pollTimer: null };
+const state = { csrfToken: "", user: null, usage: {}, settings: {}, profiles: [], nodes: [], jobs: [], users: [], auditEvents: [], operations: null, pollTimer: null };
 const elements = Object.fromEntries(
   [
     "login-screen", "login-form", "local-login-fields", "login-error", "login-button",
@@ -14,7 +14,8 @@ const elements = Object.fromEntries(
     "template-vmid", "iso-node", "profile-iso", "toast", "machines-view", "images-view",
     "open-vm-dialog", "vm-dialog", "vm-form", "close-vm-dialog", "cancel-vm", "submit-vm",
     "vm-profile", "vm-node", "vm-name", "vm-cpu", "vm-ram", "vm-disk", "vm-error",
-    "guest-access-step", "vm-guest-username", "quota-preview", "refresh-jobs", "job-list",
+    "guest-access-step", "vm-guest-username", "vm-guest-password",
+    "vm-guest-password-confirmation", "guest-password-help", "quota-preview", "refresh-jobs", "job-list",
     "jobs-empty", "job-count", "quota-vms", "quota-cpu", "quota-ram", "quota-disk",
     "quota-vms-progress", "quota-cpu-progress", "quota-ram-progress", "quota-disk-progress",
     "admin-nav", "admin-mobile-nav", "admin-view", "open-user-dialog", "refresh-users",
@@ -33,7 +34,8 @@ const elements = Object.fromEntries(
     "incident-kind", "incident-id", "incident-action", "incident-dialog-title",
     "incident-dialog-intro", "incident-close-confirmation", "incident-confirm-name",
     "incident-confirm-expected", "incident-error", "close-incident-dialog",
-    "cancel-incident", "submit-incident"
+    "cancel-incident", "submit-incident", "settings-form", "guest-password-min-length",
+    "save-settings", "settings-error"
   ].map((id) => [id, document.getElementById(id)])
 );
 
@@ -116,6 +118,7 @@ function showLogin() {
 function showApplication(session) {
   state.user = session.user;
   state.usage = session.usage || {};
+  state.settings = session.settings || {};
   state.csrfToken = session.csrf_token;
   elements["login-screen"].hidden = true;
   if (session.user.must_rotate_credentials) {
@@ -137,6 +140,9 @@ function showApplication(session) {
   switchView(["images", "admin"].includes(requestedView) ? requestedView : "machines");
   const loaders = [loadProfiles(), loadNodes(), loadJobs()];
   if (session.user.role === "admin") loaders.push(loadUsers(), loadAudit(), loadOperations());
+  if (session.user.role === "admin") {
+    elements["guest-password-min-length"].value = state.settings.guest_password_min_length || 8;
+  }
   Promise.all(loaders).catch(() => {});
 }
 
@@ -416,6 +422,7 @@ function renderJob(job) {
   resources.className = "job-resources";
   appendText(resources, "span", `${job.vm.cpu} vCPU · ${formatRam(job.vm.ram_mb)} · ${job.vm.disk_gb} Gio`);
   appendText(resources, "span", `Image ${job.vm.profile || "retirée"} · ${new Date(job.created_at).toLocaleString("fr-FR")}`);
+  if (job.vm.guest_username) appendText(resources, "span", `SSH : ${job.vm.guest_username}`);
   card.append(resources);
 
   const result = document.createElement("div");
@@ -545,7 +552,17 @@ function updateGuestAccessField() {
   const automatic = option?.dataset.cloudInit === "true";
   elements["guest-access-step"].hidden = !automatic;
   elements["vm-guest-username"].required = automatic;
-  if (!automatic) elements["vm-guest-username"].value = "";
+  elements["vm-guest-password"].required = automatic;
+  elements["vm-guest-password-confirmation"].required = automatic;
+  const minimum = state.settings.guest_password_min_length || 8;
+  elements["vm-guest-password"].minLength = minimum;
+  elements["vm-guest-password-confirmation"].minLength = minimum;
+  elements["guest-password-help"].textContent = `Choisissez au moins ${minimum} caractère${minimum > 1 ? "s" : ""}. Aucune autre règle de complexité. Le secret chiffré sera supprimé après configuration.`;
+  if (!automatic) {
+    elements["vm-guest-username"].value = "";
+    elements["vm-guest-password"].value = "";
+    elements["vm-guest-password-confirmation"].value = "";
+  }
 }
 
 function updateQuotaPreview() {
@@ -593,7 +610,15 @@ async function submitVm(event) {
     name: form.get("name"), node: form.get("node"), profile: form.get("profile"),
     cpu: Number(form.get("cpu")), ram_mb: Number(form.get("ram_mb")), disk_gb: Number(form.get("disk_gb"))
   };
-  if (!elements["guest-access-step"].hidden) payload.guest_username = form.get("guest_username");
+  if (!elements["guest-access-step"].hidden) {
+    if (elements["vm-guest-password"].value !== elements["vm-guest-password-confirmation"].value) {
+      showError(elements["vm-error"], "Les mots de passe SSH diffèrent.");
+      setBusy(elements["submit-vm"], false, "");
+      return;
+    }
+    payload.guest_username = form.get("guest_username");
+    payload.guest_password = form.get("guest_password");
+  }
   try {
     await api("/api/vms", { method: "POST", body: JSON.stringify(payload) });
     closeVmDialog();
@@ -607,6 +632,27 @@ async function submitVm(event) {
     showError(elements["vm-error"], error.message);
   } finally {
     setBusy(elements["submit-vm"], false, "");
+  }
+}
+
+async function saveSettings(event) {
+  event.preventDefault();
+  showError(elements["settings-error"], "");
+  setBusy(elements["save-settings"], true, "Enregistrement…");
+  try {
+    const minimum = Number(elements["guest-password-min-length"].value);
+    const response = await api("/api/admin/settings", {
+      method: "PATCH",
+      body: JSON.stringify({ guest_password_min_length: minimum })
+    });
+    state.settings = response.settings;
+    updateGuestAccessField();
+    showToast("Politique des mots de passe SSH mise à jour.");
+    await loadAudit();
+  } catch (error) {
+    showError(elements["settings-error"], error.message);
+  } finally {
+    setBusy(elements["save-settings"], false, "");
   }
 }
 
@@ -1010,6 +1056,7 @@ elements["open-user-dialog"].addEventListener("click", openCreateUserDialog);
 elements["close-user-dialog"].addEventListener("click", closeUserDialog);
 elements["cancel-user"].addEventListener("click", closeUserDialog);
 elements["user-form"].addEventListener("submit", saveUser);
+elements["settings-form"].addEventListener("submit", saveSettings);
 elements["refresh-users"].addEventListener("click", loadUsers);
 elements["refresh-operations"].addEventListener("click", loadOperations);
 elements["close-incident-dialog"].addEventListener("click", closeIncidentDialog);

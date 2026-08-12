@@ -16,10 +16,7 @@ from portal.models import (
     VMAllocation,
     db,
 )
-from portal.password_pusher import (
-    FakePasswordPusherClient,
-    PasswordPusherTransportError,
-)
+from portal.password_pusher import FakePasswordPusherClient
 from portal.pve import (
     FakePVEClient,
     PVEHTTPError,
@@ -122,7 +119,12 @@ def enqueue_cloud(app, pve_client):
     create_cloud_profile(client)
     response = client.post(
         "/api/vms",
-        json={**vm_payload("cloud-vm-01"), "profile": "debian-cloud", "guest_username": "hugo"},
+        json={
+            **vm_payload("cloud-vm-01"),
+            "profile": "debian-cloud",
+            "guest_username": "hugo",
+            "guest_password": "mot de passe choisi !",
+        },
     )
     assert response.status_code == 202
     return client, response.get_json()["job_id"]
@@ -461,49 +463,38 @@ def test_admin_cannot_publish_an_unavailable_cloud_init_template(app):
     assert len(client.get("/api/admin/image-profiles").get_json()["profiles"]) == 1
 
 
-def test_cloud_init_profile_delivers_owner_credentials_and_starts_vm(
-    app, pve_client, password_pusher
-):
+def test_cloud_init_profile_uses_selected_password_and_starts_vm(app, pve_client):
     client, job_id = enqueue_cloud(app, pve_client)
 
     assert run_step(app, pve_client) is True  # clone
-    assert run_step(app, pve_client) is True  # configuration, push et démarrage
+    assert run_step(app, pve_client) is True  # configuration et démarrage
     with app.app_context():
         job = db.session.get(ProvisioningJob, job_id)
         assert job.stage == "start"
         assert job.status == "submitted"
-        assert job.allocation.credential_url == "https://pwpush.example/p/fake-1"
+        assert job.guest_password_ciphertext is None
         assert job.allocation.vmid == 100
     assert run_step(app, pve_client) is True  # suivi du démarrage
 
     result = client.get(f"/api/jobs/{job_id}").get_json()["job"]
     assert result["status"] == "succeeded"
-    assert result["guest_access"] == {
-        "username": "hugo",
-        "password_url": "https://pwpush.example/p/fake-1",
-        "expire_after_days": 1,
-        "expire_after_views": 1,
-    }
+    assert "guest_access" not in result
     assert pve_client.configurations[0]["username"] == "hugo"
-    assert pve_client.configurations[0]["password"] == password_pusher.pushes[0]["secret"]
-    assert len(password_pusher.pushes[0]["secret"]) >= 32
+    assert pve_client.configurations[0]["password"] == "mot de passe choisi !"
     assert pve_client.starts == [("pve-a", 100)]
     with app.app_context():
         allocation = db.session.scalar(select(VMAllocation))
         assert not hasattr(allocation, "password")
         events = db.session.scalars(select(AuditEvent)).all()
-        assert password_pusher.pushes[0]["secret"] not in str(
-            [event.details for event in events]
-        )
+        assert "mot de passe choisi !" not in str([event.details for event in events])
 
 
-def test_operator_can_monitor_but_cannot_read_owner_credential_link(
-    app, pve_client
-):
+def test_operator_can_monitor_without_receiving_guest_password(app, pve_client):
     owner_client, job_id = enqueue_cloud(app, pve_client)
     run_step(app, pve_client)
     run_step(app, pve_client)
-    assert "guest_access" in owner_client.get(f"/api/jobs/{job_id}").get_json()["job"]
+    owner_job = owner_client.get(f"/api/jobs/{job_id}").get_json()["job"]
+    assert "guest_password" not in str(owner_job)
 
     with app.app_context():
         operator = User(
@@ -522,7 +513,7 @@ def test_operator_can_monitor_but_cannot_read_owner_credential_link(
     assert "guest_access" not in result
 
 
-def test_cloud_init_requires_non_root_username_and_password_pusher(app, pve_client):
+def test_cloud_init_requires_non_root_username_and_selected_password(app, pve_client):
     client = app.test_client()
     login(client)
     pve_client.templates.add(("pve-a", 9000))
@@ -533,7 +524,10 @@ def test_cloud_init_requires_non_root_username_and_password_pusher(app, pve_clie
     )
     root = client.post(
         "/api/vms",
-        json={**vm_payload(), "profile": "debian-cloud", "guest_username": "root"},
+        json={
+            **vm_payload(), "profile": "debian-cloud",
+            "guest_username": "root", "guest_password": "password",
+        },
     )
     iso_with_user = client.post(
         "/api/vms", json={**vm_payload(), "guest_username": "hugo"}
@@ -543,31 +537,107 @@ def test_cloud_init_requires_non_root_username_and_password_pusher(app, pve_clie
     assert iso_with_user.status_code == 400
 
 
-def test_password_pusher_failure_rotates_password_before_retry(
-    app, pve_client, password_pusher
+def test_admin_controls_guest_password_minimum_without_complexity_rules(
+    app, pve_client
 ):
+    client = app.test_client()
+    login(client)
+    changed = client.patch(
+        "/api/admin/settings", json={"guest_password_min_length": 12}
+    )
+    assert changed.status_code == 200
+    assert client.get("/api/admin/settings").get_json()["settings"] == {
+        "guest_password_min_length": 12
+    }
+    changed_again = client.patch(
+        "/api/admin/settings", json={"guest_password_min_length": 10}
+    )
+    assert changed_again.status_code == 200
+    assert client.get("/api/me").get_json()["settings"] == {
+        "guest_password_min_length": 10
+    }
+    pve_client.templates.add(("pve-a", 9000))
+    create_cloud_profile(client)
+
+    short = client.post(
+        "/api/vms",
+        json={
+            **vm_payload("short-password"),
+            "profile": "debian-cloud",
+            "guest_username": "hugo",
+            "guest_password": "123456789",
+        },
+    )
+    selected = " douze mots ! "
+    accepted = client.post(
+        "/api/vms",
+        json={
+            **vm_payload("chosen-password"),
+            "profile": "debian-cloud",
+            "guest_username": "hugo",
+            "guest_password": selected,
+        },
+    )
+
+    assert short.status_code == 400
+    assert "guest_password" in short.get_json()["errors"]
+    assert accepted.status_code == 202
+    assert selected not in accepted.get_data(as_text=True)
+    with app.app_context():
+        job = db.session.scalar(select(ProvisioningJob))
+        assert job.guest_password_ciphertext
+        assert selected not in job.guest_password_ciphertext
+        assert selected not in str(
+            [event.details for event in db.session.scalars(select(AuditEvent)).all()]
+        )
+
+
+def test_cloud_profile_distinguishes_missing_password_and_iso_password(app, pve_client):
+    client = app.test_client()
+    login(client)
+    pve_client.templates.add(("pve-a", 9000))
+    create_cloud_profile(client)
+
+    missing_password = client.post(
+        "/api/vms",
+        json={
+            **vm_payload("missing-password"),
+            "profile": "debian-cloud",
+            "guest_username": "hugo",
+        },
+    )
+    iso_password = client.post(
+        "/api/vms",
+        json={**vm_payload("iso-password"), "guest_password": "anything"},
+    )
+
+    assert missing_password.status_code == 400
+    assert "guest_password" in missing_password.get_json()["errors"]
+    assert iso_password.status_code == 400
+    assert "guest_username" in iso_password.get_json()["errors"]
+
+
+def test_guest_configuration_retry_keeps_selected_password(app, pve_client):
     enqueue_cloud(app, pve_client)
     run_step(app, pve_client)
-    original_push = password_pusher.push
-    password_pusher.push = lambda _secret, **_kwargs: (_ for _ in ()).throw(
-        PasswordPusherTransportError("temporary")
+    original_configure = pve_client.configure_cloud_init_vm
+    pve_client.configure_cloud_init_vm = lambda **_kwargs: (_ for _ in ()).throw(
+        PVETransportError("temporary")
     )
 
     run_step(app, pve_client)
     with app.app_context():
         job = db.session.scalar(select(ProvisioningJob))
         assert job.status == "submitted"
-        assert job.error_code == "password_pusher_unavailable"
-        assert job.allocation.credential_url is None
-    first_password = pve_client.configurations[0]["password"]
+        assert job.error_code == "pve_guest_config_unavailable"
+        assert job.guest_password_ciphertext is not None
 
-    password_pusher.push = original_push
+    pve_client.configure_cloud_init_vm = original_configure
     run_step(app, pve_client)
-    assert pve_client.configurations[1]["password"] != first_password
-    assert password_pusher.pushes[0]["secret"] == pve_client.configurations[1]["password"]
+    assert pve_client.configurations[0]["password"] == "mot de passe choisi !"
 
 
-def test_cloud_init_start_ambiguity_keeps_credential_for_manual_review(
+def test_cloud_init_start_ambiguity_does_not_retain_password(
     app, pve_client
 ):
     client, job_id = enqueue_cloud(app, pve_client)
@@ -581,7 +651,9 @@ def test_cloud_init_start_ambiguity_keeps_credential_for_manual_review(
     result = client.get(f"/api/jobs/{job_id}").get_json()["job"]
     assert result["status"] == "attention"
     assert result["error_code"] == "pve_start_unknown"
-    assert result["guest_access"]["password_url"].startswith("https://")
+    assert "guest_access" not in result
+    with app.app_context():
+        assert db.session.get(ProvisioningJob, job_id).guest_password_ciphertext is None
 
 
 @pytest.mark.parametrize(
@@ -612,16 +684,14 @@ def test_cloud_init_configuration_errors_are_classified(
         assert job.error_code == expected_code
 
 
-def test_guest_delivery_stops_after_five_attempts(
-    app, pve_client, password_pusher
-):
+def test_guest_configuration_stops_after_five_attempts(app, pve_client):
     enqueue_cloud(app, pve_client)
     run_step(app, pve_client)
     with app.app_context():
         db.session.scalar(select(ProvisioningJob)).credential_attempts = 4
         db.session.commit()
-    password_pusher.push = lambda _secret, **_kwargs: (_ for _ in ()).throw(
-        PasswordPusherTransportError("temporary")
+    pve_client.configure_cloud_init_vm = lambda **_kwargs: (_ for _ in ()).throw(
+        PVETransportError("temporary")
     )
 
     run_step(app, pve_client)
@@ -659,13 +729,14 @@ def test_invalid_or_unconfigured_guest_bootstrap_requires_attention(
     with app.app_context():
         assert db.session.scalar(select(ProvisioningJob)).error_code == "guest_bootstrap_invalid"
 
-    # Même clone, remis en suivi pour simuler une configuration retirée du worker.
+    # Même clone, remis en suivi pour simuler la perte du secret chiffré.
     with app.app_context():
         job = db.session.scalar(select(ProvisioningJob))
         job.status = "submitted"
         job.error_code = None
         job.completed_at = None
         job.allocation.guest_username = "hugo"
+        job.guest_password_ciphertext = None
         db.session.commit()
         process_next_job(
             pve_client,
@@ -674,4 +745,20 @@ def test_invalid_or_unconfigured_guest_bootstrap_requires_attention(
             poll_seconds=0,
             lease_seconds=60,
         )
-        assert db.session.scalar(select(ProvisioningJob)).error_code == "password_pusher_not_configured"
+        assert db.session.scalar(select(ProvisioningJob)).error_code == "guest_password_unavailable"
+
+
+def test_corrupted_encrypted_guest_password_requires_attention(app, pve_client):
+    enqueue_cloud(app, pve_client)
+    run_step(app, pve_client)
+    with app.app_context():
+        job = db.session.scalar(select(ProvisioningJob))
+        job.guest_password_ciphertext = "not-a-valid-fernet-token"
+        db.session.commit()
+
+    run_step(app, pve_client)
+
+    with app.app_context():
+        job = db.session.scalar(select(ProvisioningJob))
+        assert job.status == "attention"
+        assert job.error_code == "guest_password_unavailable"

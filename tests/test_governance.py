@@ -8,7 +8,14 @@ from werkzeug.security import generate_password_hash
 
 from portal import create_app
 from portal.jobs import process_next_job
-from portal.models import AuditEvent, ProvisioningJob, User, VMAllocation, db
+from portal.models import (
+    AuditEvent,
+    PortalSetting,
+    ProvisioningJob,
+    User,
+    VMAllocation,
+    db,
+)
 from portal.pve import (
     FakePVEClient,
     PVEHTTPError,
@@ -333,11 +340,45 @@ def test_non_admin_cannot_manage_users_or_read_audit(app):
     assert create_user(client, username="bob").status_code == 403
     assert client.patch("/api/admin/users/1", json={}).status_code == 403
     assert client.get("/api/admin/audit-events").status_code == 403
+    assert client.get("/api/admin/settings").status_code == 403
+    assert client.patch(
+        "/api/admin/settings", json={"guest_password_min_length": 1}
+    ).status_code == 403
     with app.app_context():
         denied = db.session.scalar(
             select(db.func.count(AuditEvent.id)).where(AuditEvent.action == "authorization.denied")
         )
-        assert denied == 4
+        assert denied == 6
+
+
+@pytest.mark.parametrize("value", [0, 257, "8", None])
+def test_guest_password_minimum_rejects_invalid_admin_values(app, value):
+    client = app.test_client()
+    login(client)
+    response = client.patch(
+        "/api/admin/settings", json={"guest_password_min_length": value}
+    )
+    assert response.status_code == 400
+    assert "guest_password_min_length" in response.get_json()["errors"]
+
+
+def test_guest_password_settings_reject_unknown_payload(app):
+    client = app.test_client()
+    login(client)
+    response = client.patch("/api/admin/settings", json={"unknown": 8})
+    assert response.status_code == 400
+    assert "body" in response.get_json()["errors"]
+
+
+def test_invalid_stored_guest_password_policy_falls_back_safely(app):
+    client = app.test_client()
+    login(client)
+    with app.app_context():
+        db.session.add(PortalSetting(key="guest_password_min_length", value="invalid"))
+        db.session.commit()
+    assert client.get("/api/me").get_json()["settings"] == {
+        "guest_password_min_length": 8
+    }
 
 
 def test_quota_is_reserved_before_second_proxmox_request(app, pve_client):

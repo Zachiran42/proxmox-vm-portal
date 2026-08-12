@@ -203,6 +203,7 @@ class ProvisioningJob(db.Model):
     stage: Mapped[str] = mapped_column(db.String(16), nullable=False, default="create")
     upstream_node: Mapped[str | None] = mapped_column(db.String(63))
     credential_attempts: Mapped[int] = mapped_column(nullable=False, default=0)
+    guest_password_ciphertext: Mapped[str | None] = mapped_column(db.Text())
     available_at: Mapped[datetime] = mapped_column(
         db.DateTime(timezone=True), nullable=False, default=utcnow
     )
@@ -329,6 +330,16 @@ class WorkerHeartbeat(db.Model):
     worker_id: Mapped[str] = mapped_column(db.String(128), primary_key=True)
     last_seen_at: Mapped[datetime] = mapped_column(
         db.DateTime(timezone=True), nullable=False, default=utcnow
+    )
+
+
+class PortalSetting(db.Model):
+    __tablename__ = "portal_settings"
+
+    key: Mapped[str] = mapped_column(db.String(80), primary_key=True)
+    value: Mapped[str] = mapped_column(db.String(512), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        db.DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow
     )
 
 

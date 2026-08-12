@@ -8,8 +8,17 @@ _NAME = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 _NODE = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 _ISO = re.compile(r"^[a-z][a-z0-9_-]*:iso/[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}\.iso$")
 _LINUX_USER = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
-_FIELDS = {"name", "node", "profile", "cpu", "ram_mb", "disk_gb", "guest_username"}
-_VM_REQUIRED_FIELDS = _FIELDS - {"guest_username"}
+_FIELDS = {
+    "name",
+    "node",
+    "profile",
+    "cpu",
+    "ram_mb",
+    "disk_gb",
+    "guest_username",
+    "guest_password",
+}
+_VM_REQUIRED_FIELDS = _FIELDS - {"guest_username", "guest_password"}
 _USER_FIELDS = {"username", "password", "role", "quota"}
 _USER_UPDATE_FIELDS = {"password", "role", "is_active", "quota"}
 _VM_ACTION_FIELDS = {"action", "confirm_name"}
@@ -41,6 +50,7 @@ class VMRequest:
     ram_mb: int
     disk_gb: int
     guest_username: str | None
+    guest_password: str | None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> VMRequest:
@@ -68,6 +78,13 @@ class VMRequest:
             or guest_username in {"root", "admin"}
         ):
             errors["guest_username"] = "Identifiant Linux non privilégié invalide."
+        guest_password = data.get("guest_password")
+        if guest_password is not None and (
+            not isinstance(guest_password, str) or not 1 <= len(guest_password) <= 256
+        ):
+            errors["guest_password"] = (  # nosec B105
+                "Le mot de passe SSH doit contenir entre 1 et 256 caractères."
+            )
 
         for field, minimum, maximum, multiple in (
             ("cpu", 1, 32, 1),
@@ -83,6 +100,7 @@ class VMRequest:
         return cls(
             **{field: data[field] for field in _VM_REQUIRED_FIELDS},
             guest_username=guest_username,
+            guest_password=guest_password,
         )
 
     def as_dict(self) -> dict[str, Any]:

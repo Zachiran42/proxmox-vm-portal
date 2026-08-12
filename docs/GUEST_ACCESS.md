@@ -2,25 +2,16 @@
 
 ## Garanties du portail
 
-Un profil `cloud_init` clone un template Proxmox approuvé. Le portail génère un
-mot de passe avec un générateur cryptographique, configure `ciuser` et
-`cipassword` par l'API TLS Proxmox, puis l'envoie à l'API JSON v2 de Password
-Pusher. Le mot de passe clair n'est ni écrit en base, ni placé dans l'audit, ni
-retourné par l'API du portail.
+Un profil `cloud_init` clone un template Proxmox approuvé. L'utilisateur choisit
+son mot de passe SSH dans l'assistant. Le portail configure `ciuser` et
+`cipassword` par l'API TLS Proxmox. Le mot de passe clair n'est ni écrit en base,
+ni placé dans l'audit, ni retourné par l'API du portail.
 
-L'intégration cible l'API v2 de Password Pusher OSS 2.9 ou ultérieure. Cette API
-étant encore annoncée comme bêta par l'éditeur, testez l'intégration avant toute
-mise à niveau de Password Pusher.
-
-Seuls le propriétaire de la VM et sa session authentifiée peuvent obtenir le
-lien expirant. Les administrateurs et opérateurs qui ne possèdent pas la VM ne
-reçoivent que l'état du travail. Les réponses sont servies avec
-`Cache-Control: no-store`.
-
-L'URL Password Pusher est une configuration d'exploitation : elle peut viser
-une instance interne auto-hébergée ou un service externe. Elle n'est jamais
-fournie par l'utilisateur. HTTPS, la vérification du certificat et l'API token
-sont obligatoires. `PORTAL_PWPUSH_CA_BUNDLE` permet d'utiliser une CA interne.
+Le secret est chiffré avec la clé applicative pendant son passage dans la file
+asynchrone, puis le chiffré est effacé dès que Proxmox accepte la configuration
+cloud-init. Une rotation de la clé applicative invalide volontairement tout
+secret encore en attente. L'administrateur choisit une longueur minimale de 1 à
+256 caractères ; aucune classe de caractères n'est imposée.
 
 ## Préparer un template cloud-init
 
@@ -57,9 +48,9 @@ La demande utilisateur correspondante contient par exemple
 
 ## Reprise après incident
 
-Si Password Pusher est indisponible, le worker réessaie au maximum cinq fois et
-génère un nouveau mot de passe à chaque essai. Si le démarrage Proxmox est
-ambigu, le travail passe en `attention` sans perdre le lien déjà créé. Avant
+Si la configuration Proxmox est temporairement indisponible, le worker réessaie
+au maximum cinq fois avec le même secret choisi. Si le démarrage Proxmox est
+ambigu, le travail passe en `attention` après avoir effacé le chiffré. Avant
 toute action manuelle, vérifiez le VMID et l'état réel de la VM dans Proxmox.
 
 Le token PVE doit être limité aux templates, nœuds et pools nécessaires, avec

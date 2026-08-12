@@ -164,6 +164,21 @@
           <article><span class="stat-icon stat-amber">A</span><div><strong id="stat-users-admin">0</strong><span>Administrateurs</span></div></article>
         </section>
 
+        <section class="catalogue-section settings-section" aria-labelledby="settings-title">
+          <div class="section-heading">
+            <div><h2 id="settings-title">Paramètres de provisionnement</h2><p>Politique appliquée aux nouveaux comptes SSH.</p></div>
+          </div>
+          <form id="settings-form" class="settings-form">
+            <div>
+              <label for="guest-password-min-length">Longueur minimale du mot de passe SSH</label>
+              <input id="guest-password-min-length" name="guest_password_min_length" type="number" min="1" max="256" required>
+              <p class="field-help">De 1 à 256 caractères. Aucune règle de majuscule, chiffre ou caractère spécial n’est imposée.</p>
+            </div>
+            <button class="button button-primary" type="submit" id="save-settings">Enregistrer</button>
+          </form>
+          <p class="form-error" id="settings-error" role="alert" hidden></p>
+        </section>
+
         <section class="catalogue-section admin-section" aria-labelledby="users-title">
           <div class="section-heading">
             <div><h2 id="users-title">Utilisateurs et quotas</h2><p id="user-count">Chargement des comptes…</p></div>
@@ -231,7 +246,11 @@
           <h3 id="vm-step-access">Compte sudo invité</h3>
           <label for="vm-guest-username">Identifiant Linux non-root</label>
           <input id="vm-guest-username" name="guest_username" maxlength="32" pattern="[a-z_][a-z0-9_-]{0,31}" placeholder="hugo">
-          <p class="field-help">Le mot de passe éphémère sera transmis par un lien Password Pusher visible seulement dans votre session.</p>
+          <div class="form-row">
+            <div><label for="vm-guest-password">Mot de passe SSH</label><input id="vm-guest-password" name="guest_password" type="password" maxlength="256" autocomplete="new-password"></div>
+            <div><label for="vm-guest-password-confirmation">Confirmation</label><input id="vm-guest-password-confirmation" type="password" maxlength="256" autocomplete="new-password"></div>
+          </div>
+          <p class="field-help" id="guest-password-help">Choisissez le mot de passe initial. Il sera chiffré seulement le temps du provisionnement puis supprimé du portail.</p>
         </div>
       </section>
 

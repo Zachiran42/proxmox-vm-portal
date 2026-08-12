@@ -80,11 +80,14 @@ class PVEClient:
 
     def _request(self, path: str, *, method: str = "GET", payload: dict[str, Any] | None = None) -> Any:
         body = json.dumps(payload).encode() if payload is not None else None
+        headers = {"Authorization": self.authorization_header}
+        if body is not None:
+            headers["Content-Type"] = "application/json"
         request = Request(
             self.api_url + path,
             data=body,
             method=method,
-            headers={"Authorization": self.authorization_header, "Content-Type": "application/json"},
+            headers=headers,
         )
         try:
             options: dict[str, Any] = {"timeout": 10}
@@ -292,13 +295,7 @@ class PVEClient:
         return self._vm_task(node, vmid, "status/reboot", method="POST", payload={})
 
     def delete_vm(self, node: str, vmid: int) -> str:
-        return self._vm_task(
-            node,
-            vmid,
-            "",
-            method="DELETE",
-            payload={"purge": 1, "destroy-unreferenced-disks": 1},
-        )
+        return self._vm_task(node, vmid, "", method="DELETE")
 
     def _vm_task(
         self,
