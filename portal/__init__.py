@@ -659,7 +659,7 @@ def create_app(
             return jsonify(
                 errors={
                     "password": (
-                        "Le mot de passe doit contenir entre 1 et 256 caractères."
+                        "Le mot de passe doit contenir entre 1 et 256 caractères."  # nosec B105
                     )
                 }
             ), 400
