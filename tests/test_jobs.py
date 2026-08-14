@@ -176,20 +176,23 @@ def test_owner_can_list_recent_jobs_with_safe_vm_details(app, pve_client):
             "id": job_id,
             "vm_id": response.get_json()["jobs"][0]["vm_id"],
             "status": "queued",
-            "stage": "create",
-            "error_code": None,
-            "created_at": response.get_json()["jobs"][0]["created_at"],
-            "updated_at": response.get_json()["jobs"][0]["updated_at"],
-            "vm": {
+                "stage": "create",
+                "error_code": None,
+                "created_at": response.get_json()["jobs"][0]["created_at"],
+                "updated_at": response.get_json()["jobs"][0]["updated_at"],
+                "archived_at": None,
+                "vm": {
                 "name": "worker-vm-01",
                 "node": "pve-a",
                 "vmid": None,
                 "profile": "debian-12",
                 "cpu": 2,
                 "ram_mb": 4096,
-                "disk_gb": 40,
-                "guest_username": None,
-                "status": "queued",
+                    "disk_gb": 40,
+                    "guest_username": None,
+                    "last_ipv4": None,
+                    "network_observed_at": None,
+                    "status": "queued",
             },
         }
     ]
@@ -503,12 +506,41 @@ def test_owner_receives_vm_ipv4_and_ssh_identity_from_guest_agent(app, pve_clien
     response = client.get(f"/api/vms/{vm_id}/network")
 
     assert response.status_code == 200
-    assert response.get_json() == {
-        "status": "ready",
-        "ipv4": "192.168.1.51",
-        "ipv4_addresses": ["192.168.1.51"],
-        "ssh_username": "hugo",
-    }
+    network = response.get_json()
+    assert network["status"] == "ready"
+    assert network["ipv4"] == "192.168.1.51"
+    assert network["ipv4_addresses"] == ["192.168.1.51"]
+    assert network["last_ipv4"] == "192.168.1.51"
+    assert network["observed_at"] is not None
+    assert network["ssh_username"] == "hugo"
+    with app.app_context():
+        allocation = db.session.get(VMAllocation, vm_id)
+        assert allocation.last_ipv4 == "192.168.1.51"
+        assert allocation.network_observed_at is not None
+
+
+def test_owner_receives_vm_details_and_operation_history(app, pve_client):
+    client, _job_id = enqueue_cloud(app, pve_client)
+    run_step(app, pve_client)
+    run_step(app, pve_client)
+    run_step(app, pve_client)
+    with app.app_context():
+        allocation = db.session.scalar(select(VMAllocation))
+        vm_id = allocation.id
+        allocation.last_ipv4 = "192.168.1.52"
+        allocation.network_observed_at = datetime.now(UTC)
+        db.session.commit()
+
+    response = client.get(f"/api/vms/{vm_id}")
+
+    assert response.status_code == 200
+    details = response.get_json()["details"]
+    assert details["vm_id"] == vm_id
+    assert details["profile_label"] == "Debian Cloud"
+    assert details["network"]["last_ipv4"] == "192.168.1.52"
+    assert details["network"]["observed_at"] is not None
+    assert details["vm"]["guest_username"] == "hugo"
+    assert details["operations"] == []
 
 
 def test_vm_network_is_hidden_from_another_user(app, pve_client):
@@ -544,18 +576,27 @@ def test_vm_network_reports_lifecycle_and_guest_agent_states(app, pve_client):
     assert client.get("/api/vms/unknown/network").status_code == 404
     assert client.get(f"/api/vms/{vm_id}/network").get_json() == {
         "status": "unavailable",
+        "ipv4": None,
         "ipv4_addresses": [],
+        "last_ipv4": None,
+        "observed_at": None,
+        "ssh_username": "hugo",
     }
 
     with app.app_context():
         allocation = db.session.get(VMAllocation, vm_id)
         allocation.vmid = 100
         allocation.status = "stopped"
+        allocation.last_ipv4 = "192.168.1.50"
+        allocation.network_observed_at = datetime.now(UTC)
         db.session.commit()
-    assert client.get(f"/api/vms/{vm_id}/network").get_json() == {
-        "status": "stopped",
-        "ipv4_addresses": [],
-    }
+    stopped = client.get(f"/api/vms/{vm_id}/network").get_json()
+    assert stopped["status"] == "stopped"
+    assert stopped["ipv4"] == "192.168.1.50"
+    assert stopped["ipv4_addresses"] == ["192.168.1.50"]
+    assert stopped["last_ipv4"] == "192.168.1.50"
+    assert stopped["observed_at"] is not None
+    assert stopped["ssh_username"] == "hugo"
 
     with app.app_context():
         allocation = db.session.get(VMAllocation, vm_id)
@@ -566,10 +607,11 @@ def test_vm_network_reports_lifecycle_and_guest_agent_states(app, pve_client):
     pve_client.get_vm_ipv4_addresses = lambda _node, _vmid: (_ for _ in ()).throw(
         PVETransportError("offline")
     )
-    assert client.get(f"/api/vms/{vm_id}/network").get_json() == {
-        "status": "temporarily_unavailable",
-        "ipv4_addresses": [],
-    }
+    unavailable = client.get(f"/api/vms/{vm_id}/network").get_json()
+    assert unavailable["status"] == "temporarily_unavailable"
+    assert unavailable["ipv4"] == "192.168.1.50"
+    assert unavailable["ipv4_addresses"] == []
+    assert unavailable["last_ipv4"] == "192.168.1.50"
 
 
 def test_operator_can_monitor_without_receiving_guest_password(app, pve_client):

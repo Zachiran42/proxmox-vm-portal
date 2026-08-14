@@ -1,6 +1,6 @@
 "use strict";
 
-const state = { csrfToken: "", user: null, usage: {}, settings: {}, profiles: [], nodes: [], jobs: [], users: [], auditEvents: [], operations: null, pollTimer: null };
+const state = { csrfToken: "", user: null, usage: {}, settings: {}, profiles: [], nodes: [], jobs: [], users: [], auditEvents: [], operations: null, pollTimer: null, showArchived: false, detailsSshCommand: "" };
 const elements = Object.fromEntries(
   [
     "login-screen", "login-form", "local-login-fields", "login-error", "login-button",
@@ -15,7 +15,7 @@ const elements = Object.fromEntries(
     "open-vm-dialog", "vm-dialog", "vm-form", "close-vm-dialog", "cancel-vm", "submit-vm",
     "vm-profile", "vm-node", "vm-name", "vm-cpu", "vm-ram", "vm-disk", "vm-error",
     "guest-access-step", "vm-guest-username", "vm-guest-password",
-    "vm-guest-password-confirmation", "guest-password-help", "quota-preview", "refresh-jobs", "job-list",
+    "vm-guest-password-confirmation", "guest-password-help", "quota-preview", "refresh-jobs", "show-archived", "job-list",
     "jobs-empty", "job-count", "quota-vms", "quota-cpu", "quota-ram", "quota-disk",
     "quota-vms-progress", "quota-cpu-progress", "quota-ram-progress", "quota-disk-progress",
     "admin-nav", "admin-mobile-nav", "admin-view", "open-user-dialog", "refresh-users",
@@ -28,7 +28,11 @@ const elements = Object.fromEntries(
     "managed-active", "user-error", "vm-action-dialog", "vm-action-form", "vm-action-id",
     "vm-action-kind", "vm-action-title", "vm-action-intro", "vm-delete-confirmation",
     "vm-confirm-name", "vm-confirm-expected", "vm-action-error", "close-vm-action",
-    "cancel-vm-action", "submit-vm-action", "operations-checked", "refresh-operations",
+    "cancel-vm-action", "submit-vm-action", "vm-details-dialog", "vm-details-title",
+    "vm-details-intro", "vm-details-status", "vm-details-placement", "vm-details-profile",
+    "vm-details-resources", "vm-details-ssh-user", "vm-details-ipv4", "vm-details-observed",
+    "vm-details-created", "vm-details-access", "vm-details-command", "copy-vm-ssh",
+    "vm-operation-history", "close-vm-details", "operations-checked", "refresh-operations",
     "service-grid", "incident-count",
     "queue-count", "incident-list", "incident-empty", "incident-dialog", "incident-form",
     "incident-kind", "incident-id", "incident-action", "incident-dialog-title",
@@ -61,6 +65,7 @@ function errorMessage(payload, fallback) {
     confirmation_mismatch: "Le nom saisi ne correspond pas à la machine.",
     lifecycle_invalid_state: "Cette action n’est pas disponible dans l’état actuel.",
     operation_in_progress: "Une opération est déjà en cours sur cette machine.",
+    archive_invalid_state: "Seules les demandes échouées ou les VM supprimées peuvent être archivées.",
     incident_not_open: "Cet incident a déjà été traité.",
     incident_not_resumable: "Aucun identifiant Proxmox exploitable ne permet de reprendre ce suivi.",
     forbidden: "Cette action est réservée aux administrateurs."
@@ -425,8 +430,9 @@ function renderJob(job) {
   appendText(resources, "span", `${job.vm.cpu} vCPU · ${formatRam(job.vm.ram_mb)} · ${job.vm.disk_gb} Gio`);
   appendText(resources, "span", `Image ${job.vm.profile || "retirée"} · ${new Date(job.created_at).toLocaleString("fr-FR")}`);
   if (job.vm.guest_username) appendText(resources, "span", `SSH : ${job.vm.guest_username}`);
-  if (job.network?.status === "ready") {
-    appendText(resources, "span", `IPv4 : ${job.network.ipv4}`);
+  const displayedIp = job.network?.ipv4 || job.network?.last_ipv4 || job.vm.last_ipv4;
+  if (displayedIp) {
+    appendText(resources, "span", `IPv4 : ${displayedIp}${job.network?.status === "ready" ? "" : " (dernière connue)"}`);
   } else if (job.vm.status === "running" && job.vm.guest_username) {
     appendText(resources, "span", "IPv4 : attribution en cours");
   }
@@ -442,8 +448,8 @@ function renderJob(job) {
     access.rel = "noopener noreferrer";
     access.title = `Compte ${job.guest_access.username} · ${job.guest_access.expire_after_views} vue(s) maximum`;
   }
-  if (job.network?.status === "ready" && job.vm.guest_username) {
-    const command = `ssh ${job.vm.guest_username}@${job.network.ipv4}`;
+  if (displayedIp && job.vm.guest_username) {
+    const command = `ssh ${job.vm.guest_username}@${displayedIp}`;
     const copy = appendText(result, "button", "Copier SSH", "credential-button");
     copy.type = "button";
     copy.title = command;
@@ -463,16 +469,23 @@ function renderJob(job) {
   }
   appendText(result, "span", statusLabels[job.status] || job.status, `job-status ${jobStatusClass(job.status)}`);
   const controls = lifecycleControls(job);
-  if (controls.length) {
-    const actions = document.createElement("div");
-    actions.className = "vm-actions";
-    controls.forEach(({ action, label, danger }) => {
-      const button = appendText(actions, "button", label, `vm-action-button${danger ? " danger" : ""}`);
-      button.type = "button";
-      button.addEventListener("click", () => openVmActionDialog(job, action));
-    });
-    result.append(actions);
+  const actions = document.createElement("div");
+  actions.className = "vm-actions";
+  const details = appendText(actions, "button", "Détails", "vm-action-button");
+  details.type = "button";
+  details.addEventListener("click", () => openVmDetails(job));
+  controls.forEach(({ action, label, danger }) => {
+    const button = appendText(actions, "button", label, `vm-action-button${danger ? " danger" : ""}`);
+    button.type = "button";
+    button.addEventListener("click", () => openVmActionDialog(job, action));
+  });
+  if (["failed", "deleted"].includes(job.vm.status)) {
+    const archived = Boolean(job.archived_at);
+    const archive = appendText(actions, "button", archived ? "Restaurer" : "Archiver", "vm-action-button");
+    archive.type = "button";
+    archive.addEventListener("click", () => setVmArchived(job, !archived));
   }
+  result.append(actions);
   card.append(result);
   return card;
 }
@@ -491,7 +504,8 @@ function lifecycleControls(job) {
 function renderJobs() {
   elements["job-list"].replaceChildren(...state.jobs.map(renderJob));
   elements["jobs-empty"].hidden = state.jobs.length !== 0;
-  elements["job-count"].textContent = `${state.jobs.length} demande${state.jobs.length > 1 ? "s" : ""} récente${state.jobs.length > 1 ? "s" : ""}`;
+  elements["job-count"].textContent = `${state.jobs.length} demande${state.jobs.length > 1 ? "s" : ""} ${state.showArchived ? "archivée" : "récente"}${state.jobs.length > 1 ? "s" : ""}`;
+  elements["show-archived"].textContent = state.showArchived ? "Voir les demandes" : "Voir les archives";
 }
 
 function scheduleJobPoll() {
@@ -508,10 +522,11 @@ function scheduleJobPoll() {
 async function loadJobs() {
   elements["refresh-jobs"].disabled = true;
   try {
-    const [history, session] = await Promise.all([api("/api/jobs"), api("/api/me")]);
+    const historyPath = state.showArchived ? "/api/jobs?archived=only" : "/api/jobs";
+    const [history, session] = await Promise.all([api(historyPath), api("/api/me")]);
     state.jobs = history.jobs;
     await Promise.all(state.jobs.map(async (job) => {
-      if (job.vm.status !== "running" || !job.vm.vmid || !job.vm.guest_username) return;
+      if (!["running", "stopped", "accepted"].includes(job.vm.status) || !job.vm.vmid || !job.vm.guest_username) return;
       try {
         job.network = await api(`/api/vms/${encodeURIComponent(job.vm_id)}/network`);
       } catch (_error) {
@@ -529,6 +544,83 @@ async function loadJobs() {
   } finally {
     elements["refresh-jobs"].disabled = false;
   }
+}
+
+function closeVmDetails() {
+  elements["vm-details-dialog"].close();
+}
+
+async function openVmDetails(job) {
+  elements["vm-details-title"].textContent = job.vm.name;
+  elements["vm-details-intro"].textContent = "Chargement des informations de la machine…";
+  elements["vm-operation-history"].replaceChildren();
+  elements["vm-details-access"].hidden = true;
+  state.detailsSshCommand = "";
+  elements["vm-details-dialog"].showModal();
+  try {
+    const detailsResponse = await api(`/api/vms/${encodeURIComponent(job.vm_id)}`);
+    const details = detailsResponse.details;
+    let network = {
+      last_ipv4: details.network.last_ipv4,
+      observed_at: details.network.observed_at
+    };
+    if (details.vm.vmid && details.vm.guest_username && details.vm.status !== "deleted") {
+      try {
+        network = await api(`/api/vms/${encodeURIComponent(job.vm_id)}/network`);
+      } catch (_error) {
+        // La dernière observation reste affichable même si Proxmox est indisponible.
+      }
+    }
+    const ip = network.ipv4 || network.last_ipv4 || details.network.last_ipv4;
+    elements["vm-details-intro"].textContent = `Identifiant interne ${details.vm_id}`;
+    elements["vm-details-status"].textContent = vmStatusLabels[details.vm.status] || details.vm.status;
+    elements["vm-details-placement"].textContent = `${details.vm.node}${details.vm.vmid ? ` · VMID ${details.vm.vmid}` : " · VMID en attente"}`;
+    elements["vm-details-profile"].textContent = details.profile_label || details.vm.profile || "Profil retiré";
+    elements["vm-details-resources"].textContent = `${details.vm.cpu} vCPU · ${formatRam(details.vm.ram_mb)} · ${details.vm.disk_gb} Gio`;
+    elements["vm-details-ssh-user"].textContent = details.vm.guest_username || "Non automatisé";
+    elements["vm-details-ipv4"].textContent = ip || "Non disponible";
+    elements["vm-details-observed"].textContent = network.observed_at ? new Date(network.observed_at).toLocaleString("fr-FR") : "Jamais observée";
+    elements["vm-details-created"].textContent = new Date(details.created_at).toLocaleString("fr-FR");
+    if (ip && details.vm.guest_username) {
+      state.detailsSshCommand = `ssh ${details.vm.guest_username}@${ip}`;
+      elements["vm-details-command"].textContent = state.detailsSshCommand;
+      elements["vm-details-access"].hidden = false;
+    }
+    if (!details.operations.length) {
+      appendText(elements["vm-operation-history"], "p", "Aucune opération de cycle de vie enregistrée.", "detail-empty");
+    } else {
+      [...details.operations].reverse().forEach((operation) => {
+        const row = document.createElement("div");
+        row.className = "vm-operation-row";
+        appendText(row, "strong", operationLabels[operation.action] || operation.action);
+        appendText(row, "span", statusLabels[operation.status] || operation.status);
+        appendText(row, "time", new Date(operation.updated_at).toLocaleString("fr-FR"));
+        elements["vm-operation-history"].append(row);
+      });
+    }
+  } catch (error) {
+    if (error.status === 401) return showLogin();
+    elements["vm-details-intro"].textContent = error.message;
+  }
+}
+
+async function setVmArchived(job, archived) {
+  try {
+    await api(`/api/vms/${encodeURIComponent(job.vm_id)}/archive`, {
+      method: "POST",
+      body: JSON.stringify({ archived })
+    });
+    showToast(archived ? "Demande archivée sans supprimer son historique." : "Demande restaurée dans la liste principale.");
+    await loadJobs();
+  } catch (error) {
+    if (error.status === 401) return showLogin();
+    showToast(error.message);
+  }
+}
+
+async function toggleArchivedJobs() {
+  state.showArchived = !state.showArchived;
+  await loadJobs();
 }
 
 const vmActionCopy = {
@@ -1088,8 +1180,19 @@ elements["vm-form"].addEventListener("submit", submitVm);
 elements["close-vm-action"].addEventListener("click", closeVmActionDialog);
 elements["cancel-vm-action"].addEventListener("click", closeVmActionDialog);
 elements["vm-action-form"].addEventListener("submit", submitVmAction);
+elements["close-vm-details"].addEventListener("click", closeVmDetails);
+elements["copy-vm-ssh"].addEventListener("click", async () => {
+  if (!state.detailsSshCommand) return;
+  try {
+    await navigator.clipboard.writeText(state.detailsSshCommand);
+    showToast(`Commande copiée : ${state.detailsSshCommand}`);
+  } catch (_error) {
+    showToast(`Commande SSH : ${state.detailsSshCommand}`);
+  }
+});
 elements["vm-profile"].addEventListener("change", updateGuestAccessField);
 elements["refresh-jobs"].addEventListener("click", loadJobs);
+elements["show-archived"].addEventListener("click", toggleArchivedJobs);
 [elements["vm-cpu"], elements["vm-ram"], elements["vm-disk"]].forEach((input) => input.addEventListener("input", updateQuotaPreview));
 elements["open-user-dialog"].addEventListener("click", openCreateUserDialog);
 elements["close-user-dialog"].addEventListener("click", closeUserDialog);
@@ -1123,6 +1226,9 @@ elements["vm-dialog"].addEventListener("click", (event) => {
 });
 elements["vm-action-dialog"].addEventListener("click", (event) => {
   if (event.target === elements["vm-action-dialog"]) closeVmActionDialog();
+});
+elements["vm-details-dialog"].addEventListener("click", (event) => {
+  if (event.target === elements["vm-details-dialog"]) closeVmDetails();
 });
 elements["user-dialog"].addEventListener("click", (event) => {
   if (event.target === elements["user-dialog"]) closeUserDialog();

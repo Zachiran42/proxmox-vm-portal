@@ -109,7 +109,10 @@
         <section class="catalogue-section jobs-section" aria-labelledby="jobs-title">
           <div class="section-heading">
             <div><h2 id="jobs-title">Demandes récentes</h2><p id="job-count">Chargement de vos machines…</p></div>
-            <button class="icon-button" type="button" id="refresh-jobs" aria-label="Actualiser les demandes">↻</button>
+            <div class="section-actions">
+              <button class="button button-secondary compact-button" type="button" id="show-archived">Voir les archives</button>
+              <button class="icon-button" type="button" id="refresh-jobs" aria-label="Actualiser les demandes">↻</button>
+            </div>
           </div>
           <div class="job-list" id="job-list" aria-live="polite"></div>
           <div class="empty-state" id="jobs-empty" hidden><span>▣</span><h3>Aucune machine demandée</h3><p>Votre première VM apparaîtra ici dès sa soumission.</p></div>
@@ -296,6 +299,32 @@
         <button class="button button-primary" type="submit" id="save-user">Créer le compte</button>
       </div>
     </form>
+  </dialog>
+
+  <dialog id="vm-details-dialog" aria-labelledby="vm-details-title">
+    <div class="dialog-heading">
+      <div><span class="eyebrow">Machine virtuelle</span><h2 id="vm-details-title">Détails de la VM</h2></div>
+      <button class="close-button" type="button" id="close-vm-details" aria-label="Fermer">×</button>
+    </div>
+    <p class="dialog-intro" id="vm-details-intro"></p>
+    <dl class="vm-details-grid">
+      <div><dt>État</dt><dd id="vm-details-status">—</dd></div>
+      <div><dt>Emplacement</dt><dd id="vm-details-placement">—</dd></div>
+      <div><dt>Image</dt><dd id="vm-details-profile">—</dd></div>
+      <div><dt>Ressources</dt><dd id="vm-details-resources">—</dd></div>
+      <div><dt>Compte SSH</dt><dd id="vm-details-ssh-user">—</dd></div>
+      <div><dt>Dernière IPv4 connue</dt><dd id="vm-details-ipv4">—</dd></div>
+      <div><dt>Observation réseau</dt><dd id="vm-details-observed">—</dd></div>
+      <div><dt>Création</dt><dd id="vm-details-created">—</dd></div>
+    </dl>
+    <div class="vm-details-access" id="vm-details-access" hidden>
+      <code id="vm-details-command"></code>
+      <button class="button button-primary compact-button" type="button" id="copy-vm-ssh">Copier SSH</button>
+    </div>
+    <section class="vm-operation-history" aria-labelledby="vm-operation-history-title">
+      <h3 id="vm-operation-history-title">Historique des opérations</h3>
+      <div id="vm-operation-history"></div>
+    </section>
   </dialog>
 
   <dialog id="vm-action-dialog" aria-labelledby="vm-action-title">

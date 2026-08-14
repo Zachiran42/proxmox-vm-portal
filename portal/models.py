@@ -153,6 +153,11 @@ class VMAllocation(db.Model):
     )
     credential_expire_days: Mapped[int | None] = mapped_column()
     credential_expire_views: Mapped[int | None] = mapped_column()
+    last_ipv4: Mapped[str | None] = mapped_column(db.String(15))
+    network_observed_at: Mapped[datetime | None] = mapped_column(
+        db.DateTime(timezone=True)
+    )
+    archived_at: Mapped[datetime | None] = mapped_column(db.DateTime(timezone=True))
     cpu: Mapped[int] = mapped_column(nullable=False)
     ram_mb: Mapped[int] = mapped_column(nullable=False)
     disk_gb: Mapped[int] = mapped_column(nullable=False)
@@ -232,6 +237,9 @@ class ProvisioningJob(db.Model):
             "error_code": self.error_code,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
+            "archived_at": self.allocation.archived_at.isoformat()
+            if self.allocation.archived_at is not None
+            else None,
             "vm": {
                 "name": self.allocation.name,
                 "node": self.allocation.node,
@@ -243,6 +251,10 @@ class ProvisioningJob(db.Model):
                 "ram_mb": self.allocation.ram_mb,
                 "disk_gb": self.allocation.disk_gb,
                 "guest_username": self.allocation.guest_username,
+                "last_ipv4": self.allocation.last_ipv4,
+                "network_observed_at": self.allocation.network_observed_at.isoformat()
+                if self.allocation.network_observed_at is not None
+                else None,
                 "status": self.allocation.status,
             },
         }

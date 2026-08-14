@@ -59,3 +59,16 @@ démarrage requis. `SDN.Use` est requis sur le bridge du template pour le clone,
 et `VM.GuestAgent.Audit` sur les VM permet au portail d'afficher l'adresse IP au
 propriétaire sans lui donner accès à Proxmox. Testez ces ACL avec un compte de
 service non-root.
+
+## Adresse affichée à l'utilisateur
+
+Lorsque la VM est démarrée, le portail interroge le QEMU Guest Agent et mémorise
+la première IPv4 utilisable avec sa date d'observation. La fiche de la VM expose
+ensuite l'adresse, le compte et la commande SSH prête à copier. Si la VM est
+arrêtée ou si Proxmox est momentanément indisponible, la dernière adresse connue
+reste visible et est explicitement présentée comme une observation historique.
+
+Cette mémorisation ne réserve pas l'adresse dans le réseau. Une IPv4 réellement
+stable exige une réservation DHCP fondée sur l'adresse MAC, ou une intégration
+avec l'IPAM/DHCP de l'établissement. Le portail ne doit jamais présenter la
+dernière adresse observée comme une garantie d'attribution permanente.

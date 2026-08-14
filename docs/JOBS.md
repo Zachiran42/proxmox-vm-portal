@@ -54,6 +54,12 @@ La requête standard détruit la VM et ses disques référencés. Le portail n'a
 pas `purge` ni `destroy-unreferenced-disks`, afin de ne jamais étendre la
 suppression aux configurations ou volumes annexes.
 
+Les demandes échouées et les VM supprimées peuvent être archivées par leur
+propriétaire. L'archivage masque uniquement la carte de la liste principale :
+il ne supprime ni l'allocation, ni le travail, ni les opérations, ni les
+événements d'audit. La vue « Archives » permet de les consulter et de les
+restaurer. Une VM active ou encore en provisionnement ne peut pas être archivée.
+
 ## Exploitation
 
 Les états `submitting` et `attention` doivent déclencher une alerte. Avant toute

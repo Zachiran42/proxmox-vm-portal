@@ -121,3 +121,8 @@ d'administrateur, jamais une URL libre fournie par un utilisateur.
 12. Fermer la chaîne jusqu'au serveur. **Livré : installation, mise à jour et
     qualification d'une image GHCR exclusivement par digest, après vérification
     Cosign de l'identité exacte du workflow de release.**
+13. Rendre les VM autonomes vis-à-vis de l'interface Proxmox. **Livré : fiche
+    détaillée propriétaire, dernière IPv4 observée par QEMU Guest Agent,
+    commande SSH prête à copier, historique du cycle de vie et archivage logique
+    des demandes terminales. La réservation DHCP/IPAM reste une intégration
+    propre à l'infrastructure cible.**

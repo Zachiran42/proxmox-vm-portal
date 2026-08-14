@@ -196,6 +196,77 @@ def test_action_rejects_non_json_and_vm_without_upstream_id(app):
     assert request_action(client, vm_id, "start").get_json()["error"] == "vm_not_ready"
 
 
+def test_failed_or_deleted_vm_can_be_archived_and_restored(app):
+    vm_id = seed_vm(app, status="failed")
+    client = app.test_client()
+    login(client)
+
+    archived = client.post(f"/api/vms/{vm_id}/archive", json={"archived": True})
+
+    assert archived.status_code == 200
+    assert archived.get_json() == {"status": "archived"}
+    assert client.get("/api/jobs").get_json() == {"jobs": []}
+    history = client.get("/api/jobs?archived=only").get_json()["jobs"]
+    assert len(history) == 1
+    assert history[0]["vm_id"] == vm_id
+    assert history[0]["archived_at"] is not None
+
+    restored = client.post(f"/api/vms/{vm_id}/archive", json={"archived": False})
+
+    assert restored.status_code == 200
+    assert restored.get_json() == {"status": "visible"}
+    assert len(client.get("/api/jobs").get_json()["jobs"]) == 1
+    with app.app_context():
+        actions = db.session.scalars(
+            select(AuditEvent.action)
+            .where(AuditEvent.target_id == vm_id)
+            .order_by(AuditEvent.created_at)
+        ).all()
+        assert actions == ["vm.archive", "vm.unarchive"]
+
+
+def test_archive_requires_valid_payload_ownership_and_terminal_state(app):
+    vm_id = seed_vm(app, status="running")
+    client = app.test_client()
+    login(client)
+
+    assert client.post(f"/api/vms/{vm_id}/archive").status_code == 400
+    assert client.post(
+        f"/api/vms/{vm_id}/archive", json={"archived": "yes"}
+    ).status_code == 400
+    assert client.post(
+        f"/api/vms/{vm_id}/archive", json={"archived": True, "extra": True}
+    ).status_code == 400
+    rejected = client.post(
+        f"/api/vms/{vm_id}/archive", json={"archived": True}
+    )
+    assert rejected.status_code == 409
+    assert rejected.get_json()["error"] == "archive_invalid_state"
+
+    with app.app_context():
+        other = User(
+            username="archive-other",
+            password_hash=generate_password_hash("archive-other-password"),
+            role="user",
+        )
+        db.session.add(other)
+        db.session.commit()
+        other_id = other.id
+        allocation = db.session.get(VMAllocation, vm_id)
+        allocation.status = "deleted"
+        db.session.commit()
+    other_client = app.test_client()
+    with other_client.session_transaction() as portal_session:
+        portal_session["user_id"] = other_id
+        portal_session["authentication"] = "local"
+        portal_session["csrf_token"] = "archive-csrf"
+    other_client.environ_base["HTTP_X_CSRF_TOKEN"] = "archive-csrf"
+    assert other_client.post(
+        f"/api/vms/{vm_id}/archive", json={"archived": True}
+    ).status_code == 404
+    assert other_client.get(f"/api/vms/{vm_id}").status_code == 404
+
+
 def test_worker_classifies_operation_failures_and_ambiguous_results(app, pve_client):
     vm_id = seed_vm(app)
     client = app.test_client()

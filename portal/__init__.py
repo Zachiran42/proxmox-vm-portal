@@ -1255,15 +1255,55 @@ def create_app(
     @app.get("/api/jobs")
     @login_required
     def list_jobs():
+        archived_only = request.args.get("archived") == "only"
         jobs = db.session.scalars(
             select(ProvisioningJob)
             .join(ProvisioningJob.allocation)
-            .where(VMAllocation.owner_id == g.current_user.id)
+            .where(
+                VMAllocation.owner_id == g.current_user.id,
+                VMAllocation.archived_at.is_not(None)
+                if archived_only
+                else VMAllocation.archived_at.is_(None),
+            )
             .order_by(ProvisioningJob.created_at.desc())
             .limit(25)
         ).all()
         return jsonify(
             jobs=[job.public_dict(include_credentials=True) for job in jobs]
+        )
+
+    @app.get("/api/vms/<vm_id>")
+    @login_required
+    def get_vm_details(vm_id: str):
+        allocation = db.session.get(VMAllocation, vm_id)
+        if allocation is None or (
+            allocation.owner_id != g.current_user.id
+            and g.current_user.role != "admin"
+        ):
+            return jsonify(error="not_found"), 404
+        job = allocation.job
+        if job is None:  # pragma: no cover - invariant de données
+            return jsonify(error="not_found"), 404
+        return jsonify(
+            details={
+                **job.public_dict(
+                    include_credentials=allocation.owner_id == g.current_user.id
+                ),
+                "profile_label": allocation.profile.label
+                if allocation.profile is not None
+                else None,
+                "created_at": allocation.created_at.isoformat(),
+                "updated_at": allocation.updated_at.isoformat(),
+                "network": {
+                    "last_ipv4": allocation.last_ipv4,
+                    "observed_at": allocation.network_observed_at.isoformat()
+                    if allocation.network_observed_at is not None
+                    else None,
+                },
+                "operations": [
+                    operation.public_dict() for operation in allocation.operations
+                ],
+            }
         )
 
     @app.get("/api/vms/<vm_id>/network")
@@ -1278,21 +1318,92 @@ def create_app(
         ):
             return jsonify(error="not_found"), 404
         if allocation.vmid is None or allocation.status == "deleted":
-            return jsonify(status="unavailable", ipv4_addresses=[])
+            return jsonify(
+                status="unavailable",
+                ipv4=None,
+                ipv4_addresses=[],
+                last_ipv4=allocation.last_ipv4,
+                observed_at=allocation.network_observed_at.isoformat()
+                if allocation.network_observed_at is not None
+                else None,
+                ssh_username=allocation.guest_username,
+            )
         if allocation.status != "running":
-            return jsonify(status="stopped", ipv4_addresses=[])
+            return jsonify(
+                status="stopped",
+                ipv4=allocation.last_ipv4,
+                ipv4_addresses=[allocation.last_ipv4]
+                if allocation.last_ipv4
+                else [],
+                last_ipv4=allocation.last_ipv4,
+                observed_at=allocation.network_observed_at.isoformat()
+                if allocation.network_observed_at is not None
+                else None,
+                ssh_username=allocation.guest_username,
+            )
         try:
             addresses = client.get_vm_ipv4_addresses(
                 allocation.node, allocation.vmid
             )
         except (PVETransportError, PVEHTTPError, PVEProtocolError):
-            return jsonify(status="temporarily_unavailable", ipv4_addresses=[])
+            return jsonify(
+                status="temporarily_unavailable",
+                ipv4=allocation.last_ipv4,
+                ipv4_addresses=[],
+                last_ipv4=allocation.last_ipv4,
+                observed_at=allocation.network_observed_at.isoformat()
+                if allocation.network_observed_at is not None
+                else None,
+                ssh_username=allocation.guest_username,
+            )
+        if addresses:
+            allocation.last_ipv4 = addresses[0]
+            allocation.network_observed_at = datetime.now(UTC)
+            db.session.commit()
         return jsonify(
             status="ready" if addresses else "pending",
             ipv4=addresses[0] if addresses else None,
             ipv4_addresses=addresses,
+            last_ipv4=allocation.last_ipv4,
+            observed_at=allocation.network_observed_at.isoformat()
+            if allocation.network_observed_at is not None
+            else None,
             ssh_username=allocation.guest_username,
         )
+
+    @app.post("/api/vms/<vm_id>/archive")
+    @login_required
+    @csrf_protected
+    def archive_vm(vm_id: str):
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict) or set(payload) != {"archived"} or not isinstance(
+            payload["archived"], bool
+        ):
+            return jsonify(errors={"archived": "Un booléen est requis."}), 400
+        allocation = db.session.scalar(
+            select(VMAllocation)
+            .where(VMAllocation.id == vm_id)
+            .with_for_update()
+        )
+        if allocation is None or (
+            allocation.owner_id != g.current_user.id
+            and g.current_user.role != "admin"
+        ):
+            return jsonify(error="not_found"), 404
+        if payload["archived"] and allocation.status not in {"failed", "deleted"}:
+            return jsonify(error="archive_invalid_state"), 409
+        if (allocation.archived_at is not None) != payload["archived"]:
+            allocation.archived_at = datetime.now(UTC) if payload["archived"] else None
+            _add_audit(
+                action="vm.archive" if payload["archived"] else "vm.unarchive",
+                target_type="vm",
+                target_id=allocation.id,
+                outcome="success",
+                actor_user_id=g.current_user.id,
+                details={"status": allocation.status},
+            )
+            db.session.commit()
+        return jsonify(status="archived" if payload["archived"] else "visible")
 
     @app.post("/api/vms")
     @login_required
