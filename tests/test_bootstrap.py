@@ -9,8 +9,8 @@ BOOTSTRAP = ROOT / "deploy/scripts/bootstrap-debian.sh"
 def test_private_bootstrap_is_pinned_and_defensive():
     script = BOOTSTRAP.read_text(encoding="utf-8")
 
-    assert 'RELEASE_TAG="v0.20.1"' in script
-    assert 'RELEASE_VERSION="0.20.1"' in script
+    assert 'RELEASE_TAG="v0.20.2"' in script
+    assert 'RELEASE_VERSION="0.20.2"' in script
     assert 'TARGET_DIR="/opt/proxmox-vm-portal"' in script
     assert "mktemp -d /tmp/proxmox-vm-portal." in script
     assert "--proto '=https' --tlsv1.2" in script
