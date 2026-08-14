@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from ipaddress import IPv4Address, IPv4Interface, IPv4Network
 
 from flask import current_app
 from sqlalchemy import select
 
 from .guest_secrets import GuestSecretError, decrypt_guest_password
-from .models import AuditEvent, ProvisioningJob, VMOperation, WorkerHeartbeat, db
+from .models import (
+    AuditEvent,
+    ProvisioningJob,
+    VMAllocation,
+    VMOperation,
+    WorkerHeartbeat,
+    db,
+)
 from .netbox import NetBoxConflict, NetBoxUnavailable
 from .pve import PVEHTTPError, PVEProtocolError, PVETransportError
 
@@ -126,6 +134,14 @@ def _submit_job(pve_client, netbox_client, job_id: str, poll_seconds: int) -> No
             )
             db.session.commit()
         except NetBoxConflict:
+            if allocation.automatic_ip:
+                if _advance_automatic_ip(allocation):
+                    _reschedule(
+                        job, "queued", poll_seconds, "netbox_ip_conflict_retry"
+                    )
+                else:
+                    _fail(job, "ip_pool_exhausted")
+                return
             _fail(job, "netbox_ip_conflict")
             return
         except NetBoxUnavailable:
@@ -172,6 +188,45 @@ def _submit_job(pve_client, netbox_client, job_id: str, poll_seconds: int) -> No
         else allocation.node
     )
     _reschedule(job, "submitted", poll_seconds)
+
+
+def _advance_automatic_ip(allocation: VMAllocation) -> bool:
+    profile = allocation.network_profile
+    if (
+        profile is None
+        or profile.pool_start is None
+        or profile.pool_end is None
+        or allocation.ipv4_cidr is None
+    ):
+        return False
+    current = IPv4Interface(allocation.ipv4_cidr).ip
+    start = max(IPv4Address(profile.pool_start), current + 1)
+    end = IPv4Address(profile.pool_end)
+    excluded = {
+        IPv4Address(value)
+        for value in profile.excluded_ips.split(",")
+        if value
+    }
+    excluded.add(IPv4Address(profile.gateway))
+    used = {
+        IPv4Interface(cidr).ip
+        for _, cidr in db.session.execute(
+            select(VMAllocation.id, VMAllocation.ipv4_cidr).where(
+                VMAllocation.network_profile_id == profile.id,
+                VMAllocation.id != allocation.id,
+                VMAllocation.status != "deleted",
+                VMAllocation.ipv4_cidr.is_not(None),
+            )
+        )
+        if cidr is not None
+    }
+    prefix_length = IPv4Network(profile.cidr).prefixlen
+    for numeric_address in range(int(start), int(end) + 1):
+        candidate = IPv4Address(numeric_address)
+        if candidate not in excluded and candidate not in used:
+            allocation.ipv4_cidr = f"{candidate}/{prefix_length}"
+            return True
+    return False
 
 
 def _poll_job(pve_client, password_pusher, netbox_client, job_id: str, poll_seconds: int) -> None:

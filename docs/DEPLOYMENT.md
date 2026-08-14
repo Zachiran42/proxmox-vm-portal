@@ -44,7 +44,7 @@ sudo docker login ghcr.io
 
 PORTAL_DEPLOY_MODE=release
 PORTAL_IMAGE=ghcr.io/hugofelix088-spec/proxmox-vm-portal@sha256:DIGEST_RELEASE
-PORTAL_RELEASE_TAG=v0.21.1
+PORTAL_RELEASE_TAG=v0.22.0
 PORTAL_RELEASE_REPOSITORY=hugofelix088-spec/proxmox-vm-portal
 PORTAL_RELEASE_TRANSPARENCY=private
 ```
@@ -73,7 +73,7 @@ printf 'header = "Authorization: Bearer %s"\n' "$PORTAL_GITHUB_TOKEN" | \
 curl --config - --proto '=https' --tlsv1.2 --fail --silent --show-error \
   -H "Accept: application/vnd.github.raw+json" \
   -H "X-GitHub-Api-Version: 2022-11-28" \
-  "https://api.github.com/repos/hugofelix088-spec/proxmox-vm-portal/contents/deploy/scripts/bootstrap-debian.sh?ref=v0.21.1" \
+  "https://api.github.com/repos/hugofelix088-spec/proxmox-vm-portal/contents/deploy/scripts/bootstrap-debian.sh?ref=v0.22.0" \
   --output "$bootstrap" && \
 bash -n "$bootstrap" && \
 sudo --preserve-env=PORTAL_GITHUB_TOKEN,PORTAL_GITHUB_USERNAME bash "$bootstrap"
@@ -142,6 +142,12 @@ peut être rejoué sans ressaisir le secret :
 ```bash
 sudo /opt/proxmox-vm-portal/deploy/scripts/check-proxmox.sh
 ```
+
+Les rotations courantes du token Proxmox et du token NetBox peuvent également
+être réalisées dans `Administration > Intégrations d'infrastructure`. Les
+secrets sont chiffrés avec une clé dérivée de `PORTAL_SESSION_SECRET`. Une
+rotation ou perte de ce secret exige donc de ressaisir les tokens depuis
+l'interface. Les scripts restent le chemin de récupération hors application.
 
 ## Keycloak interne optionnel
 

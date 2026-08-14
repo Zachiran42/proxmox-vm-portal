@@ -1,6 +1,6 @@
 "use strict";
 
-const state = { csrfToken: "", user: null, usage: {}, settings: {}, profiles: [], networkProfiles: [], nodes: [], jobs: [], users: [], auditEvents: [], operations: null, pollTimer: null, showArchived: false, detailsSshCommand: "" };
+const state = { csrfToken: "", user: null, usage: {}, settings: {}, profiles: [], networkProfiles: [], nodes: [], jobs: [], users: [], auditEvents: [], operations: null, integrations: {}, pollTimer: null, showArchived: false, detailsSshCommand: "" };
 const elements = Object.fromEntries(
   [
     "login-screen", "login-form", "local-login-fields", "login-error", "login-button",
@@ -45,7 +45,14 @@ const elements = Object.fromEntries(
     "network-profile-slug", "network-profile-cidr", "network-profile-gateway",
     "network-profile-dns", "network-profile-bridge", "network-profile-vlan",
     "network-profile-netbox", "save-network-profile", "network-profile-error",
-    "network-profile-list"
+    "network-profile-pool-start", "network-profile-pool-end", "network-profile-excluded",
+    "network-profile-manual", "network-profile-automatic", "network-profile-list",
+    "proxmox-integration-form", "proxmox-integration-status", "proxmox-api-url",
+    "proxmox-token-id", "proxmox-token-secret", "proxmox-ca-certificate",
+    "proxmox-clear-ca", "save-proxmox-integration", "proxmox-integration-error",
+    "netbox-integration-form", "netbox-integration-status", "netbox-base-url",
+    "netbox-api-token", "netbox-ca-certificate", "netbox-clear-ca",
+    "save-netbox-integration", "netbox-integration-error"
   ].map((id) => [id, document.getElementById(id)])
 );
 
@@ -63,6 +70,7 @@ function errorMessage(payload, fallback) {
     pve_unavailable: "Proxmox est momentanément indisponible.",
     password_pusher_unavailable: "Password Pusher est momentanément indisponible.",
     quota_exceeded: "Cette demande dépasse votre quota disponible.",
+    ip_pool_exhausted: "La plage d’adresses de ce réseau est épuisée.",
     name_conflict: "Une machine active utilise déjà ce nom.",
     self_admin_protection: "Vous ne pouvez pas désactiver ou rétrograder votre propre compte administrateur.",
     last_admin_protection: "Le dernier administrateur actif doit être conservé.",
@@ -152,7 +160,7 @@ function showApplication(session) {
   const requestedView = window.location.hash.slice(1);
   switchView(["images", "admin"].includes(requestedView) ? requestedView : "machines");
   const loaders = [loadProfiles(), loadNetworkProfiles(), loadNodes(), loadJobs()];
-  if (session.user.role === "admin") loaders.push(loadUsers(), loadAudit(), loadOperations());
+  if (session.user.role === "admin") loaders.push(loadUsers(), loadAudit(), loadOperations(), loadIntegrations());
   if (session.user.role === "admin") {
     elements["guest-password-min-length"].value = state.settings.guest_password_min_length || 8;
     elements["static-ipv4-networks"].value = state.settings.static_ipv4_networks || "";
@@ -340,6 +348,76 @@ async function loadProfiles() {
   }
 }
 
+function integrationStatusLabel(integration) {
+  if (!integration?.configured) return "Non configuré";
+  const source = integration.source === "portal" ? "géré par le portail" : "configuration de secours du serveur";
+  return `${integration.enabled ? "Activé" : "Désactivé"} · ${source}${integration.ca_configured ? " · CA interne" : ""}`;
+}
+
+async function loadIntegrations() {
+  const [proxmox, netbox] = await Promise.all([
+    api("/api/admin/integrations/proxmox"),
+    api("/api/admin/integrations/netbox")
+  ]);
+  state.integrations = { proxmox: proxmox.integration, netbox: netbox.integration };
+  elements["proxmox-api-url"].value = proxmox.integration.api_url || "";
+  elements["proxmox-token-id"].value = proxmox.integration.token_id || "";
+  elements["proxmox-token-secret"].value = "";
+  elements["proxmox-ca-certificate"].value = "";
+  elements["proxmox-clear-ca"].checked = false;
+  elements["proxmox-integration-status"].textContent = integrationStatusLabel(proxmox.integration);
+  elements["netbox-base-url"].value = netbox.integration.base_url || "";
+  elements["netbox-api-token"].value = "";
+  elements["netbox-ca-certificate"].value = "";
+  elements["netbox-clear-ca"].checked = false;
+  elements["netbox-integration-status"].textContent = integrationStatusLabel(netbox.integration);
+}
+
+async function saveProxmoxIntegration(event) {
+  event.preventDefault();
+  showError(elements["proxmox-integration-error"], "");
+  setBusy(elements["save-proxmox-integration"], true, "Test en cours…");
+  const payload = {
+    api_url: elements["proxmox-api-url"].value,
+    token_id: elements["proxmox-token-id"].value,
+    clear_ca: elements["proxmox-clear-ca"].checked,
+    enabled: true
+  };
+  if (elements["proxmox-token-secret"].value) payload.token_secret = elements["proxmox-token-secret"].value;
+  if (elements["proxmox-ca-certificate"].value) payload.ca_certificate = elements["proxmox-ca-certificate"].value;
+  try {
+    const response = await api("/api/admin/integrations/proxmox", { method: "PUT", body: JSON.stringify(payload) });
+    showToast(`Cluster Proxmox raccordé · ${response.integration.nodes.length} nœud(s) visible(s).`);
+    await Promise.all([loadIntegrations(), loadNodes(), loadOperations(), loadAudit()]);
+  } catch (error) {
+    showError(elements["proxmox-integration-error"], error.message);
+  } finally {
+    setBusy(elements["save-proxmox-integration"], false, "");
+  }
+}
+
+async function saveNetBoxIntegration(event) {
+  event.preventDefault();
+  showError(elements["netbox-integration-error"], "");
+  setBusy(elements["save-netbox-integration"], true, "Test en cours…");
+  const payload = {
+    base_url: elements["netbox-base-url"].value,
+    clear_ca: elements["netbox-clear-ca"].checked,
+    enabled: true
+  };
+  if (elements["netbox-api-token"].value) payload.api_token = elements["netbox-api-token"].value;
+  if (elements["netbox-ca-certificate"].value) payload.ca_certificate = elements["netbox-ca-certificate"].value;
+  try {
+    await api("/api/admin/integrations/netbox", { method: "PUT", body: JSON.stringify(payload) });
+    showToast("NetBox raccordé et token validé.");
+    await Promise.all([loadIntegrations(), loadNetworkProfiles(), loadAudit()]);
+  } catch (error) {
+    showError(elements["netbox-integration-error"], error.message);
+  } finally {
+    setBusy(elements["save-netbox-integration"], false, "");
+  }
+}
+
 function renderNetworkProfiles() {
   const select = elements["vm-network-profile"];
   const activeProfiles = state.networkProfiles.filter((profile) => profile.enabled !== false);
@@ -360,7 +438,10 @@ function renderNetworkProfiles() {
     row.className = "user-card";
     const copy = document.createElement("div");
     appendText(copy, "strong", profile.label);
-    appendText(copy, "span", `${profile.cidr} · ${profile.bridge}${profile.vlan_tag ? ` · VLAN ${profile.vlan_tag}` : ""}${profile.netbox_managed ? " · NetBox" : ""}`);
+    const allocation = profile.allow_automatic_ip
+      ? ` · Auto ${profile.pool_start}–${profile.pool_end}`
+      : " · IP manuelle";
+    appendText(copy, "span", `${profile.cidr} · ${profile.bridge}${profile.vlan_tag ? ` · VLAN ${profile.vlan_tag}` : ""}${profile.netbox_managed ? " · NetBox" : ""}${allocation}`);
     const button = document.createElement("button");
     button.type = "button";
     button.className = "button button-secondary";
@@ -407,11 +488,18 @@ async function saveNetworkProfile(event) {
         bridge: elements["network-profile-bridge"].value,
         vlan_tag: optionalNumber("network-profile-vlan"),
         netbox_prefix_id: optionalNumber("network-profile-netbox"),
+        pool_start: elements["network-profile-pool-start"].value || null,
+        pool_end: elements["network-profile-pool-end"].value || null,
+        excluded_ips: elements["network-profile-excluded"].value.split(",").map((value) => value.trim()).filter(Boolean),
+        allow_manual_ip: elements["network-profile-manual"].checked,
+        allow_automatic_ip: elements["network-profile-automatic"].checked,
         enabled: true
       })
     });
     elements["network-profile-form"].reset();
     elements["network-profile-bridge"].value = "vmbr0";
+    elements["network-profile-manual"].checked = true;
+    updateNetworkPoolFields();
     showToast("Réseau ajouté.");
     await loadNetworkProfiles();
   } catch (error) {
@@ -419,6 +507,15 @@ async function saveNetworkProfile(event) {
   } finally {
     setBusy(elements["save-network-profile"], false, "");
   }
+}
+
+function updateNetworkPoolFields() {
+  const enabled = elements["network-profile-automatic"].checked;
+  elements["network-profile-pool-start"].required = enabled;
+  elements["network-profile-pool-end"].required = enabled;
+  elements["network-profile-pool-start"].disabled = !enabled;
+  elements["network-profile-pool-end"].disabled = !enabled;
+  elements["network-profile-excluded"].disabled = !enabled;
 }
 
 async function toggleProfile(profile, button) {
@@ -792,8 +889,17 @@ function updateGuestAccessField() {
 }
 
 function updateNetworkFields() {
-  const fixed = elements["vm-network-mode"].value === "static";
   const network = state.networkProfiles.find((profile) => profile.slug === elements["vm-network-profile"].value);
+  const automaticOption = elements["vm-network-mode"].querySelector('option[value="automatic"]');
+  const manualOption = elements["vm-network-mode"].querySelector('option[value="static"]');
+  automaticOption.disabled = !network?.allow_automatic_ip;
+  automaticOption.hidden = automaticOption.disabled;
+  manualOption.disabled = Boolean(network && !network.allow_manual_ip);
+  manualOption.hidden = manualOption.disabled;
+  if (elements["vm-network-mode"].selectedOptions[0]?.disabled) {
+    elements["vm-network-mode"].value = network?.allow_automatic_ip ? "automatic" : "dhcp";
+  }
+  const fixed = elements["vm-network-mode"].value === "static";
   elements["vm-static-network"].hidden = !fixed;
   ["vm-ipv4-cidr", "vm-gateway", "vm-dns-servers"].forEach((id) => {
     elements[id].required = fixed;
@@ -1328,7 +1434,10 @@ elements["close-user-dialog"].addEventListener("click", closeUserDialog);
 elements["cancel-user"].addEventListener("click", closeUserDialog);
 elements["user-form"].addEventListener("submit", saveUser);
 elements["settings-form"].addEventListener("submit", saveSettings);
+elements["proxmox-integration-form"].addEventListener("submit", saveProxmoxIntegration);
+elements["netbox-integration-form"].addEventListener("submit", saveNetBoxIntegration);
 elements["network-profile-form"].addEventListener("submit", saveNetworkProfile);
+elements["network-profile-automatic"].addEventListener("change", updateNetworkPoolFields);
 elements["refresh-users"].addEventListener("click", loadUsers);
 elements["refresh-operations"].addEventListener("click", loadOperations);
 elements["close-incident-dialog"].addEventListener("click", closeIncidentDialog);
@@ -1368,4 +1477,5 @@ elements["incident-dialog"].addEventListener("click", (event) => {
 });
 
 configureAuthenticationChoices();
+updateNetworkPoolFields();
 restoreSession();

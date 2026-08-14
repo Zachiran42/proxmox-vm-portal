@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass
 from ipaddress import IPv4Address, IPv4Interface, IPv4Network
 from typing import Any, cast
+from urllib.parse import urlsplit
 
 _NAME = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 _NODE = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
@@ -43,7 +44,14 @@ _PROFILE_BASE_FIELDS = {"slug", "label", "description", "source_type"}
 _PROFILE_FIELDS = _PROFILE_BASE_FIELDS | {"iso", "template_node", "template_vmid"}
 _NETWORK_PROFILE_FIELDS = {
     "slug", "label", "cidr", "gateway", "dns_servers", "bridge",
-    "vlan_tag", "netbox_prefix_id", "enabled",
+    "vlan_tag", "netbox_prefix_id", "pool_start", "pool_end", "excluded_ips",
+    "allow_manual_ip", "allow_automatic_ip", "enabled",
+}
+_NETBOX_CONFIGURATION_FIELDS = {
+    "base_url", "api_token", "ca_certificate", "clear_ca", "enabled"
+}
+_PROXMOX_CONFIGURATION_FIELDS = {
+    "api_url", "token_id", "token_secret", "ca_certificate", "clear_ca", "enabled"
 }
 
 
@@ -120,11 +128,13 @@ class VMRequest:
         gateway = data.get("gateway")
         dns_servers = data.get("dns_servers", [])
         interface = None
-        if network_mode not in {"dhcp", "static"}:
+        if network_mode not in {"dhcp", "static", "automatic"}:
             errors["network_mode"] = "Mode réseau invalide."
-        elif network_mode == "dhcp":
+        elif network_mode in {"dhcp", "automatic"}:
             if ipv4_cidr is not None or gateway is not None or dns_servers:
-                errors["network_mode"] = "Le mode DHCP n'accepte aucun paramètre fixe."
+                errors["network_mode"] = (
+                    "Ce mode d'attribution n'accepte aucun paramètre fixe."
+                )
         else:
             try:
                 interface = IPv4Interface(ipv4_cidr) if isinstance(ipv4_cidr, str) else None
@@ -218,6 +228,11 @@ class NetworkProfileRequest:
     bridge: str
     vlan_tag: int | None
     netbox_prefix_id: int | None
+    pool_start: str | None
+    pool_end: str | None
+    excluded_ips: list[str]
+    allow_manual_ip: bool
+    allow_automatic_ip: bool
     enabled: bool
 
     @classmethod
@@ -270,6 +285,65 @@ class NetworkProfileRequest:
             type(netbox_prefix_id) is not int or netbox_prefix_id < 1
         ):
             errors["netbox_prefix_id"] = "Identifiant de préfixe NetBox invalide."
+        allow_manual_ip = data.get("allow_manual_ip", True)
+        allow_automatic_ip = data.get("allow_automatic_ip", False)
+        if type(allow_manual_ip) is not bool:
+            errors["allow_manual_ip"] = "Politique d'attribution manuelle invalide."
+        if type(allow_automatic_ip) is not bool:
+            errors["allow_automatic_ip"] = "Politique d'attribution automatique invalide."
+        if allow_manual_ip is False and allow_automatic_ip is False:
+            errors["allow_manual_ip"] = "Autorisez au moins un mode d'attribution fixe."
+
+        pool_start = data.get("pool_start")
+        pool_end = data.get("pool_end")
+        normalized_start = None
+        normalized_end = None
+        if allow_automatic_ip is True:
+            try:
+                start_address = IPv4Address(pool_start)
+                end_address = IPv4Address(pool_end)
+                if (
+                    network is None
+                    or start_address not in network
+                    or end_address not in network
+                    or start_address > end_address
+                    or int(end_address) - int(start_address) > 65535
+                    or start_address
+                    in {network.network_address, network.broadcast_address}
+                    or end_address
+                    in {network.network_address, network.broadcast_address}
+                ):
+                    raise ValueError
+                normalized_start = str(start_address)
+                normalized_end = str(end_address)
+            except (TypeError, ValueError):
+                errors["pool_start"] = (
+                    "Plage automatique utilisable requise dans le réseau."
+                )
+        elif pool_start is not None or pool_end is not None:
+            errors["pool_start"] = (
+                "Activez l'attribution automatique avant de définir une plage."
+            )
+
+        excluded_ips = data.get("excluded_ips", [])
+        normalized_excluded: list[str] = []
+        if not isinstance(excluded_ips, list) or len(excluded_ips) > 128:
+            errors["excluded_ips"] = (
+                "Liste d'exclusions invalide (128 adresses maximum)."
+            )
+        else:
+            try:
+                normalized_excluded = list(
+                    dict.fromkeys(str(IPv4Address(value)) for value in excluded_ips)
+                )
+                if network is None or any(
+                    IPv4Address(value) not in network for value in normalized_excluded
+                ):
+                    raise ValueError
+            except (TypeError, ValueError):
+                errors["excluded_ips"] = (
+                    "Les exclusions doivent appartenir au réseau."
+                )
         enabled = data.get("enabled", True)
         if type(enabled) is not bool:
             errors["enabled"] = "État invalide."
@@ -287,6 +361,126 @@ class NetworkProfileRequest:
             bridge=normalized_bridge,
             vlan_tag=vlan_tag,
             netbox_prefix_id=netbox_prefix_id,
+            pool_start=normalized_start,
+            pool_end=normalized_end,
+            excluded_ips=normalized_excluded,
+            allow_manual_ip=allow_manual_ip,
+            allow_automatic_ip=allow_automatic_ip,
+            enabled=enabled,
+        )
+
+
+def _https_origin(value: Any, field: str) -> tuple[str | None, dict[str, str]]:
+    if not isinstance(value, str) or not value.strip() or len(value.strip()) > 512:
+        return None, {field: "URL HTTPS requise."}
+    normalized = value.strip().rstrip("/")
+    parsed = urlsplit(normalized)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None, {field: "URL HTTPS valide sans identifiants requise."}
+    return normalized, {}
+
+
+@dataclass(frozen=True)
+class NetBoxConfigurationRequest:
+    base_url: str
+    api_token: str | None
+    ca_certificate: str | None
+    clear_ca: bool
+    enabled: bool
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> NetBoxConfigurationRequest:
+        errors: dict[str, str] = {}
+        unknown = set(data) - _NETBOX_CONFIGURATION_FIELDS
+        if unknown:
+            errors["unknown"] = "Champs non autorisés: " + ", ".join(sorted(unknown))
+        base_url, url_errors = _https_origin(data.get("base_url"), "base_url")
+        errors.update(url_errors)
+        api_token = data.get("api_token")
+        if api_token is not None and (
+            not isinstance(api_token, str) or not 1 <= len(api_token) <= 2048
+        ):
+            errors["api_token"] = "Token NetBox invalide."
+        ca_certificate = data.get("ca_certificate")
+        if ca_certificate is not None and (
+            not isinstance(ca_certificate, str) or len(ca_certificate) > 65536
+        ):
+            errors["ca_certificate"] = "Certificat CA invalide."
+        clear_ca = data.get("clear_ca", False)
+        enabled = data.get("enabled", True)
+        if type(clear_ca) is not bool:
+            errors["clear_ca"] = "Option de suppression de CA invalide."
+        if type(enabled) is not bool:
+            errors["enabled"] = "État invalide."
+        if errors:
+            raise ValidationError(errors)
+        return cls(
+            base_url=cast(str, base_url),
+            api_token=api_token,
+            ca_certificate=ca_certificate,
+            clear_ca=clear_ca,
+            enabled=enabled,
+        )
+
+
+@dataclass(frozen=True)
+class ProxmoxConfigurationRequest:
+    api_url: str
+    token_id: str
+    token_secret: str | None
+    ca_certificate: str | None
+    clear_ca: bool
+    enabled: bool
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ProxmoxConfigurationRequest:
+        errors: dict[str, str] = {}
+        unknown = set(data) - _PROXMOX_CONFIGURATION_FIELDS
+        if unknown:
+            errors["unknown"] = "Champs non autorisés: " + ", ".join(sorted(unknown))
+        api_url, url_errors = _https_origin(data.get("api_url"), "api_url")
+        errors.update(url_errors)
+        if api_url is not None and not api_url.endswith("/api2/json"):
+            errors["api_url"] = "L'URL Proxmox doit se terminer par /api2/json."
+        token_id = data.get("token_id")
+        if (
+            not isinstance(token_id, str)
+            or not 3 <= len(token_id) <= 255
+            or "!" not in token_id
+            or token_id.startswith("root@")
+        ):
+            errors["token_id"] = "Identifiant de token non-root requis."
+        token_secret = data.get("token_secret")
+        if token_secret is not None and (
+            not isinstance(token_secret, str) or not 1 <= len(token_secret) <= 2048
+        ):
+            errors["token_secret"] = "Secret du token Proxmox invalide."
+        ca_certificate = data.get("ca_certificate")
+        if ca_certificate is not None and (
+            not isinstance(ca_certificate, str) or len(ca_certificate) > 65536
+        ):
+            errors["ca_certificate"] = "Certificat CA invalide."
+        clear_ca = data.get("clear_ca", False)
+        enabled = data.get("enabled", True)
+        if type(clear_ca) is not bool:
+            errors["clear_ca"] = "Option de suppression de CA invalide."
+        if type(enabled) is not bool:
+            errors["enabled"] = "État invalide."
+        if errors:
+            raise ValidationError(errors)
+        return cls(
+            api_url=cast(str, api_url),
+            token_id=cast(str, token_id),
+            token_secret=token_secret,
+            ca_certificate=ca_certificate,
+            clear_ca=clear_ca,
             enabled=enabled,
         )
 

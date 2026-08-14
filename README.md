@@ -81,12 +81,15 @@ jusqu'au choix d'un nouveau mot de passe. Sa longueur est laissée à la politiq
 de l'administrateur ; l'interface refuse uniquement une valeur vide et une
 réutilisation du mot de passe temporaire.
 
-Le raccordement Proxmox est interactif et valide automatiquement l'URL, la CA,
-le token et la permission `Sys.Audit` avant de redémarrer le portail :
+Le raccordement Proxmox et l'intégration NetBox sont administrables directement
+dans `Administration > Intégrations d'infrastructure`. L'interface teste l'URL,
+la CA et le token avant de chiffrer le secret en base. Les scripts suivants
+restent disponibles pour l'installation initiale et la récupération :
 
 ```bash
 sudo /opt/proxmox-vm-portal/deploy/scripts/configure-proxmox.sh
 sudo /opt/proxmox-vm-portal/deploy/scripts/check-proxmox.sh
+sudo /opt/proxmox-vm-portal/deploy/scripts/configure-netbox.sh
 ```
 
 Avec une CA Proxmox historique, le client conserve la validation de chaîne, du

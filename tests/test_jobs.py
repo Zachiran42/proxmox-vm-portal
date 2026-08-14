@@ -11,7 +11,9 @@ from portal.jobs import process_next_job
 from portal.models import (
     AuditEvent,
     ImageProfile,
+    NetBoxConfiguration,
     ProvisioningJob,
+    ProxmoxConfiguration,
     User,
     VMAllocation,
     db,
@@ -198,7 +200,8 @@ def test_owner_can_list_recent_jobs_with_safe_vm_details(app, pve_client):
                 "ram_mb": 4096,
                 "disk_gb": 40,
                 "guest_username": None,
-                "network_mode": "dhcp",
+                    "network_mode": "dhcp",
+                    "automatic_ip": False,
                 "network_profile": None,
                 "ipv4_cidr": None,
                 "gateway": None,
@@ -806,6 +809,279 @@ def test_rejected_proxmox_clone_releases_netbox_reservation(
         )
     if not release_fails:
         assert netbox_client.reservations == {}
+
+
+def test_admin_configures_proxmox_and_netbox_without_exposing_secrets(
+    app, pve_client, netbox_client
+):
+    client = app.test_client()
+    login(client)
+
+    proxmox = client.put(
+        "/api/admin/integrations/proxmox",
+        json={
+            "api_url": "https://pve.chu.example:8006/api2/json",
+            "token_id": "portal@pve!provisioning",
+            "token_secret": "pve-secret-value",
+            "enabled": True,
+        },
+    )
+    assert proxmox.status_code == 200
+    assert proxmox.get_json()["integration"]["nodes"] == ["pve-a"]
+    assert "pve-secret-value" not in proxmox.get_data(as_text=True)
+
+    netbox = client.put(
+        "/api/admin/integrations/netbox",
+        json={
+            "base_url": "https://netbox.chu.example",
+            "api_token": "netbox-secret-value",
+            "enabled": True,
+        },
+    )
+    assert netbox.status_code == 200
+    assert "netbox-secret-value" not in netbox.get_data(as_text=True)
+
+    with app.app_context():
+        pve_configuration = db.session.get(ProxmoxConfiguration, 1)
+        netbox_configuration = db.session.get(NetBoxConfiguration, 1)
+        assert "pve-secret-value" not in pve_configuration.token_secret_ciphertext
+        assert "netbox-secret-value" not in netbox_configuration.api_token_ciphertext
+
+    assert client.get("/api/admin/integrations/proxmox").get_json()["integration"] == {
+        "api_url": "https://pve.chu.example:8006/api2/json",
+        "ca_configured": False,
+        "configured": True,
+        "enabled": True,
+        "source": "portal",
+        "token_configured": True,
+        "token_id": "portal@pve!provisioning",
+    }
+    assert client.get("/api/admin/integrations/netbox").get_json()["integration"] == {
+        "base_url": "https://netbox.chu.example",
+        "ca_configured": False,
+        "configured": True,
+        "enabled": True,
+        "source": "portal",
+        "token_configured": True,
+    }
+
+
+def test_integration_configuration_validates_secrets_and_ca(app):
+    client = app.test_client()
+    login(client)
+    assert client.put(
+        "/api/admin/integrations/netbox",
+        json={"base_url": "http://netbox.example", "enabled": True},
+    ).status_code == 400
+    invalid_ca = client.put(
+        "/api/admin/integrations/proxmox",
+        json={
+            "api_url": "https://pve.example:8006/api2/json",
+            "token_id": "portal@pve!token",
+            "token_secret": "secret",
+            "ca_certificate": "-----BEGIN PRIVATE KEY-----",
+            "enabled": True,
+        },
+    )
+    assert invalid_ca.status_code == 400
+    assert "privée" in invalid_ca.get_json()["errors"]["ca_certificate"]
+
+
+def test_integration_configuration_handles_missing_and_unavailable_credentials(
+    app, pve_client, netbox_client
+):
+    client = app.test_client()
+    login(client)
+
+    for endpoint in ("netbox", "proxmox"):
+        response = client.put(
+            f"/api/admin/integrations/{endpoint}",
+            data="[]",
+            content_type="application/json",
+        )
+        assert response.status_code == 400
+        assert "body" in response.get_json()["errors"]
+
+    assert client.put(
+        "/api/admin/integrations/netbox",
+        json={"base_url": "https://netbox.example", "enabled": False},
+    ).status_code == 400
+    assert client.put(
+        "/api/admin/integrations/proxmox",
+        json={
+            "api_url": "https://pve.example:8006/api2/json",
+            "token_id": "portal@pve!token",
+            "enabled": False,
+        },
+    ).status_code == 400
+
+    netbox_client.unavailable = True
+    assert client.put(
+        "/api/admin/integrations/netbox",
+        json={
+            "base_url": "https://netbox.example",
+            "api_token": "secret",
+            "enabled": True,
+        },
+    ).status_code == 502
+    netbox_client.unavailable = False
+
+    original_list_nodes = pve_client.list_nodes
+    pve_client.list_nodes = lambda: []
+    assert client.put(
+        "/api/admin/integrations/proxmox",
+        json={
+            "api_url": "https://pve.example:8006/api2/json",
+            "token_id": "portal@pve!token",
+            "token_secret": "secret",
+            "enabled": True,
+        },
+    ).status_code == 422
+    pve_client.list_nodes = lambda: (_ for _ in ()).throw(PVETransportError("offline"))
+    assert client.put(
+        "/api/admin/integrations/proxmox",
+        json={
+            "api_url": "https://pve.example:8006/api2/json",
+            "token_id": "portal@pve!token",
+            "token_secret": "secret",
+            "enabled": True,
+        },
+    ).status_code == 502
+    pve_client.list_nodes = original_list_nodes
+
+
+def test_integration_configuration_retains_and_detects_corrupt_secrets(app):
+    client = app.test_client()
+    login(client)
+    proxmox_payload = {
+        "api_url": "https://pve.example:8006/api2/json",
+        "token_id": "portal@pve!token",
+        "token_secret": "first-secret",
+        "enabled": False,
+    }
+    netbox_payload = {
+        "base_url": "https://netbox.example",
+        "api_token": "first-token",
+        "enabled": False,
+    }
+    assert client.put(
+        "/api/admin/integrations/proxmox", json=proxmox_payload
+    ).status_code == 200
+    assert client.put(
+        "/api/admin/integrations/netbox", json=netbox_payload
+    ).status_code == 200
+
+    proxmox_payload.pop("token_secret")
+    netbox_payload.pop("api_token")
+    assert client.put(
+        "/api/admin/integrations/proxmox", json=proxmox_payload
+    ).status_code == 200
+    assert client.put(
+        "/api/admin/integrations/netbox", json=netbox_payload
+    ).status_code == 200
+
+    with app.app_context():
+        db.session.get(ProxmoxConfiguration, 1).token_secret_ciphertext = "corrupt"
+        db.session.get(NetBoxConfiguration, 1).api_token_ciphertext = "corrupt"
+        db.session.commit()
+    assert client.put(
+        "/api/admin/integrations/proxmox", json=proxmox_payload
+    ).status_code == 409
+    assert client.put(
+        "/api/admin/integrations/netbox", json=netbox_payload
+    ).status_code == 409
+
+
+def test_integration_configuration_rejects_malformed_public_ca(app):
+    client = app.test_client()
+    login(client)
+    assert client.put(
+        "/api/admin/integrations/netbox",
+        json={
+            "base_url": "https://netbox.example",
+            "api_token": "secret",
+            "ca_certificate": "not a certificate",
+            "enabled": False,
+        },
+    ).status_code == 400
+    assert client.put(
+        "/api/admin/integrations/proxmox",
+        json={
+            "api_url": "https://pve.example:8006/api2/json",
+            "token_id": "portal@pve!token",
+            "token_secret": "secret",
+            "ca_certificate": "not a certificate",
+            "enabled": False,
+        },
+    ).status_code == 400
+
+
+def test_automatic_ipam_skips_exclusions_and_netbox_conflicts(
+    app, pve_client, netbox_client
+):
+    client = app.test_client()
+    login(client)
+    pve_client.templates.add(("pve-a", 9000))
+    create_cloud_profile(client)
+    profile = client.post(
+        "/api/admin/network-profiles",
+        json={
+            "slug": "chu-auto",
+            "label": "CHU automatique",
+            "cidr": "10.10.12.0/24",
+            "gateway": "10.10.12.254",
+            "dns_servers": ["10.10.1.10"],
+            "bridge": "vmbr0",
+            "vlan_tag": 12,
+            "netbox_prefix_id": 42,
+            "pool_start": "10.10.12.50",
+            "pool_end": "10.10.12.52",
+            "excluded_ips": ["10.10.12.51"],
+            "allow_manual_ip": False,
+            "allow_automatic_ip": True,
+            "enabled": True,
+        },
+    )
+    assert profile.status_code == 201
+    assert profile.get_json()["profile"]["pool_start"] == "10.10.12.50"
+
+    manual = client.post(
+        "/api/vms",
+        json={
+            **vm_payload("manual-forbidden"),
+            "profile": "debian-cloud",
+            "guest_username": "hugo",
+            "guest_password": "password",
+            "network_profile": "chu-auto",
+            "network_mode": "static",
+            "ipv4_cidr": "10.10.12.50/24",
+            "gateway": "10.10.12.254",
+            "dns_servers": ["10.10.1.10"],
+        },
+    )
+    assert manual.status_code == 400
+
+    netbox_client.reservations[99] = "10.10.12.50/24"
+    created = client.post(
+        "/api/vms",
+        json={
+            **vm_payload("auto-vm"),
+            "profile": "debian-cloud",
+            "guest_username": "hugo",
+            "guest_password": "password",
+            "network_profile": "chu-auto",
+            "network_mode": "automatic",
+        },
+    )
+    assert created.status_code == 202
+    run_step(app, pve_client)
+    with app.app_context():
+        allocation = db.session.get(VMAllocation, created.get_json()["vm_id"])
+        assert allocation.automatic_ip is True
+        assert allocation.ipv4_cidr == "10.10.12.52/24"
+        assert allocation.job.status == "queued"
+    run_step(app, pve_client)
+    assert "10.10.12.52/24" in netbox_client.reservations.values()
 
 
 def test_static_ipv4_rejects_invalid_policy_and_iso_profiles(app, pve_client):

@@ -128,6 +128,10 @@ class NetworkProfile(db.Model):
     __table_args__ = (
         CheckConstraint("vlan_tag IS NULL OR (vlan_tag >= 1 AND vlan_tag <= 4094)", name="ck_network_profiles_vlan_tag"),
         CheckConstraint("netbox_prefix_id IS NULL OR netbox_prefix_id > 0", name="ck_network_profiles_netbox_prefix"),
+        CheckConstraint(
+            "allow_manual_ip = true OR allow_automatic_ip = true",
+            name="ck_network_profiles_ip_assignment",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -140,6 +144,11 @@ class NetworkProfile(db.Model):
     vlan_tag: Mapped[int | None] = mapped_column()
     netbox_prefix_id: Mapped[int | None] = mapped_column()
     netbox_vrf_id: Mapped[int | None] = mapped_column()
+    pool_start: Mapped[str | None] = mapped_column(db.String(15))
+    pool_end: Mapped[str | None] = mapped_column(db.String(15))
+    excluded_ips: Mapped[str] = mapped_column(db.String(1024), nullable=False, default="")
+    allow_manual_ip: Mapped[bool] = mapped_column(nullable=False, default=True)
+    allow_automatic_ip: Mapped[bool] = mapped_column(nullable=False, default=False)
     enabled: Mapped[bool] = mapped_column(nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(
         db.DateTime(timezone=True), nullable=False, default=utcnow
@@ -162,8 +171,54 @@ class NetworkProfile(db.Model):
             "netbox_managed": self.netbox_prefix_id is not None,
             "netbox_prefix_id": self.netbox_prefix_id,
             "netbox_vrf_id": self.netbox_vrf_id,
+            "pool_start": self.pool_start,
+            "pool_end": self.pool_end,
+            "excluded_ips": [
+                value for value in self.excluded_ips.split(",") if value
+            ],
+            "allow_manual_ip": self.allow_manual_ip,
+            "allow_automatic_ip": self.allow_automatic_ip,
             "enabled": self.enabled,
         }
+
+
+class NetBoxConfiguration(db.Model):
+    __tablename__ = "netbox_configuration"
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_netbox_configuration_singleton"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    base_url: Mapped[str] = mapped_column(db.String(512), nullable=False)
+    api_token_ciphertext: Mapped[str] = mapped_column(db.Text, nullable=False)
+    ca_certificate: Mapped[str | None] = mapped_column(db.Text)
+    enabled: Mapped[bool] = mapped_column(nullable=False, default=True)
+    updated_by_id: Mapped[int | None] = mapped_column(
+        db.ForeignKey("users.id", ondelete="SET NULL")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        db.DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow
+    )
+
+
+class ProxmoxConfiguration(db.Model):
+    __tablename__ = "proxmox_configuration"
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_proxmox_configuration_singleton"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    api_url: Mapped[str] = mapped_column(db.String(512), nullable=False)
+    token_id: Mapped[str] = mapped_column(db.String(255), nullable=False)
+    token_secret_ciphertext: Mapped[str] = mapped_column(db.Text, nullable=False)
+    ca_certificate: Mapped[str | None] = mapped_column(db.Text)
+    enabled: Mapped[bool] = mapped_column(nullable=False, default=True)
+    updated_by_id: Mapped[int | None] = mapped_column(
+        db.ForeignKey("users.id", ondelete="SET NULL")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        db.DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow
+    )
 
 
 class VMAllocation(db.Model):
@@ -208,6 +263,7 @@ class VMAllocation(db.Model):
     network_mode: Mapped[str] = mapped_column(
         db.String(8), nullable=False, default="dhcp"
     )
+    automatic_ip: Mapped[bool] = mapped_column(nullable=False, default=False)
     ipv4_cidr: Mapped[str | None] = mapped_column(db.String(18))
     gateway: Mapped[str | None] = mapped_column(db.String(15))
     dns_servers: Mapped[str | None] = mapped_column(db.String(64))
@@ -322,6 +378,7 @@ class ProvisioningJob(db.Model):
                 "disk_gb": self.allocation.disk_gb,
                 "guest_username": self.allocation.guest_username,
                 "network_mode": self.allocation.network_mode,
+                "automatic_ip": self.allocation.automatic_ip,
                 "network_profile": self.allocation.network_profile.slug
                 if self.allocation.network_profile is not None
                 else None,

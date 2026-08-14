@@ -120,7 +120,7 @@ portal_image=$(setting PORTAL_IMAGE)
 case "$deploy_mode" in
     source)
         "$COMPOSE" build api
-        portal_image=${portal_image:-proxmox-vm-portal:0.21.1}
+        portal_image=${portal_image:-proxmox-vm-portal:0.22.0}
         ;;
     release)
         release_tag=$(setting PORTAL_RELEASE_TAG)

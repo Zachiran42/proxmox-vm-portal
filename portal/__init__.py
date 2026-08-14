@@ -7,18 +7,20 @@ import secrets
 import socket
 import time
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from functools import wraps
 from hashlib import sha256
 from hmac import compare_digest
 from hmac import new as hmac_new
 from io import StringIO
-from ipaddress import IPv4Interface, IPv4Network
+from ipaddress import IPv4Address, IPv4Interface, IPv4Network
 from typing import Any
 
 import click
 from authlib.integrations.base_client.errors import OAuthError
 from authlib.integrations.flask_client import OAuth
+from cryptography import x509
 from flask import (
     Flask,
     Response,
@@ -40,6 +42,11 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 from .config import environment_value
 from .guest_secrets import encrypt_guest_password
+from .integration_secrets import (
+    IntegrationSecretError,
+    decrypt_integration_secret,
+    encrypt_integration_secret,
+)
 from .jobs import process_next_job
 from .ldap_auth import (
     LDAPAccessDenied,
@@ -52,9 +59,11 @@ from .models import (
     ACTIVE_VM_STATUSES,
     AuditEvent,
     ImageProfile,
+    NetBoxConfiguration,
     NetworkProfile,
     PortalSetting,
     ProvisioningJob,
+    ProxmoxConfiguration,
     User,
     VMAllocation,
     VMOperation,
@@ -74,7 +83,9 @@ from .pve import PVEClient, PVEHTTPError, PVEProtocolError, PVETransportError
 from .validation import (
     ImageProfileCreateRequest,
     IncidentActionRequest,
+    NetBoxConfigurationRequest,
     NetworkProfileRequest,
+    ProxmoxConfigurationRequest,
     UserCreateRequest,
     UserUpdateRequest,
     ValidationError,
@@ -232,7 +243,7 @@ def create_app(
     _validate_login_throttle_configuration(app)
     _validate_observability_configuration(app)
     password_pusher = _configure_password_pusher(app, password_pusher_client)
-    netbox = _configure_netbox(app, netbox_client)
+    netbox_environment = _configure_netbox(app, netbox_client)
 
     db.init_app(app)
     Migrate(app, db)
@@ -244,10 +255,12 @@ def create_app(
     app.extensions["oidc_client"] = oidc
     app.extensions["ldap_client"] = ldap
     app.extensions["password_pusher_client"] = password_pusher
-    app.extensions["netbox_client"] = netbox
+    app.extensions["netbox_client"] = netbox_environment
+    app.extensions["netbox_client_injected"] = netbox_client is not None
 
-    client = pve_client or PVEClient.from_environment()
-    app.extensions["pve_client"] = client
+    pve_environment = pve_client or PVEClient.from_environment()
+    app.extensions["pve_client"] = pve_environment
+    app.extensions["pve_client_injected"] = pve_client is not None
 
     @app.before_request
     def initialize_request_context():
@@ -434,9 +447,9 @@ def create_app(
         worker_id = f"{socket.gethostname()}:{os.getpid()}"
         while True:
             processed = process_next_job(
-                client,
+                _resolve_pve_client(app),
                 password_pusher,
-                netbox,
+                _resolve_netbox_client(app),
                 worker_id=worker_id,
                 poll_seconds=app.config["PORTAL_JOB_POLL_SECONDS"],
                 lease_seconds=app.config["PORTAL_JOB_LEASE_SECONDS"],
@@ -449,6 +462,7 @@ def create_app(
     @app.cli.command("check-proxmox")
     def check_proxmox_command():
         """Valide TLS, le token et la permission de lecture du cluster."""
+        client = _resolve_pve_client(app)
         try:
             nodes = client.list_nodes()
         except PVEHTTPError as error:
@@ -492,6 +506,7 @@ def create_app(
     @app.cli.command("check-netbox")
     def check_netbox_command():
         """Vérifie TLS et le token API NetBox."""
+        netbox = _resolve_netbox_client(app)
         if netbox is None:
             raise click.ClickException("NetBox n'est pas configuré.")
         try:
@@ -513,7 +528,7 @@ def create_app(
             response.headers["WWW-Authenticate"] = "Bearer"
             return response
         return Response(
-            render_prometheus_metrics(client),
+            render_prometheus_metrics(_resolve_pve_client(app)),
             content_type="text/plain; version=0.0.4; charset=utf-8",
         )
 
@@ -805,7 +820,7 @@ def create_app(
     @app.get("/api/nodes")
     @login_required
     def list_nodes():
-        return jsonify(nodes=client.list_nodes())
+        return jsonify(nodes=_resolve_pve_client(app).list_nodes())
 
     @app.get("/api/nodes/<node>/isos")
     @login_required
@@ -814,7 +829,7 @@ def create_app(
             validate_node_name(node)
         except ValidationError as error:
             return jsonify(errors=error.errors), 400
-        return jsonify(node=node, isos=client.list_isos(node))
+        return jsonify(node=node, isos=_resolve_pve_client(app).list_isos(node))
 
     @app.get("/api/image-profiles")
     @login_required
@@ -851,7 +866,7 @@ def create_app(
             profile_request.source_type == "cloud_init"
             and profile_request.template_node is not None
             and profile_request.template_vmid is not None
-            and not client.is_template_available(
+            and not _resolve_pve_client(app).is_template_available(
                 profile_request.template_node, profile_request.template_vmid
             )
         ):
@@ -925,9 +940,251 @@ def create_app(
                     "dns_servers": profile.dns_servers.split(","),
                     "vlan_tag": profile.vlan_tag,
                     "netbox_managed": profile.netbox_prefix_id is not None,
+                    "allow_manual_ip": profile.allow_manual_ip,
+                    "allow_automatic_ip": profile.allow_automatic_ip,
                 }
                 for profile in profiles
             ]
+        )
+
+    @app.get("/api/admin/integrations/netbox")
+    @login_required
+    @role_required("admin")
+    def get_netbox_configuration():
+        configuration = db.session.get(NetBoxConfiguration, 1)
+        fallback = app.extensions.get("netbox_client")
+        return jsonify(
+            integration={
+                "configured": configuration is not None or fallback is not None,
+                "source": "portal"
+                if configuration is not None
+                else ("environment" if fallback is not None else "none"),
+                "base_url": configuration.base_url
+                if configuration is not None
+                else (fallback.base_url if isinstance(fallback, NetBoxClient) else ""),
+                "token_configured": configuration is not None or fallback is not None,
+                "ca_configured": bool(
+                    configuration.ca_certificate
+                    if configuration is not None
+                    else (
+                        fallback.ca_bundle or fallback.ca_certificate
+                        if isinstance(fallback, NetBoxClient)
+                        else False
+                    )
+                ),
+                "enabled": configuration.enabled
+                if configuration is not None
+                else fallback is not None,
+            }
+        )
+
+    @app.put("/api/admin/integrations/netbox")
+    @login_required
+    @role_required("admin")
+    @csrf_protected
+    def save_netbox_configuration():
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify(errors={"body": "Un objet JSON est requis."}), 400
+        try:
+            integration_request = NetBoxConfigurationRequest.from_dict(payload)
+        except ValidationError as error:
+            return jsonify(errors=error.errors), 400
+        configuration = db.session.get(NetBoxConfiguration, 1)
+        try:
+            api_token = integration_request.api_token or (
+                decrypt_integration_secret(
+                    configuration.api_token_ciphertext,
+                    app.config["PORTAL_SESSION_SECRET"],
+                    purpose="netbox-api-token",
+                )
+                if configuration is not None
+                else None
+            )
+        except IntegrationSecretError:
+            return jsonify(errors={"api_token": "Le token enregistré est illisible; remplacez-le."}), 409
+        if not api_token:
+            return jsonify(errors={"api_token": "Le token NetBox est requis."}), 400
+        try:
+            ca_certificate = _updated_ca_certificate(
+                current=configuration.ca_certificate if configuration else None,
+                supplied=integration_request.ca_certificate,
+                clear=integration_request.clear_ca,
+            )
+        except ValueError as error:
+            return jsonify(errors={"ca_certificate": str(error)}), 400
+        candidate = NetBoxClient(
+            base_url=integration_request.base_url,
+            api_token=api_token,
+            ca_certificate=ca_certificate or "",
+        )
+        connection_client = (
+            app.extensions["netbox_client"]
+            if app.extensions.get("netbox_client_injected")
+            else candidate
+        )
+        if integration_request.enabled:
+            try:
+                connection_client.check_connection()
+            except NetBoxUnavailable as error:
+                return jsonify(errors={"connection": str(error)}), 502
+        encrypted_token = encrypt_integration_secret(
+            api_token,
+            app.config["PORTAL_SESSION_SECRET"],
+            purpose="netbox-api-token",
+        )
+        if configuration is None:
+            configuration = NetBoxConfiguration(id=1)
+            db.session.add(configuration)
+        configuration.base_url = integration_request.base_url
+        configuration.api_token_ciphertext = encrypted_token
+        configuration.ca_certificate = ca_certificate
+        configuration.enabled = integration_request.enabled
+        configuration.updated_by_id = g.current_user.id
+        _add_audit(
+            action="integration.netbox.update",
+            target_type="integration",
+            target_id="netbox",
+            outcome="success",
+            actor_user_id=g.current_user.id,
+            details={
+                "base_url": configuration.base_url,
+                "enabled": configuration.enabled,
+                "ca_configured": bool(configuration.ca_certificate),
+            },
+        )
+        db.session.commit()
+        return jsonify(
+            integration={
+                "configured": True,
+                "source": "portal",
+                "base_url": configuration.base_url,
+                "token_configured": True,
+                "ca_configured": bool(configuration.ca_certificate),
+                "enabled": configuration.enabled,
+            }
+        )
+
+    @app.get("/api/admin/integrations/proxmox")
+    @login_required
+    @role_required("admin")
+    def get_proxmox_configuration():
+        configuration = db.session.get(ProxmoxConfiguration, 1)
+        fallback = app.extensions["pve_client"]
+        return jsonify(
+            integration={
+                "configured": True,
+                "source": "portal" if configuration is not None else "environment",
+                "api_url": configuration.api_url
+                if configuration is not None
+                else getattr(fallback, "api_url", ""),
+                "token_id": configuration.token_id
+                if configuration is not None
+                else getattr(fallback, "token_id", ""),
+                "token_configured": True,
+                "ca_configured": bool(
+                    configuration.ca_certificate
+                    if configuration is not None
+                    else getattr(fallback, "ca_certificate", "")
+                ),
+                "enabled": configuration.enabled
+                if configuration is not None
+                else True,
+            }
+        )
+
+    @app.put("/api/admin/integrations/proxmox")
+    @login_required
+    @role_required("admin")
+    @csrf_protected
+    def save_proxmox_configuration():
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify(errors={"body": "Un objet JSON est requis."}), 400
+        try:
+            integration_request = ProxmoxConfigurationRequest.from_dict(payload)
+        except ValidationError as error:
+            return jsonify(errors=error.errors), 400
+        configuration = db.session.get(ProxmoxConfiguration, 1)
+        try:
+            token_secret = integration_request.token_secret or (
+                decrypt_integration_secret(
+                    configuration.token_secret_ciphertext,
+                    app.config["PORTAL_SESSION_SECRET"],
+                    purpose="proxmox-token-secret",
+                )
+                if configuration is not None
+                else None
+            )
+        except IntegrationSecretError:
+            return jsonify(errors={"token_secret": "Le secret enregistré est illisible; remplacez-le."}), 409
+        if not token_secret:
+            return jsonify(errors={"token_secret": "Le secret du token est requis."}), 400
+        try:
+            ca_certificate = _updated_ca_certificate(
+                current=configuration.ca_certificate if configuration else None,
+                supplied=integration_request.ca_certificate,
+                clear=integration_request.clear_ca,
+            )
+        except ValueError as error:
+            return jsonify(errors={"ca_certificate": str(error)}), 400
+        candidate = PVEClient(
+            api_url=integration_request.api_url,
+            token_id=integration_request.token_id,
+            token_secret=token_secret,
+            ca_certificate=ca_certificate or "",
+        )
+        connection_client = (
+            app.extensions["pve_client"]
+            if app.extensions.get("pve_client_injected")
+            else candidate
+        )
+        if integration_request.enabled:
+            try:
+                nodes = connection_client.list_nodes()
+            except (PVETransportError, PVEHTTPError, PVEProtocolError):
+                return jsonify(errors={"connection": "Connexion Proxmox impossible; vérifiez l'URL, le token et la CA."}), 502
+            if not nodes:
+                return jsonify(errors={"connection": "Aucun nœud Proxmox visible avec ce token."}), 422
+        encrypted_secret = encrypt_integration_secret(
+            token_secret,
+            app.config["PORTAL_SESSION_SECRET"],
+            purpose="proxmox-token-secret",
+        )
+        if configuration is None:
+            configuration = ProxmoxConfiguration(id=1)
+            db.session.add(configuration)
+        configuration.api_url = integration_request.api_url
+        configuration.token_id = integration_request.token_id
+        configuration.token_secret_ciphertext = encrypted_secret
+        configuration.ca_certificate = ca_certificate
+        configuration.enabled = integration_request.enabled
+        configuration.updated_by_id = g.current_user.id
+        _add_audit(
+            action="integration.proxmox.update",
+            target_type="integration",
+            target_id="proxmox",
+            outcome="success",
+            actor_user_id=g.current_user.id,
+            details={
+                "api_url": configuration.api_url,
+                "token_id": configuration.token_id,
+                "enabled": configuration.enabled,
+                "ca_configured": bool(configuration.ca_certificate),
+            },
+        )
+        db.session.commit()
+        return jsonify(
+            integration={
+                "configured": True,
+                "source": "portal",
+                "api_url": configuration.api_url,
+                "token_id": configuration.token_id,
+                "token_configured": True,
+                "ca_configured": bool(configuration.ca_certificate),
+                "enabled": configuration.enabled,
+                "nodes": nodes if integration_request.enabled else [],
+            }
         )
 
     @app.get("/api/admin/network-profiles")
@@ -939,7 +1196,7 @@ def create_app(
         ).all()
         return jsonify(
             profiles=[profile.public_dict() for profile in profiles],
-            netbox_enabled=app.config["PORTAL_NETBOX_ENABLED"],
+            netbox_enabled=_resolve_netbox_client(app) is not None,
         )
 
     @app.post("/api/admin/network-profiles")
@@ -954,6 +1211,7 @@ def create_app(
             profile_request = NetworkProfileRequest.from_dict(payload)
         except ValidationError as error:
             return jsonify(errors=error.errors), 400
+        netbox = _resolve_netbox_client(app)
         if profile_request.netbox_prefix_id is not None and netbox is None:
             return jsonify(errors={"netbox_prefix_id": "Configurez NetBox avant d'activer ce profil."}), 409
         netbox_vrf_id = None
@@ -974,6 +1232,11 @@ def create_app(
             vlan_tag=profile_request.vlan_tag,
             netbox_prefix_id=profile_request.netbox_prefix_id,
             netbox_vrf_id=netbox_vrf_id,
+            pool_start=profile_request.pool_start,
+            pool_end=profile_request.pool_end,
+            excluded_ips=",".join(profile_request.excluded_ips),
+            allow_manual_ip=profile_request.allow_manual_ip,
+            allow_automatic_ip=profile_request.allow_automatic_ip,
             enabled=profile_request.enabled,
         )
         db.session.add(profile)
@@ -1013,6 +1276,7 @@ def create_app(
             profile_request = NetworkProfileRequest.from_dict(merged)
         except ValidationError as error:
             return jsonify(errors=error.errors), 400
+        netbox = _resolve_netbox_client(app)
         if profile_request.netbox_prefix_id is not None and netbox is None:
             return jsonify(errors={"netbox_prefix_id": "Configurez NetBox avant d'activer ce profil."}), 409
         netbox_vrf_id = None
@@ -1031,6 +1295,11 @@ def create_app(
         profile.vlan_tag = profile_request.vlan_tag
         profile.netbox_prefix_id = profile_request.netbox_prefix_id
         profile.netbox_vrf_id = netbox_vrf_id
+        profile.pool_start = profile_request.pool_start
+        profile.pool_end = profile_request.pool_end
+        profile.excluded_ips = ",".join(profile_request.excluded_ips)
+        profile.allow_manual_ip = profile_request.allow_manual_ip
+        profile.allow_automatic_ip = profile_request.allow_automatic_ip
         profile.enabled = profile_request.enabled
         _add_audit(
             action="network_profile.update",
@@ -1334,7 +1603,7 @@ def create_app(
 
         pve_started = time.monotonic()
         try:
-            nodes = client.list_nodes()
+            nodes = _resolve_pve_client(app).list_nodes()
             pve_service = {
                 "status": "healthy" if nodes else "degraded",
                 "online_nodes": len(nodes),
@@ -1621,7 +1890,7 @@ def create_app(
                 ssh_username=allocation.guest_username,
             )
         try:
-            addresses = client.get_vm_ipv4_addresses(
+            addresses = _resolve_pve_client(app).get_vm_ipv4_addresses(
                 allocation.node, allocation.vmid
             )
         except (PVETransportError, PVEHTTPError, PVEProtocolError):
@@ -1695,6 +1964,7 @@ def create_app(
             vm_request = VMRequest.from_dict(payload)
         except ValidationError as error:
             return jsonify(errors=error.errors), 400
+        automatic_ip = vm_request.network_mode == "automatic"
 
         profile = db.session.scalar(
             select(ImageProfile).where(
@@ -1710,7 +1980,7 @@ def create_app(
                 select(NetworkProfile).where(
                     NetworkProfile.slug == vm_request.network_profile,
                     NetworkProfile.enabled.is_(True),
-                )
+                ).with_for_update()
             )
             if network_profile is None:
                 return jsonify(errors={"network_profile": "Réseau indisponible."}), 400
@@ -1774,12 +2044,33 @@ def create_app(
                 ),
                 400,
             )
+        if vm_request.network_mode == "automatic":
+            if network_profile is None or not network_profile.allow_automatic_ip:
+                return jsonify(errors={"network_mode": "Attribution automatique non autorisée sur ce réseau."}), 400
+            selected_ip = _next_available_profile_ip(network_profile)
+            if selected_ip is None:
+                return jsonify(error="ip_pool_exhausted"), 409
+            prefix_length = IPv4Network(network_profile.cidr).prefixlen
+            vm_request = replace(
+                vm_request,
+                network_mode="static",
+                ipv4_cidr=f"{selected_ip}/{prefix_length}",
+                gateway=network_profile.gateway,
+                dns_servers=network_profile.dns_servers.split(","),
+            )
+        elif vm_request.network_mode == "static":
+            if network_profile is not None and not network_profile.allow_manual_ip:
+                return jsonify(errors={"network_mode": "Saisie manuelle non autorisée sur ce réseau."}), 400
         if profile.source_type == "cloud_init" and vm_request.network_mode == "static":
             static_error = _validate_static_ipv4_policy(vm_request, network_profile)
             if static_error is not None:
                 return jsonify(errors=static_error), 400
         allocation, job, reservation_error = _reserve_allocation(
-            g.current_user.id, vm_request, profile, network_profile
+            g.current_user.id,
+            vm_request,
+            profile,
+            network_profile,
+            automatic_ip=automatic_ip,
         )
         if reservation_error:
             error_code, errors = reservation_error
@@ -1870,6 +2161,8 @@ def create_app(
         vm_request: VMRequest,
         profile: ImageProfile,
         network_profile: NetworkProfile | None,
+        *,
+        automatic_ip: bool = False,
     ) -> tuple[
         VMAllocation | None,
         ProvisioningJob | None,
@@ -1919,6 +2212,7 @@ def create_app(
             iso=profile.iso,
             guest_username=vm_request.guest_username,
             network_mode=vm_request.network_mode,
+            automatic_ip=automatic_ip,
             ipv4_cidr=vm_request.ipv4_cidr,
             gateway=vm_request.gateway,
             dns_servers=",".join(vm_request.dns_servers) or None,
@@ -2064,6 +2358,40 @@ def _validate_static_ipv4_policy(
     )
     if conflict is not None:
         return {"ipv4_cidr": "Cette adresse est déjà réservée par le portail."}
+    return None
+
+
+def _next_available_profile_ip(
+    profile: NetworkProfile, *, after: str | None = None, allocation_id: str | None = None
+) -> str | None:
+    if profile.pool_start is None or profile.pool_end is None:
+        return None
+    start = IPv4Address(profile.pool_start)
+    end = IPv4Address(profile.pool_end)
+    if after is not None:
+        start = max(start, IPv4Address(after) + 1)
+    excluded = {
+        IPv4Address(value)
+        for value in profile.excluded_ips.split(",")
+        if value
+    }
+    excluded.add(IPv4Address(profile.gateway))
+    statement = select(VMAllocation.id, VMAllocation.ipv4_cidr).where(
+        VMAllocation.network_profile_id == profile.id,
+        VMAllocation.status != "deleted",
+        VMAllocation.ipv4_cidr.is_not(None),
+    )
+    if allocation_id is not None:
+        statement = statement.where(VMAllocation.id != allocation_id)
+    used = {
+        IPv4Interface(cidr).ip
+        for _, cidr in db.session.execute(statement)
+        if cidr is not None
+    }
+    for numeric_address in range(int(start), int(end) + 1):
+        candidate = IPv4Address(numeric_address)
+        if candidate not in excluded and candidate not in used:
+            return str(candidate)
     return None
 
 
@@ -2280,6 +2608,72 @@ def _configure_netbox(app: Flask, injected_client=None):
         api_token=token,
         ca_bundle=app.config["PORTAL_NETBOX_CA_BUNDLE"],
     )
+
+
+def _resolve_netbox_client(app: Flask):
+    fallback = app.extensions.get("netbox_client")
+    if app.extensions.get("netbox_client_injected"):
+        return fallback
+    configuration = db.session.get(NetBoxConfiguration, 1)
+    if configuration is None:
+        return fallback
+    if not configuration.enabled:
+        return None
+    try:
+        token = decrypt_integration_secret(
+            configuration.api_token_ciphertext,
+            app.config["PORTAL_SESSION_SECRET"],
+            purpose="netbox-api-token",
+        )
+    except IntegrationSecretError as error:
+        raise NetBoxUnavailable("La configuration NetBox est illisible.") from error
+    return NetBoxClient(
+        base_url=configuration.base_url,
+        api_token=token,
+        ca_certificate=configuration.ca_certificate or "",
+    )
+
+
+def _resolve_pve_client(app: Flask) -> PVEClient:
+    fallback = app.extensions["pve_client"]
+    if app.extensions.get("pve_client_injected"):
+        return fallback
+    configuration = db.session.get(ProxmoxConfiguration, 1)
+    if configuration is None or not configuration.enabled:
+        return fallback
+    try:
+        token_secret = decrypt_integration_secret(
+            configuration.token_secret_ciphertext,
+            app.config["PORTAL_SESSION_SECRET"],
+            purpose="proxmox-token-secret",
+        )
+    except IntegrationSecretError as error:
+        raise PVETransportError("La configuration Proxmox est illisible.") from error
+    return PVEClient(
+        api_url=configuration.api_url,
+        token_id=configuration.token_id,
+        token_secret=token_secret,
+        ca_certificate=configuration.ca_certificate or "",
+    )
+
+
+def _updated_ca_certificate(
+    *, current: str | None, supplied: str | None, clear: bool
+) -> str | None:
+    if clear:
+        return None
+    if supplied is None or not supplied.strip():
+        return current
+    normalized = supplied.strip() + "\n"
+    if "PRIVATE KEY" in normalized:
+        raise ValueError("Une CA publique est requise; aucune clé privée n'est acceptée.")
+    try:
+        certificates = x509.load_pem_x509_certificates(normalized.encode("utf-8"))
+    except ValueError as error:
+        raise ValueError("Le certificat ou bundle CA PEM est invalide.") from error
+    if not certificates:
+        raise ValueError("Le bundle CA ne contient aucun certificat.")
+    return normalized
 
 
 def _configure_oidc(app: Flask, injected_client):

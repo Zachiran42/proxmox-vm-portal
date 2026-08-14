@@ -62,6 +62,10 @@ def test_portal_shell_loads_self_hosted_assets_and_strict_csp(app):
     assert 'id="static-ipv4-networks"' in html
     assert 'id="network-profile-form"' in html
     assert 'id="network-profile-netbox"' in html
+    assert 'id="network-profile-pool-start"' in html
+    assert 'id="network-profile-automatic"' in html
+    assert 'id="proxmox-integration-form"' in html
+    assert 'id="netbox-integration-form"' in html
     assert 'id="admin-view"' in html
     assert 'id="user-form"' in html
     assert 'id="first-password-dialog"' in html

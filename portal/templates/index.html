@@ -187,6 +187,40 @@
           <p class="form-error" id="settings-error" role="alert" hidden></p>
         </section>
 
+        <section class="catalogue-section settings-section" aria-labelledby="integrations-title">
+          <div class="section-heading">
+            <div><h2 id="integrations-title">Intégrations d’infrastructure</h2><p>Raccordez le cluster Proxmox et NetBox sans modifier les fichiers du serveur.</p></div>
+          </div>
+          <div class="integration-grid">
+            <form id="proxmox-integration-form" class="integration-card">
+              <div><h3>Cluster Proxmox</h3><p id="proxmox-integration-status" class="field-help">Chargement…</p></div>
+              <label for="proxmox-api-url">URL de l’API</label>
+              <input id="proxmox-api-url" maxlength="512" placeholder="https://pve.infra.chu.fr:8006/api2/json" required>
+              <label for="proxmox-token-id">Identifiant du token non-root</label>
+              <input id="proxmox-token-id" maxlength="255" placeholder="portal@pve!provisioning" required>
+              <label for="proxmox-token-secret">Nouveau secret du token</label>
+              <input id="proxmox-token-secret" type="password" maxlength="2048" autocomplete="new-password" placeholder="Laisser vide pour conserver le secret">
+              <label for="proxmox-ca-certificate">CA interne PEM</label>
+              <textarea id="proxmox-ca-certificate" maxlength="65536" placeholder="-----BEGIN CERTIFICATE-----"></textarea>
+              <label class="active-checkbox"><input id="proxmox-clear-ca" type="checkbox"><span>Supprimer la CA enregistrée</span></label>
+              <button class="button button-primary" type="submit" id="save-proxmox-integration">Tester et enregistrer</button>
+              <p class="form-error" id="proxmox-integration-error" role="alert" hidden></p>
+            </form>
+            <form id="netbox-integration-form" class="integration-card">
+              <div><h3>NetBox IPAM</h3><p id="netbox-integration-status" class="field-help">Chargement…</p></div>
+              <label for="netbox-base-url">URL NetBox</label>
+              <input id="netbox-base-url" maxlength="512" placeholder="https://netbox.infra.chu.fr" required>
+              <label for="netbox-api-token">Nouveau token API en écriture</label>
+              <input id="netbox-api-token" type="password" maxlength="2048" autocomplete="new-password" placeholder="Laisser vide pour conserver le token">
+              <label for="netbox-ca-certificate">CA interne PEM</label>
+              <textarea id="netbox-ca-certificate" maxlength="65536" placeholder="-----BEGIN CERTIFICATE-----"></textarea>
+              <label class="active-checkbox"><input id="netbox-clear-ca" type="checkbox"><span>Supprimer la CA enregistrée</span></label>
+              <button class="button button-primary" type="submit" id="save-netbox-integration">Tester et enregistrer</button>
+              <p class="form-error" id="netbox-integration-error" role="alert" hidden></p>
+            </form>
+          </div>
+        </section>
+
         <section class="catalogue-section settings-section" aria-labelledby="network-profiles-title">
           <div class="section-heading">
             <div><h2 id="network-profiles-title">Réseaux et VLAN</h2><p>Définissez les réseaux que les utilisateurs peuvent sélectionner.</p></div>
@@ -207,6 +241,18 @@
             <div class="form-row">
               <div><label for="network-profile-vlan">Tag VLAN (optionnel)</label><input id="network-profile-vlan" type="number" min="1" max="4094" placeholder="12"></div>
               <div><label for="network-profile-netbox">Préfixe NetBox ID (optionnel)</label><input id="network-profile-netbox" type="number" min="1" placeholder="42"><p class="field-help">Si renseigné, chaque IP fixe est réservée et suivie dans NetBox.</p></div>
+            </div>
+            <div class="form-row">
+              <div><label for="network-profile-pool-start">Début de plage automatique</label><input id="network-profile-pool-start" maxlength="15" placeholder="10.10.12.50"></div>
+              <div><label for="network-profile-pool-end">Fin de plage automatique</label><input id="network-profile-pool-end" maxlength="15" placeholder="10.10.12.200"></div>
+            </div>
+            <div>
+              <label for="network-profile-excluded">Adresses exclues</label>
+              <input id="network-profile-excluded" maxlength="1024" placeholder="10.10.12.100, 10.10.12.101">
+            </div>
+            <div class="form-row">
+              <label class="active-checkbox"><input id="network-profile-manual" type="checkbox" checked><span>Autoriser la saisie manuelle</span></label>
+              <label class="active-checkbox"><input id="network-profile-automatic" type="checkbox"><span>Autoriser l’attribution automatique</span></label>
             </div>
             <button class="button button-primary" type="submit" id="save-network-profile">Ajouter le réseau</button>
           </form>
@@ -286,6 +332,7 @@
           <label for="vm-network-mode">Attribution IPv4</label>
           <select id="vm-network-mode" name="network_mode">
             <option value="dhcp">DHCP automatique</option>
+            <option value="automatic">IP fixe attribuée automatiquement</option>
             <option value="static">Adresse IPv4 fixe</option>
           </select>
           <div id="vm-static-network" hidden>

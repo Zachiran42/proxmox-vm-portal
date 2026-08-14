@@ -484,6 +484,8 @@ def test_initial_migration_and_bootstrap_admin(tmp_path, pve_client):
             "vm_operations",
             "worker_heartbeats",
             "audit_events",
+            "netbox_configuration",
+            "proxmox_configuration",
             "alembic_version",
         } <= set(inspect(db.engine).get_table_names())
 

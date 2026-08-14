@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any
 
 import requests
@@ -23,6 +25,7 @@ class NetBoxClient:
     base_url: str
     api_token: str
     ca_bundle: str = ""
+    ca_certificate: str = ""
     timeout: int = 10
 
     @property
@@ -30,7 +33,17 @@ class NetBoxClient:
         return self.ca_bundle or True
 
     def _request(self, method: str, path: str, *, payload: dict[str, Any] | None = None):
+        temporary_ca: str | None = None
         try:
+            verify = self.verify
+            if self.ca_certificate:
+                with NamedTemporaryFile(
+                    mode="w", encoding="utf-8", delete=False, prefix="netbox-ca-"
+                ) as ca_file:
+                    ca_file.write(self.ca_certificate)
+                    temporary_ca = ca_file.name
+                Path(temporary_ca).chmod(0o600)
+                verify = temporary_ca
             response = requests.request(
                 method,
                 f"{self.base_url.rstrip('/')}/api/{path.lstrip('/')}",
@@ -41,10 +54,13 @@ class NetBoxClient:
                 },
                 json=payload,
                 timeout=self.timeout,
-                verify=self.verify,
+                verify=verify,
             )
         except requests.RequestException as error:
             raise NetBoxUnavailable("La connexion à NetBox a échoué.") from error
+        finally:
+            if temporary_ca is not None:
+                Path(temporary_ca).unlink(missing_ok=True)
         if response.status_code in {400, 409}:
             raise NetBoxConflict("Cette adresse IP est déjà réservée dans NetBox.")
         if response.status_code >= 400:
