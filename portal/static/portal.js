@@ -14,6 +14,8 @@ const elements = Object.fromEntries(
     "template-vmid", "iso-node", "profile-iso", "toast", "machines-view", "images-view",
     "open-vm-dialog", "vm-dialog", "vm-form", "close-vm-dialog", "cancel-vm", "submit-vm",
     "vm-profile", "vm-node", "vm-name", "vm-cpu", "vm-ram", "vm-disk", "vm-error",
+    "network-step", "vm-network-mode", "vm-static-network", "vm-ipv4-cidr",
+    "vm-gateway", "vm-dns-servers",
     "guest-access-step", "vm-guest-username", "vm-guest-password",
     "vm-guest-password-confirmation", "guest-password-help", "quota-preview", "refresh-jobs", "show-archived", "job-list",
     "jobs-empty", "job-count", "quota-vms", "quota-cpu", "quota-ram", "quota-disk",
@@ -38,7 +40,7 @@ const elements = Object.fromEntries(
     "incident-kind", "incident-id", "incident-action", "incident-dialog-title",
     "incident-dialog-intro", "incident-close-confirmation", "incident-confirm-name",
     "incident-confirm-expected", "incident-error", "close-incident-dialog",
-    "cancel-incident", "submit-incident", "settings-form", "guest-password-min-length",
+    "cancel-incident", "submit-incident", "settings-form", "guest-password-min-length", "static-ipv4-networks",
     "save-settings", "settings-error"
   ].map((id) => [id, document.getElementById(id)])
 );
@@ -51,6 +53,8 @@ function errorMessage(payload, fallback) {
     invalid_credentials: "Identifiant ou mot de passe incorrect.",
     too_many_attempts: "Trop de tentatives. Réessayez plus tard.",
     local_auth_disabled: "La connexion locale est désactivée.",
+    ldap_access_denied: "Votre compte n'appartient à aucun groupe LDAP autorisé.",
+    ldap_unavailable: "Le service LDAP/LDAPS est momentanément indisponible.",
     csrf_validation_failed: "La session a expiré. Reconnectez-vous.",
     pve_unavailable: "Proxmox est momentanément indisponible.",
     password_pusher_unavailable: "Password Pusher est momentanément indisponible.",
@@ -58,7 +62,7 @@ function errorMessage(payload, fallback) {
     name_conflict: "Une machine active utilise déjà ce nom.",
     self_admin_protection: "Vous ne pouvez pas désactiver ou rétrograder votre propre compte administrateur.",
     last_admin_protection: "Le dernier administrateur actif doit être conservé.",
-    external_identity_managed: "Le rôle et le mot de passe de cette identité sont gérés dans Keycloak.",
+    external_identity_managed: "Le rôle et le mot de passe de cette identité sont gérés par son fournisseur d’identité.",
     password_change_required: "Vous devez modifier le mot de passe temporaire.",
     password_reuse: "Choisissez un mot de passe différent du mot de passe temporaire.",
     vm_not_ready: "Cette machine n’est pas encore prête.",
@@ -147,6 +151,7 @@ function showApplication(session) {
   if (session.user.role === "admin") loaders.push(loadUsers(), loadAudit(), loadOperations());
   if (session.user.role === "admin") {
     elements["guest-password-min-length"].value = state.settings.guest_password_min_length || 8;
+    elements["static-ipv4-networks"].value = state.settings.static_ipv4_networks || "";
   }
   Promise.all(loaders).catch(() => {});
 }
@@ -429,6 +434,7 @@ function renderJob(job) {
   resources.className = "job-resources";
   appendText(resources, "span", `${job.vm.cpu} vCPU · ${formatRam(job.vm.ram_mb)} · ${job.vm.disk_gb} Gio`);
   appendText(resources, "span", `Image ${job.vm.profile || "retirée"} · ${new Date(job.created_at).toLocaleString("fr-FR")}`);
+  appendText(resources, "span", job.vm.network_mode === "static" ? `Réseau fixe : ${job.vm.ipv4_cidr}` : "Réseau : DHCP");
   if (job.vm.guest_username) appendText(resources, "span", `SSH : ${job.vm.guest_username}`);
   const displayedIp = job.network?.ipv4 || job.network?.last_ipv4 || job.vm.last_ipv4;
   if (displayedIp) {
@@ -576,7 +582,8 @@ async function openVmDetails(job) {
     elements["vm-details-status"].textContent = vmStatusLabels[details.vm.status] || details.vm.status;
     elements["vm-details-placement"].textContent = `${details.vm.node}${details.vm.vmid ? ` · VMID ${details.vm.vmid}` : " · VMID en attente"}`;
     elements["vm-details-profile"].textContent = details.profile_label || details.vm.profile || "Profil retiré";
-    elements["vm-details-resources"].textContent = `${details.vm.cpu} vCPU · ${formatRam(details.vm.ram_mb)} · ${details.vm.disk_gb} Gio`;
+    const requestedNetwork = details.vm.network_mode === "static" ? `IPv4 fixe ${details.vm.ipv4_cidr}` : "DHCP";
+    elements["vm-details-resources"].textContent = `${details.vm.cpu} vCPU · ${formatRam(details.vm.ram_mb)} · ${details.vm.disk_gb} Gio · ${requestedNetwork}`;
     elements["vm-details-ssh-user"].textContent = details.vm.guest_username || "Non automatisé";
     elements["vm-details-ipv4"].textContent = ip || "Non disponible";
     elements["vm-details-observed"].textContent = network.observed_at ? new Date(network.observed_at).toLocaleString("fr-FR") : "Jamais observée";
@@ -682,6 +689,7 @@ function updateGuestAccessField() {
     "Aucun nœud disponible"
   );
   elements["guest-access-step"].hidden = !automatic;
+  elements["network-step"].hidden = !automatic;
   elements["vm-guest-username"].required = automatic;
   elements["vm-guest-password"].required = automatic;
   elements["vm-guest-password-confirmation"].required = automatic;
@@ -693,7 +701,18 @@ function updateGuestAccessField() {
     elements["vm-guest-username"].value = "";
     elements["vm-guest-password"].value = "";
     elements["vm-guest-password-confirmation"].value = "";
+    elements["vm-network-mode"].value = "dhcp";
   }
+  updateNetworkFields();
+}
+
+function updateNetworkFields() {
+  const fixed = elements["vm-network-mode"].value === "static";
+  elements["vm-static-network"].hidden = !fixed;
+  ["vm-ipv4-cidr", "vm-gateway", "vm-dns-servers"].forEach((id) => {
+    elements[id].required = fixed;
+    if (!fixed) elements[id].value = "";
+  });
 }
 
 function updateQuotaPreview() {
@@ -749,6 +768,12 @@ async function submitVm(event) {
     }
     payload.guest_username = form.get("guest_username");
     payload.guest_password = form.get("guest_password");
+    payload.network_mode = form.get("network_mode") || "dhcp";
+    if (payload.network_mode === "static") {
+      payload.ipv4_cidr = form.get("ipv4_cidr");
+      payload.gateway = form.get("gateway");
+      payload.dns_servers = String(form.get("dns_servers")).split(",").map((value) => value.trim()).filter(Boolean);
+    }
   }
   try {
     await api("/api/vms", { method: "POST", body: JSON.stringify(payload) });
@@ -774,11 +799,14 @@ async function saveSettings(event) {
     const minimum = Number(elements["guest-password-min-length"].value);
     const response = await api("/api/admin/settings", {
       method: "PATCH",
-      body: JSON.stringify({ guest_password_min_length: minimum })
+      body: JSON.stringify({
+        guest_password_min_length: minimum,
+        static_ipv4_networks: elements["static-ipv4-networks"].value
+      })
     });
     state.settings = response.settings;
     updateGuestAccessField();
-    showToast("Politique des mots de passe SSH mise à jour.");
+    showToast("Paramètres de provisionnement mis à jour.");
     await loadAudit();
   } catch (error) {
     showError(elements["settings-error"], error.message);
@@ -915,7 +943,7 @@ function renderUser(user) {
   appendText(identity, "div", user.username.slice(0, 1).toUpperCase(), "avatar");
   const copy = document.createElement("div");
   appendText(copy, "strong", user.username);
-  appendText(copy, "span", user.authentication === "oidc" ? "Keycloak / OIDC" : "Compte local");
+  appendText(copy, "span", { oidc: "Keycloak / OIDC", ldap: "LDAP / LDAPS", local: "Compte local" }[user.authentication] || user.authentication);
   identity.append(copy);
   card.append(identity);
   appendText(card, "span", { admin: "Administrateur", operator: "Opérateur", user: "Utilisateur" }[user.role], "role-label");
@@ -936,7 +964,7 @@ function renderUsers() {
   elements["user-list"].replaceChildren(...state.users.map(renderUser));
   elements["user-count"].textContent = `${state.users.length} compte${state.users.length > 1 ? "s" : ""}`;
   elements["stat-users-active"].textContent = String(state.users.filter((user) => user.is_active).length);
-  elements["stat-users-oidc"].textContent = String(state.users.filter((user) => user.authentication === "oidc").length);
+  elements["stat-users-oidc"].textContent = String(state.users.filter((user) => user.authentication !== "local").length);
   elements["stat-users-admin"].textContent = String(state.users.filter((user) => user.is_active && user.role === "admin").length);
 }
 
@@ -1035,7 +1063,7 @@ function setUserDialogMode(user = null) {
   elements["managed-password"].value = "";
   elements["managed-password"].required = !editing;
   elements["password-optional"].hidden = !editing;
-  const externallyManaged = editing && user.authentication === "oidc";
+  const externallyManaged = editing && user.authentication !== "local";
   const self = editing && user.id === state.user.id;
   elements["managed-role"].disabled = externallyManaged || self;
   elements["managed-password"].disabled = externallyManaged;
@@ -1191,6 +1219,7 @@ elements["copy-vm-ssh"].addEventListener("click", async () => {
   }
 });
 elements["vm-profile"].addEventListener("change", updateGuestAccessField);
+elements["vm-network-mode"].addEventListener("change", updateNetworkFields);
 elements["refresh-jobs"].addEventListener("click", loadJobs);
 elements["show-archived"].addEventListener("click", toggleArchivedJobs);
 [elements["vm-cpu"], elements["vm-ram"], elements["vm-disk"]].forEach((input) => input.addEventListener("input", updateQuotaPreview));

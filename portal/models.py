@@ -27,12 +27,13 @@ class User(db.Model):
         CheckConstraint("quota_ram_mb >= 0", name="ck_users_quota_ram"),
         CheckConstraint("quota_disk_gb >= 0", name="ck_users_quota_disk"),
         CheckConstraint(
-            "auth_provider IN ('local', 'oidc')", name="ck_users_auth_provider"
+            "auth_provider IN ('local', 'oidc', 'ldap')",
+            name="ck_users_auth_provider",
         ),
         CheckConstraint(
             "(auth_provider = 'local' AND password_hash IS NOT NULL "
             "AND external_issuer IS NULL AND external_subject IS NULL) OR "
-            "(auth_provider = 'oidc' AND password_hash IS NULL "
+            "(auth_provider IN ('oidc', 'ldap') AND password_hash IS NULL "
             "AND external_issuer IS NOT NULL AND external_subject IS NOT NULL)",
             name="ck_users_auth_identity",
         ),
@@ -129,6 +130,17 @@ class VMAllocation(db.Model):
             "status IN ('queued', 'provisioning', 'accepted', 'running', 'stopped', 'failed', 'deleted')",
             name="ck_vm_allocations_status",
         ),
+        CheckConstraint(
+            "network_mode IN ('dhcp', 'static')",
+            name="ck_vm_allocations_network_mode",
+        ),
+        CheckConstraint(
+            "(network_mode = 'dhcp' AND ipv4_cidr IS NULL AND gateway IS NULL "
+            "AND dns_servers IS NULL) OR "
+            "(network_mode = 'static' AND ipv4_cidr IS NOT NULL "
+            "AND gateway IS NOT NULL AND dns_servers IS NOT NULL)",
+            name="ck_vm_allocations_network_fields",
+        ),
         UniqueConstraint("owner_id", "name", name="uq_vm_allocations_owner_name"),
         Index("ix_vm_allocations_owner_status", "owner_id", "status"),
     )
@@ -147,6 +159,12 @@ class VMAllocation(db.Model):
     iso: Mapped[str | None] = mapped_column(db.String(255))
     vmid: Mapped[int | None] = mapped_column()
     guest_username: Mapped[str | None] = mapped_column(db.String(32))
+    network_mode: Mapped[str] = mapped_column(
+        db.String(8), nullable=False, default="dhcp"
+    )
+    ipv4_cidr: Mapped[str | None] = mapped_column(db.String(18))
+    gateway: Mapped[str | None] = mapped_column(db.String(15))
+    dns_servers: Mapped[str | None] = mapped_column(db.String(64))
     credential_url: Mapped[str | None] = mapped_column(db.String(1024))
     credential_created_at: Mapped[datetime | None] = mapped_column(
         db.DateTime(timezone=True)
@@ -251,6 +269,12 @@ class ProvisioningJob(db.Model):
                 "ram_mb": self.allocation.ram_mb,
                 "disk_gb": self.allocation.disk_gb,
                 "guest_username": self.allocation.guest_username,
+                "network_mode": self.allocation.network_mode,
+                "ipv4_cidr": self.allocation.ipv4_cidr,
+                "gateway": self.allocation.gateway,
+                "dns_servers": self.allocation.dns_servers.split(",")
+                if self.allocation.dns_servers
+                else [],
                 "last_ipv4": self.allocation.last_ipv4,
                 "network_observed_at": self.allocation.network_observed_at.isoformat()
                 if self.allocation.network_observed_at is not None

@@ -142,7 +142,8 @@ Modèle de menaces et preuves de la revue :
 [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) et
 [`docs/SECURITY_REVIEW.md`](docs/SECURITY_REVIEW.md).
 Recette de qualification réelle : [`docs/PREPRODUCTION.md`](docs/PREPRODUCTION.md).
-Configuration Keycloak et LDAP/LDAPS : [`docs/KEYCLOAK.md`](docs/KEYCLOAK.md).
+Authentification LDAP/LDAPS native : [`docs/LDAP.md`](docs/LDAP.md).
+Configuration Keycloak/OIDC et fédération LDAP : [`docs/KEYCLOAK.md`](docs/KEYCLOAK.md).
 Exploitation de la file de travaux : [`docs/JOBS.md`](docs/JOBS.md).
 Préparation sécurisée des templates et remise des accès : [`docs/GUEST_ACCESS.md`](docs/GUEST_ACCESS.md).
 Construction reproductible des templates Debian depuis l'ISO :
@@ -193,6 +194,9 @@ Un profil cloud-init utilise à la place `source_type: "cloud_init"`,
 `guest_username` Linux non-root et un `guest_password` choisi par l'utilisateur.
 Le mot de passe n'est jamais retourné par l'API. Lors de la publication, le portail
 vérifie immédiatement que le VMID désigne bien un template Proxmox disponible.
+Le réseau est en DHCP par défaut. Une demande peut choisir `network_mode: "static"`
+avec `ipv4_cidr`, `gateway` et `dns_servers`, uniquement dans les CIDR autorisés
+par l'administrateur.
 
 La recette `images/packer/debian-13.pkr.hcl` construit automatiquement le
 template Debian 13.6 durci depuis l'ISO officielle vérifiée. Après sa promotion,

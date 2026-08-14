@@ -1,13 +1,13 @@
 # Modèle de menaces
 
-État au 1er août 2026. Cette analyse s'appuie sur OWASP ASVS 5.0 comme catalogue
+État au 14 août 2026. Cette analyse s'appuie sur OWASP ASVS 5.0 comme catalogue
 de contrôles ; elle ne constitue ni une certification ASVS ni un test
 d'intrusion indépendant.
 
 ## Périmètre et actifs
 
 Le périmètre comprend Caddy, l'API et le worker, PostgreSQL, les intégrations
-OIDC/Keycloak, Proxmox et Password Pusher, ainsi que les scripts d'installation,
+OIDC/Keycloak, LDAP/LDAPS, Proxmox et Password Pusher, ainsi que les scripts d'installation,
 de mise à jour et de sauvegarde. Les actifs prioritaires sont le token Proxmox,
 les identités et sessions, les secrets initiaux des invités, les autorisations
 et quotas, le journal d'audit, les sauvegardes et la disponibilité du cluster.
@@ -36,8 +36,10 @@ ou au fournisseur d'identité reste hors de la barrière de sécurité applicati
 |---|---:|---|---:|
 | Vol ou rejeu de session | Élevé | TLS, cookies Secure/HttpOnly/SameSite, CSRF, rotation de session, CSP | Faible |
 | Brute force et bourrage d'identifiants | Élevé | Limitation distribuée par compte+IP et par IP, clés HMAC, réponses 429, audit | Moyen derrière des proxys partagés |
+| Vol d'identifiants LDAP ou interception du bind | Critique | LDAPS ou StartTLS obligatoire, validation de la CA, filtre échappé, compte de lecture, mot de passe utilisateur jamais conservé | Élevé si la PKI ou l'annuaire est compromis |
 | Élévation de rôle ou accès à la VM d'autrui | Critique | rôles côté serveur, contrôle de propriété, quotas transactionnels, audit | Moyen jusqu'au pentest |
 | Injection de paramètres Proxmox | Critique | profils publiés, listes d'autorisation et validation stricte, aucun shell Proxmox | Faible |
+| Collision ou détournement d'IPv4 fixe | Élevé | CIDR administrateur, validation adresse/passerelle/DNS, réservation sérialisée côté portail | Moyen sans IPAM : une attribution externe reste invisible |
 | Compromission du token Proxmox | Critique | secret monté par fichier, refus de root, HTTPS, ACL minimales documentées | Élevé si ACL réelles trop larges |
 | Fuite du mot de passe invité | Élevé | secret choisi chiffré pendant la file, jamais journalisé ni retourné, chiffré supprimé après injection cloud-init | Moyen pendant le provisionnement |
 | Altération ou effacement des audits | Élevé | table PostgreSQL append-only par trigger, API en lecture contrôlée | Moyen pour un administrateur DB |

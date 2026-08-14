@@ -65,9 +65,11 @@ prouve pas que le facteur a été configuré : l'obligation doit être portée p
 le flux Keycloak. Le compte local du portail doit ensuite être désactivé, sauf
 procédure de secours hors ligne documentée et surveillée.
 
-## Fédération LDAP/LDAPS
+## Fédération LDAP/LDAPS par Keycloak
 
-La fédération est configurée dans Keycloak, jamais directement dans le portail.
+Cette variante configure la fédération dans Keycloak. Le portail dispose aussi
+d'une connexion LDAP/LDAPS native, documentée dans [`LDAP.md`](LDAP.md), pour les
+sites qui ne souhaitent pas déployer Keycloak.
 Pour la production :
 
 1. utiliser `ldaps://` avec vérification stricte du nom d'hôte ;

@@ -176,23 +176,27 @@ def test_owner_can_list_recent_jobs_with_safe_vm_details(app, pve_client):
             "id": job_id,
             "vm_id": response.get_json()["jobs"][0]["vm_id"],
             "status": "queued",
-                "stage": "create",
-                "error_code": None,
-                "created_at": response.get_json()["jobs"][0]["created_at"],
-                "updated_at": response.get_json()["jobs"][0]["updated_at"],
-                "archived_at": None,
-                "vm": {
+            "stage": "create",
+            "error_code": None,
+            "created_at": response.get_json()["jobs"][0]["created_at"],
+            "updated_at": response.get_json()["jobs"][0]["updated_at"],
+            "archived_at": None,
+            "vm": {
                 "name": "worker-vm-01",
                 "node": "pve-a",
                 "vmid": None,
                 "profile": "debian-12",
                 "cpu": 2,
                 "ram_mb": 4096,
-                    "disk_gb": 40,
-                    "guest_username": None,
-                    "last_ipv4": None,
-                    "network_observed_at": None,
-                    "status": "queued",
+                "disk_gb": 40,
+                "guest_username": None,
+                "network_mode": "dhcp",
+                "ipv4_cidr": None,
+                "gateway": None,
+                "dns_servers": [],
+                "last_ipv4": None,
+                "network_observed_at": None,
+                "status": "queued",
             },
         }
     ]
@@ -492,6 +496,137 @@ def test_cloud_init_profile_uses_selected_password_and_starts_vm(app, pve_client
         assert "mot de passe choisi !" not in str([event.details for event in events])
 
 
+def test_cloud_init_static_ipv4_is_allowlisted_reserved_and_sent_to_pve(
+    app, pve_client
+):
+    client = app.test_client()
+    login(client)
+    assert client.patch(
+        "/api/admin/settings",
+        json={
+            "guest_password_min_length": 8,
+            "static_ipv4_networks": "192.168.10.0/24\n192.168.10.0/24",
+        },
+    ).get_json()["settings"]["static_ipv4_networks"] == "192.168.10.0/24"
+    pve_client.templates.add(("pve-a", 9000))
+    create_cloud_profile(client)
+    payload = {
+        **vm_payload("fixed-vm"),
+        "profile": "debian-cloud",
+        "guest_username": "hugo",
+        "guest_password": "password",
+        "network_mode": "static",
+        "ipv4_cidr": "192.168.10.50/24",
+        "gateway": "192.168.10.254",
+        "dns_servers": ["192.168.10.10", "192.168.10.11"],
+    }
+
+    created = client.post("/api/vms", json=payload)
+    assert created.status_code == 202
+    run_step(app, pve_client)
+    run_step(app, pve_client)
+    assert pve_client.configurations[0]["network_mode"] == "static"
+    assert pve_client.configurations[0]["ipv4_cidr"] == "192.168.10.50/24"
+    assert pve_client.configurations[0]["gateway"] == "192.168.10.254"
+    assert pve_client.configurations[0]["dns_servers"] == [
+        "192.168.10.10",
+        "192.168.10.11",
+    ]
+
+    duplicate = client.post("/api/vms", json={**payload, "name": "fixed-vm-2"})
+    assert duplicate.status_code == 400
+    assert "déjà réservée" in duplicate.get_json()["errors"]["ipv4_cidr"]
+
+
+def test_static_ipv4_rejects_invalid_policy_and_iso_profiles(app, pve_client):
+    client = app.test_client()
+    login(client)
+    pve_client.templates.add(("pve-a", 9000))
+    create_cloud_profile(client)
+    fixed = {
+        **vm_payload("fixed-invalid"),
+        "profile": "debian-cloud",
+        "guest_username": "hugo",
+        "guest_password": "password",
+        "network_mode": "static",
+        "ipv4_cidr": "192.168.10.50/24",
+        "gateway": "192.168.10.254",
+        "dns_servers": ["192.168.10.10"],
+    }
+    assert client.post("/api/vms", json=fixed).status_code == 400
+    assert client.patch(
+        "/api/admin/settings", json={"static_ipv4_networks": "0.0.0.0/0"}
+    ).status_code == 400
+    assert client.patch(
+        "/api/admin/settings", json={"static_ipv4_networks": "10.0.0.0/24"}
+    ).status_code == 200
+    assert client.post("/api/vms", json=fixed).status_code == 400
+    iso_fixed = {**vm_payload("iso-fixed"), **{
+        key: fixed[key]
+        for key in ("network_mode", "ipv4_cidr", "gateway", "dns_servers")
+    }}
+    assert client.post("/api/vms", json=iso_fixed).status_code == 400
+
+
+@pytest.mark.parametrize(
+    ("updates", "field"),
+    [
+        ({"network_mode": "manual"}, "network_mode"),
+        (
+            {
+                "network_mode": "dhcp",
+                "ipv4_cidr": "10.0.0.5/24",
+            },
+            "network_mode",
+        ),
+        (
+            {
+                "network_mode": "static",
+                "ipv4_cidr": "10.0.0.0/24",
+                "gateway": "10.0.0.1",
+                "dns_servers": ["10.0.0.2"],
+            },
+            "ipv4_cidr",
+        ),
+        (
+            {
+                "network_mode": "static",
+                "ipv4_cidr": "10.0.0.5/24",
+                "gateway": "10.0.1.1",
+                "dns_servers": ["10.0.0.2"],
+            },
+            "gateway",
+        ),
+        (
+            {
+                "network_mode": "static",
+                "ipv4_cidr": "10.0.0.5/24",
+                "gateway": "10.0.0.1",
+                "dns_servers": ["invalid"],
+            },
+            "dns_servers",
+        ),
+    ],
+)
+def test_cloud_init_network_validation_rejects_invalid_values(
+    app, pve_client, updates, field
+):
+    client = app.test_client()
+    login(client)
+    pve_client.templates.add(("pve-a", 9000))
+    create_cloud_profile(client)
+    payload = {
+        **vm_payload("invalid-network"),
+        "profile": "debian-cloud",
+        "guest_username": "hugo",
+        "guest_password": "password",
+        **updates,
+    }
+    response = client.post("/api/vms", json=payload)
+    assert response.status_code == 400
+    assert field in response.get_json()["errors"]
+
+
 def test_owner_receives_vm_ipv4_and_ssh_identity_from_guest_agent(app, pve_client):
     client, _job_id = enqueue_cloud(app, pve_client)
     run_step(app, pve_client)
@@ -694,14 +829,16 @@ def test_admin_controls_guest_password_minimum_without_complexity_rules(
     )
     assert changed.status_code == 200
     assert client.get("/api/admin/settings").get_json()["settings"] == {
-        "guest_password_min_length": 12
+        "guest_password_min_length": 12,
+        "static_ipv4_networks": "",
     }
     changed_again = client.patch(
         "/api/admin/settings", json={"guest_password_min_length": 10}
     )
     assert changed_again.status_code == 200
     assert client.get("/api/me").get_json()["settings"] == {
-        "guest_password_min_length": 10
+        "guest_password_min_length": 10,
+        "static_ipv4_networks": "",
     }
     pve_client.templates.add(("pve-a", 9000))
     create_cloud_profile(client)

@@ -163,19 +163,24 @@
 
         <section class="stats admin-stats" aria-label="Résumé des utilisateurs">
           <article><span class="stat-icon stat-green">●</span><div><strong id="stat-users-active">0</strong><span>Comptes actifs</span></div></article>
-          <article><span class="stat-icon stat-blue">K</span><div><strong id="stat-users-oidc">0</strong><span>Identités Keycloak</span></div></article>
+          <article><span class="stat-icon stat-blue">ID</span><div><strong id="stat-users-oidc">0</strong><span>Identités externes</span></div></article>
           <article><span class="stat-icon stat-amber">A</span><div><strong id="stat-users-admin">0</strong><span>Administrateurs</span></div></article>
         </section>
 
         <section class="catalogue-section settings-section" aria-labelledby="settings-title">
           <div class="section-heading">
-            <div><h2 id="settings-title">Paramètres de provisionnement</h2><p>Politique appliquée aux nouveaux comptes SSH.</p></div>
+            <div><h2 id="settings-title">Paramètres de provisionnement</h2><p>Politiques SSH et réseau appliquées aux nouvelles machines.</p></div>
           </div>
           <form id="settings-form" class="settings-form">
             <div>
               <label for="guest-password-min-length">Longueur minimale du mot de passe SSH</label>
               <input id="guest-password-min-length" name="guest_password_min_length" type="number" min="1" max="256" required>
               <p class="field-help">De 1 à 256 caractères. Aucune règle de majuscule, chiffre ou caractère spécial n’est imposée.</p>
+            </div>
+            <div>
+              <label for="static-ipv4-networks">Réseaux autorisés pour les IP fixes</label>
+              <textarea id="static-ipv4-networks" name="static_ipv4_networks" maxlength="2048" placeholder="192.168.10.0/24&#10;10.20.0.0/16"></textarea>
+              <p class="field-help">Un réseau CIDR par ligne. Une liste vide désactive les IP fixes.</p>
             </div>
             <button class="button button-primary" type="submit" id="save-settings">Enregistrer</button>
           </form>
@@ -243,8 +248,29 @@
         </div>
       </section>
 
-      <section class="wizard-step" id="guest-access-step" aria-labelledby="vm-step-access" hidden>
+      <section class="wizard-step" id="network-step" aria-labelledby="vm-step-network" hidden>
         <div class="step-number">3</div>
+        <div class="step-content">
+          <h3 id="vm-step-network">Configuration réseau</h3>
+          <label for="vm-network-mode">Attribution IPv4</label>
+          <select id="vm-network-mode" name="network_mode">
+            <option value="dhcp">DHCP automatique</option>
+            <option value="static">Adresse IPv4 fixe</option>
+          </select>
+          <div id="vm-static-network" hidden>
+            <div class="form-row">
+              <div><label for="vm-ipv4-cidr">Adresse et préfixe</label><input id="vm-ipv4-cidr" name="ipv4_cidr" maxlength="18" placeholder="192.168.1.50/24"></div>
+              <div><label for="vm-gateway">Passerelle</label><input id="vm-gateway" name="gateway" maxlength="15" placeholder="192.168.1.254"></div>
+            </div>
+            <label for="vm-dns-servers">Serveurs DNS</label>
+            <input id="vm-dns-servers" name="dns_servers" maxlength="64" placeholder="192.168.1.10, 192.168.1.11">
+            <p class="field-help">L'adresse doit appartenir à un réseau autorisé par l'administrateur et rester réservée hors de la plage DHCP.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="wizard-step" id="guest-access-step" aria-labelledby="vm-step-access" hidden>
+        <div class="step-number">4</div>
         <div class="step-content">
           <h3 id="vm-step-access">Compte sudo invité</h3>
           <label for="vm-guest-username">Identifiant Linux non-root</label>

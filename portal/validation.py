@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from ipaddress import IPv4Address, IPv4Interface
 from typing import Any, cast
 
 _NAME = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
@@ -17,8 +18,19 @@ _FIELDS = {
     "disk_gb",
     "guest_username",
     "guest_password",
+    "network_mode",
+    "ipv4_cidr",
+    "gateway",
+    "dns_servers",
 }
-_VM_REQUIRED_FIELDS = _FIELDS - {"guest_username", "guest_password"}
+_VM_REQUIRED_FIELDS = _FIELDS - {
+    "guest_username",
+    "guest_password",
+    "network_mode",
+    "ipv4_cidr",
+    "gateway",
+    "dns_servers",
+}
 _USER_FIELDS = {"username", "password", "role", "quota"}
 _USER_UPDATE_FIELDS = {"password", "role", "is_active", "quota"}
 _VM_ACTION_FIELDS = {"action", "confirm_name"}
@@ -51,6 +63,10 @@ class VMRequest:
     disk_gb: int
     guest_username: str | None
     guest_password: str | None
+    network_mode: str
+    ipv4_cidr: str | None
+    gateway: str | None
+    dns_servers: list[str]
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> VMRequest:
@@ -86,6 +102,60 @@ class VMRequest:
                 "Le mot de passe SSH doit contenir entre 1 et 256 caractères."
             )
 
+        network_mode = data.get("network_mode", "dhcp")
+        ipv4_cidr = data.get("ipv4_cidr")
+        gateway = data.get("gateway")
+        dns_servers = data.get("dns_servers", [])
+        interface = None
+        if network_mode not in {"dhcp", "static"}:
+            errors["network_mode"] = "Mode réseau invalide."
+        elif network_mode == "dhcp":
+            if ipv4_cidr is not None or gateway is not None or dns_servers:
+                errors["network_mode"] = "Le mode DHCP n'accepte aucun paramètre fixe."
+        else:
+            try:
+                interface = IPv4Interface(ipv4_cidr) if isinstance(ipv4_cidr, str) else None
+                if (
+                    interface is None
+                    or interface.ip.is_unspecified
+                    or interface.ip.is_multicast
+                    or interface.ip.is_loopback
+                    or interface.ip.is_link_local
+                    or (
+                        interface.network.prefixlen <= 30
+                        and interface.ip
+                        in {
+                            interface.network.network_address,
+                            interface.network.broadcast_address,
+                        }
+                    )
+                ):
+                    raise ValueError
+            except ValueError:
+                errors["ipv4_cidr"] = "Adresse IPv4 avec préfixe requise, par exemple 192.168.1.50/24."
+            try:
+                gateway_address = IPv4Address(gateway) if isinstance(gateway, str) else None
+                if (
+                    gateway_address is None
+                    or gateway_address.is_unspecified
+                    or gateway_address.is_multicast
+                    or (interface is not None and gateway_address not in interface.network)
+                ):
+                    raise ValueError
+            except ValueError:
+                errors["gateway"] = "Passerelle IPv4 requise dans le même réseau."
+            if (
+                not isinstance(dns_servers, list)
+                or not 1 <= len(dns_servers) <= 3
+                or any(not isinstance(value, str) for value in dns_servers)
+            ):
+                errors["dns_servers"] = "Une à trois adresses DNS sont requises."
+            else:
+                try:
+                    dns_servers = [str(IPv4Address(value)) for value in dns_servers]
+                except ValueError:
+                    errors["dns_servers"] = "Les serveurs DNS doivent être des adresses IPv4."
+
         for field, minimum, maximum, multiple in (
             ("cpu", 1, 32, 1),
             ("ram_mb", 512, 131072, 256),
@@ -101,6 +171,10 @@ class VMRequest:
             **{field: data[field] for field in _VM_REQUIRED_FIELDS},
             guest_username=guest_username,
             guest_password=guest_password,
+            network_mode=network_mode,
+            ipv4_cidr=str(interface) if interface is not None else None,
+            gateway=str(IPv4Address(gateway)) if network_mode == "static" else None,
+            dns_servers=dns_servers if isinstance(dns_servers, list) else [],
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -112,6 +186,10 @@ class VMRequest:
             "ram_mb": self.ram_mb,
             "disk_gb": self.disk_gb,
             "guest_username": self.guest_username,
+            "network_mode": self.network_mode,
+            "ipv4_cidr": self.ipv4_cidr,
+            "gateway": self.gateway,
+            "dns_servers": self.dns_servers,
         }
 
 

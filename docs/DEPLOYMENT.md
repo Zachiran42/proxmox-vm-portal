@@ -44,7 +44,7 @@ sudo docker login ghcr.io
 
 PORTAL_DEPLOY_MODE=release
 PORTAL_IMAGE=ghcr.io/hugofelix088-spec/proxmox-vm-portal@sha256:DIGEST_RELEASE
-PORTAL_RELEASE_TAG=v0.20.3
+PORTAL_RELEASE_TAG=v0.21.0
 PORTAL_RELEASE_REPOSITORY=hugofelix088-spec/proxmox-vm-portal
 PORTAL_RELEASE_TRANSPARENCY=private
 ```
@@ -73,7 +73,7 @@ printf 'header = "Authorization: Bearer %s"\n' "$PORTAL_GITHUB_TOKEN" | \
 curl --config - --proto '=https' --tlsv1.2 --fail --silent --show-error \
   -H "Accept: application/vnd.github.raw+json" \
   -H "X-GitHub-Api-Version: 2022-11-28" \
-  "https://api.github.com/repos/hugofelix088-spec/proxmox-vm-portal/contents/deploy/scripts/bootstrap-debian.sh?ref=v0.20.3" \
+  "https://api.github.com/repos/hugofelix088-spec/proxmox-vm-portal/contents/deploy/scripts/bootstrap-debian.sh?ref=v0.21.0" \
   --output "$bootstrap" && \
 bash -n "$bootstrap" && \
 sudo --preserve-env=PORTAL_GITHUB_TOKEN,PORTAL_GITHUB_USERNAME bash "$bootstrap"
@@ -155,9 +155,10 @@ sudo /opt/proxmox-vm-portal/deploy/scripts/check-proxmox.sh
    processus de récupération documenté.
 
 Le mot de passe administrateur initial de Keycloak se trouve dans le fichier
-secret et doit être changé dès la première connexion. Pour LDAP, suivre
-[`KEYCLOAK.md`](KEYCLOAK.md), préférer LDAPS, importer la CA d'entreprise et
-tester la validation du certificat.
+secret et doit être changé dès la première connexion. Pour une connexion directe
+à LDAP/LDAPS sans Keycloak, exécuter
+`sudo bash deploy/scripts/configure-ldap.sh` et suivre [`LDAP.md`](LDAP.md).
+Pour la fédération via Keycloak, suivre [`KEYCLOAK.md`](KEYCLOAK.md).
 
 ## Password Pusher interne optionnel
 

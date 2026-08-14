@@ -90,9 +90,10 @@ d'administrateur, jamais une URL libre fournie par un utilisateur.
 
 1. Durcir l'API existante et exposer l'inventaire Proxmox en lecture seule.
 2. Ajouter PostgreSQL, migrations, utilisateurs, rôles, quotas et audit. **Livré.**
-3. Ajouter Keycloak/OIDC puis la fédération LDAP/LDAPS. **Intégration OIDC,
-   realm et déploiement Keycloak optionnel, guide LDAP/LDAPS livrés ; activation
-   et recette MFA sur l'environnement réel encore requises.**
+3. Ajouter Keycloak/OIDC puis LDAP/LDAPS. **Livré : OIDC, déploiement Keycloak
+   optionnel, fédération par Keycloak et authentification LDAP/LDAPS native avec
+   provisionnement à la première connexion et rôles par groupes. L'activation
+   réelle et la recette MFA Keycloak restent propres à l'environnement.**
 4. Introduire la file de travaux, le suivi Proxmox et les profils d'images.
    **Livré : profils ISO, clones cloud-init et construction Debian 13 sans
    assistance par Packer/Preseed avec somme ISO épinglée. Le démarrage, l’arrêt,
@@ -124,5 +125,6 @@ d'administrateur, jamais une URL libre fournie par un utilisateur.
 13. Rendre les VM autonomes vis-à-vis de l'interface Proxmox. **Livré : fiche
     détaillée propriétaire, dernière IPv4 observée par QEMU Guest Agent,
     commande SSH prête à copier, historique du cycle de vie et archivage logique
-    des demandes terminales. La réservation DHCP/IPAM reste une intégration
-    propre à l'infrastructure cible.**
+    des demandes terminales, choix DHCP ou IPv4 fixe cloud-init et liste de
+    réseaux fixes autorisés. Une réservation DHCP ou un IPAM externe reste une
+    intégration propre à l'infrastructure cible.**

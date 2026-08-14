@@ -53,6 +53,12 @@ def test_portal_shell_loads_self_hosted_assets_and_strict_csp(app):
     assert 'id="vm-operation-history"' in html
     assert 'id="vm-guest-password"' in html
     assert 'id="guest-password-min-length"' in html
+    assert 'id="network-step"' in html
+    assert 'id="vm-network-mode"' in html
+    assert 'id="vm-ipv4-cidr"' in html
+    assert 'id="vm-gateway"' in html
+    assert 'id="vm-dns-servers"' in html
+    assert 'id="static-ipv4-networks"' in html
     assert 'id="admin-view"' in html
     assert 'id="user-form"' in html
     assert 'id="first-password-dialog"' in html

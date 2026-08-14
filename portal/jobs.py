@@ -212,6 +212,12 @@ def _bootstrap_cloud_init_access(
             disk_gb=allocation.disk_gb,
             username=allocation.guest_username,
             password=password,
+            network_mode=allocation.network_mode,
+            ipv4_cidr=allocation.ipv4_cidr,
+            gateway=allocation.gateway,
+            dns_servers=allocation.dns_servers.split(",")
+            if allocation.dns_servers
+            else [],
         )
     except PVETransportError:
         _retry_guest_access(job, poll_seconds, "pve_guest_config_unavailable")

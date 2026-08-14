@@ -262,9 +262,10 @@ def test_configure_cloud_init_and_start_use_exact_allowlisted_payloads(client):
         "payload": {
             "cores": 2,
             "memory": 4096,
-            "ciuser": "hugo",
-            "cipassword": "generated-secret",
-        },
+                "ciuser": "hugo",
+                "cipassword": "generated-secret",
+                "ipconfig0": "ip=dhcp",
+            },
     }
     assert request.call_args_list[2].args == (
         "/nodes/pve-a/qemu/101/status/start",
@@ -273,6 +274,30 @@ def test_configure_cloud_init_and_start_use_exact_allowlisted_payloads(client):
         "method": "POST",
         "payload": {},
     }
+
+
+def test_configure_cloud_init_supports_static_ipv4_and_dns(client):
+    with patch.object(client, "_request", side_effect=[None, None]) as request:
+        client.configure_cloud_init_vm(
+            node="pve-a",
+            vmid=101,
+            cpu=2,
+            ram_mb=4096,
+            disk_gb=40,
+            username="hugo",
+            password="generated-secret",
+            network_mode="static",
+            ipv4_cidr="192.168.10.50/24",
+            gateway="192.168.10.254",
+            dns_servers=["192.168.10.10", "192.168.10.11"],
+        )
+
+    assert request.call_args_list[1].kwargs["payload"]["ipconfig0"] == (
+        "ip=192.168.10.50/24,gw=192.168.10.254"
+    )
+    assert request.call_args_list[1].kwargs["payload"]["nameserver"] == (
+        "192.168.10.10 192.168.10.11"
+    )
 
 
 def test_lifecycle_methods_use_exact_proxmox_endpoints(client):

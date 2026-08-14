@@ -377,7 +377,8 @@ def test_invalid_stored_guest_password_policy_falls_back_safely(app):
         db.session.add(PortalSetting(key="guest_password_min_length", value="invalid"))
         db.session.commit()
     assert client.get("/api/me").get_json()["settings"] == {
-        "guest_password_min_length": 8
+        "guest_password_min_length": 8,
+        "static_ipv4_networks": "",
     }
 
 

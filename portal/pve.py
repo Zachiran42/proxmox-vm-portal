@@ -268,6 +268,10 @@ class PVEClient:
         disk_gb: int,
         username: str,
         password: str,
+        network_mode: str = "dhcp",
+        ipv4_cidr: str | None = None,
+        gateway: str | None = None,
+        dns_servers: list[str] | None = None,
     ) -> None:
         path = f"/nodes/{quote(node, safe='')}/qemu/{vmid}"
         self._request(
@@ -275,15 +279,24 @@ class PVEClient:
             method="PUT",
             payload={"disk": "scsi0", "size": f"{disk_gb}G"},
         )
+        network_payload = (
+            "ip=dhcp"
+            if network_mode == "dhcp"
+            else f"ip={ipv4_cidr},gw={gateway}"
+        )
+        config_payload: dict[str, Any] = {
+            "cores": cpu,
+            "memory": ram_mb,
+            "ciuser": username,
+            "cipassword": password,
+            "ipconfig0": network_payload,
+        }
+        if dns_servers:
+            config_payload["nameserver"] = " ".join(dns_servers)
         self._request(
             f"{path}/config",
             method="PUT",
-            payload={
-                "cores": cpu,
-                "memory": ram_mb,
-                "ciuser": username,
-                "cipassword": password,
-            },
+            payload=config_payload,
         )
 
     def start_vm(self, node: str, vmid: int) -> str:

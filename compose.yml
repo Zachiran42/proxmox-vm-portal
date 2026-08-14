@@ -7,6 +7,7 @@ x-portal-environment: &portal-environment
   PVE_TOKEN_SECRET_FILE: /run/secrets/pve_token_secret
   PVE_CA_CERT_FILE: /run/secrets/pve_ca_cert
   PORTAL_OIDC_CLIENT_SECRET_FILE: /run/secrets/portal_oidc_client_secret
+  PORTAL_LDAP_BIND_PASSWORD_FILE: /run/secrets/portal_ldap_bind_password
   PORTAL_PWPUSH_API_TOKEN_FILE: /run/secrets/portal_pwpush_api_token
   PORTAL_METRICS_TOKEN_FILE: /run/secrets/portal_metrics_token
   PVE_API_URL: ${PVE_API_URL:?PVE_API_URL est requis}
@@ -19,6 +20,21 @@ x-portal-environment: &portal-environment
   PORTAL_OIDC_ROLE_ADMIN: ${PORTAL_OIDC_ROLE_ADMIN:-portal-admin}
   PORTAL_OIDC_ROLE_OPERATOR: ${PORTAL_OIDC_ROLE_OPERATOR:-portal-operator}
   PORTAL_OIDC_ROLE_USER: ${PORTAL_OIDC_ROLE_USER:-portal-user}
+  PORTAL_LDAP_URI: ${PORTAL_LDAP_URI:-}
+  PORTAL_LDAP_BIND_DN: ${PORTAL_LDAP_BIND_DN:-}
+  PORTAL_LDAP_BASE_DN: ${PORTAL_LDAP_BASE_DN:-}
+  PORTAL_LDAP_USER_FILTER: ${PORTAL_LDAP_USER_FILTER:-(sAMAccountName={username})}
+  PORTAL_LDAP_USERNAME_ATTRIBUTE: ${PORTAL_LDAP_USERNAME_ATTRIBUTE:-sAMAccountName}
+  PORTAL_LDAP_GROUP_ATTRIBUTE: ${PORTAL_LDAP_GROUP_ATTRIBUTE:-memberOf}
+  PORTAL_LDAP_GROUP_ADMIN: ${PORTAL_LDAP_GROUP_ADMIN:-}
+  PORTAL_LDAP_GROUP_OPERATOR: ${PORTAL_LDAP_GROUP_OPERATOR:-}
+  PORTAL_LDAP_GROUP_USER: ${PORTAL_LDAP_GROUP_USER:-}
+  PORTAL_LDAP_CA_FILE: ${PORTAL_LDAP_CA_FILE:-}
+  PORTAL_LDAP_START_TLS: ${PORTAL_LDAP_START_TLS:-true}
+  PORTAL_LDAP_DEFAULT_QUOTA_VMS: ${PORTAL_LDAP_DEFAULT_QUOTA_VMS:-3}
+  PORTAL_LDAP_DEFAULT_QUOTA_CPU: ${PORTAL_LDAP_DEFAULT_QUOTA_CPU:-8}
+  PORTAL_LDAP_DEFAULT_QUOTA_RAM_MB: ${PORTAL_LDAP_DEFAULT_QUOTA_RAM_MB:-16384}
+  PORTAL_LDAP_DEFAULT_QUOTA_DISK_GB: ${PORTAL_LDAP_DEFAULT_QUOTA_DISK_GB:-200}
   PORTAL_PWPUSH_URL: ${PORTAL_PWPUSH_URL:-}
   PORTAL_PWPUSH_EXPIRE_DAYS: ${PORTAL_PWPUSH_EXPIRE_DAYS:-1}
   PORTAL_PWPUSH_EXPIRE_VIEWS: ${PORTAL_PWPUSH_EXPIRE_VIEWS:-1}
@@ -30,7 +46,7 @@ x-portal-environment: &portal-environment
   PORTAL_SESSION_COOKIE_SECURE: "true"
 
 x-portal-service: &portal-service
-  image: ${PORTAL_IMAGE:-proxmox-vm-portal:0.20.3}
+  image: ${PORTAL_IMAGE:-proxmox-vm-portal:0.21.0}
   build:
     context: .
   restart: unless-stopped
@@ -49,6 +65,8 @@ x-portal-service: &portal-service
     - pve_token_secret
     - pve_ca_cert
     - portal_oidc_client_secret
+    - portal_ldap_bind_password
+    - portal_ldap_ca_cert
     - portal_pwpush_api_token
     - portal_metrics_token
   networks: [backend, edge]
@@ -232,6 +250,8 @@ secrets:
   pve_token_secret: {file: "${SECRETS_DIR:-./deploy/secrets}/pve_token_secret"}
   pve_ca_cert: {file: "${SECRETS_DIR:-./deploy/secrets}/pve_ca_cert"}
   portal_oidc_client_secret: {file: "${SECRETS_DIR:-./deploy/secrets}/portal_oidc_client_secret"}
+  portal_ldap_bind_password: {file: "${SECRETS_DIR:-./deploy/secrets}/portal_ldap_bind_password"}
+  portal_ldap_ca_cert: {file: "${SECRETS_DIR:-./deploy/secrets}/portal_ldap_ca_cert"}
   portal_pwpush_api_token: {file: "${SECRETS_DIR:-./deploy/secrets}/portal_pwpush_api_token"}
   portal_metrics_token: {file: "${SECRETS_DIR:-./deploy/secrets}/portal_metrics_token"}
   keycloak_db_password: {file: "${SECRETS_DIR:-./deploy/secrets}/keycloak_db_password"}

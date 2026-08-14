@@ -62,13 +62,28 @@ service non-root.
 
 ## Adresse affichée à l'utilisateur
 
+Lors d'une demande cloud-init, l'utilisateur choisit :
+
+- **DHCP**, valeur par défaut : Proxmox transmet `ip=dhcp` à cloud-init et le
+  portail affiche ensuite l'adresse observée par le QEMU Guest Agent ;
+- **IPv4 fixe** : l'utilisateur fournit l'adresse avec son préfixe, la passerelle
+  et un à trois DNS. Le portail transmet ces valeurs dans `ipconfig0`.
+
+L'administrateur doit d'abord déclarer dans les paramètres du portail les CIDR
+dans lesquels une adresse fixe peut être choisie. Les adresses hors périmètre,
+les passerelles hors sous-réseau et les doublons déjà réservés par le portail
+sont refusés. Ces plages doivent être exclues du pool DHCP. Le portail n'est pas
+un IPAM : il ne peut pas détecter une adresse attribuée manuellement en dehors de
+l'application.
+
 Lorsque la VM est démarrée, le portail interroge le QEMU Guest Agent et mémorise
 la première IPv4 utilisable avec sa date d'observation. La fiche de la VM expose
 ensuite l'adresse, le compte et la commande SSH prête à copier. Si la VM est
 arrêtée ou si Proxmox est momentanément indisponible, la dernière adresse connue
 reste visible et est explicitement présentée comme une observation historique.
 
-Cette mémorisation ne réserve pas l'adresse dans le réseau. Une IPv4 réellement
-stable exige une réservation DHCP fondée sur l'adresse MAC, ou une intégration
-avec l'IPAM/DHCP de l'établissement. Le portail ne doit jamais présenter la
-dernière adresse observée comme une garantie d'attribution permanente.
+En mode DHCP, cette mémorisation ne réserve pas l'adresse dans le réseau. Une
+IPv4 réellement stable exige une réservation DHCP fondée sur l'adresse MAC, ou
+une intégration avec l'IPAM/DHCP de l'établissement. Le portail ne doit jamais
+présenter la dernière adresse observée comme une garantie d'attribution
+permanente.

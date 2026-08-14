@@ -13,6 +13,7 @@ from hashlib import sha256
 from hmac import compare_digest
 from hmac import new as hmac_new
 from io import StringIO
+from ipaddress import IPv4Interface, IPv4Network
 from typing import Any
 
 import click
@@ -40,6 +41,13 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from .config import environment_value
 from .guest_secrets import encrypt_guest_password
 from .jobs import process_next_job
+from .ldap_auth import (
+    LDAPAccessDenied,
+    LDAPClient,
+    LDAPConfigurationError,
+    LDAPIdentity,
+    LDAPUnavailable,
+)
 from .models import (
     ACTIVE_VM_STATUSES,
     AuditEvent,
@@ -85,6 +93,7 @@ def create_app(
     *,
     pve_client=None,
     oidc_client=None,
+    ldap_client=None,
     password_pusher_client=None,
 ) -> Flask:
     """Crée l'application; l'accès PVE peut être injecté pendant les tests."""
@@ -131,6 +140,38 @@ def create_app(
         ),
         PORTAL_OIDC_DEFAULT_QUOTA_DISK_GB=int(
             os.environ.get("PORTAL_OIDC_DEFAULT_QUOTA_DISK_GB", "200")
+        ),
+        PORTAL_LDAP_URI=os.environ.get("PORTAL_LDAP_URI", "").strip(),
+        PORTAL_LDAP_BIND_DN=os.environ.get("PORTAL_LDAP_BIND_DN", "").strip(),
+        PORTAL_LDAP_BIND_PASSWORD=environment_value("PORTAL_LDAP_BIND_PASSWORD"),
+        PORTAL_LDAP_BASE_DN=os.environ.get("PORTAL_LDAP_BASE_DN", "").strip(),
+        PORTAL_LDAP_USER_FILTER=os.environ.get(
+            "PORTAL_LDAP_USER_FILTER", "(sAMAccountName={username})"
+        ).strip(),
+        PORTAL_LDAP_USERNAME_ATTRIBUTE=os.environ.get(
+            "PORTAL_LDAP_USERNAME_ATTRIBUTE", "sAMAccountName"
+        ).strip(),
+        PORTAL_LDAP_GROUP_ATTRIBUTE=os.environ.get(
+            "PORTAL_LDAP_GROUP_ATTRIBUTE", "memberOf"
+        ).strip(),
+        PORTAL_LDAP_GROUP_ADMIN=os.environ.get("PORTAL_LDAP_GROUP_ADMIN", "").strip(),
+        PORTAL_LDAP_GROUP_OPERATOR=os.environ.get(
+            "PORTAL_LDAP_GROUP_OPERATOR", ""
+        ).strip(),
+        PORTAL_LDAP_GROUP_USER=os.environ.get("PORTAL_LDAP_GROUP_USER", "").strip(),
+        PORTAL_LDAP_CA_FILE=os.environ.get("PORTAL_LDAP_CA_FILE", "").strip(),
+        PORTAL_LDAP_START_TLS=_bool_environment("PORTAL_LDAP_START_TLS", True),
+        PORTAL_LDAP_DEFAULT_QUOTA_VMS=int(
+            os.environ.get("PORTAL_LDAP_DEFAULT_QUOTA_VMS", "3")
+        ),
+        PORTAL_LDAP_DEFAULT_QUOTA_CPU=int(
+            os.environ.get("PORTAL_LDAP_DEFAULT_QUOTA_CPU", "8")
+        ),
+        PORTAL_LDAP_DEFAULT_QUOTA_RAM_MB=int(
+            os.environ.get("PORTAL_LDAP_DEFAULT_QUOTA_RAM_MB", "16384")
+        ),
+        PORTAL_LDAP_DEFAULT_QUOTA_DISK_GB=int(
+            os.environ.get("PORTAL_LDAP_DEFAULT_QUOTA_DISK_GB", "200")
         ),
         PORTAL_JOB_POLL_SECONDS=int(os.environ.get("PORTAL_JOB_POLL_SECONDS", "5")),
         PORTAL_JOB_LEASE_SECONDS=int(
@@ -189,7 +230,9 @@ def create_app(
         _initialize_test_database(app)
 
     oidc = _configure_oidc(app, oidc_client)
+    ldap = _configure_ldap(app, ldap_client)
     app.extensions["oidc_client"] = oidc
+    app.extensions["ldap_client"] = ldap
     app.extensions["password_pusher_client"] = password_pusher
 
     client = pve_client or PVEClient.from_environment()
@@ -419,6 +462,17 @@ def create_app(
             + (", ".join(nodes) if nodes else "aucun")
         )
 
+    @app.cli.command("check-ldap")
+    def check_ldap_command():
+        """Vérifie TLS et le bind de service LDAP sans afficher de secret."""
+        if ldap is None:
+            raise click.ClickException("LDAP/LDAPS n'est pas configuré.")
+        try:
+            ldap.check_connection()
+        except LDAPUnavailable as error:
+            raise click.ClickException(str(error)) from error
+        click.echo("Connexion LDAP/LDAPS et bind de service validés.")
+
     @app.get("/healthz")
     def healthz():
         return jsonify(status="ok")
@@ -444,13 +498,15 @@ def create_app(
     def home():
         return render_template(
             "index.html",
-            local_auth_enabled=app.config["PORTAL_LOCAL_AUTH_ENABLED"],
+            local_auth_enabled=(
+                app.config["PORTAL_LOCAL_AUTH_ENABLED"] or ldap is not None
+            ),
             oidc_enabled=oidc is not None,
         )
 
     @app.post("/login")
     def login():
-        if not app.config["PORTAL_LOCAL_AUTH_ENABLED"]:
+        if not app.config["PORTAL_LOCAL_AUTH_ENABLED"] and ldap is None:
             return jsonify(error="local_auth_disabled"), 403
         credentials = request.get_json(silent=True)
         username = credentials.get("username") if isinstance(credentials, dict) else None
@@ -471,24 +527,60 @@ def create_app(
                 app.config["PORTAL_LOGIN_WINDOW_SECONDS"]
             )
             return response, 429
-        user = (
+        stored_user = (
             db.session.scalar(select(User).where(User.username == username))
             if isinstance(username, str)
             else None
         )
         password_hash = (
-            user.password_hash
-            if user is not None and user.auth_provider == "local"
+            stored_user.password_hash
+            if stored_user is not None and stored_user.auth_provider == "local"
             else app.config["PORTAL_DUMMY_PASSWORD_HASH"]
         )
-        password_valid = isinstance(password, str) and check_password_hash(
-            password_hash, password
+        local_valid = (
+            app.config["PORTAL_LOCAL_AUTH_ENABLED"]
+            and stored_user is not None
+            and stored_user.auth_provider == "local"
+            and isinstance(password, str)
+            and check_password_hash(password_hash, password)
         )
+        user = stored_user if local_valid else None
+        ldap_identity = None
         if (
             user is None
-            or user.auth_provider != "local"
+            and ldap is not None
+            and isinstance(username, str)
+            and isinstance(password, str)
+            and not (stored_user is not None and stored_user.auth_provider == "local")
+        ):
+            try:
+                ldap_identity = ldap.authenticate(username, password)
+            except LDAPAccessDenied:
+                _add_audit(
+                    action="authentication.ldap_login",
+                    target_type="user",
+                    target_id=throttle_key,
+                    outcome="denied",
+                    details={"reason": "group_denied"},
+                )
+                db.session.commit()
+                return jsonify(error="ldap_access_denied"), 403
+            except LDAPUnavailable:
+                _add_audit(
+                    action="authentication.ldap_login",
+                    target_type="provider",
+                    target_id="ldap",
+                    outcome="failure",
+                    details={"reason": "provider_unavailable"},
+                )
+                db.session.commit()
+                return jsonify(error="ldap_unavailable"), 503
+            if ldap_identity is not None:
+                user = _find_or_create_ldap_user(app, ldap_identity)
+                user.role = ldap_identity.role
+        if (
+            user is None
             or not user.is_active
-            or not password_valid
         ):
             _add_audit(
                 action="authentication.login",
@@ -505,7 +597,8 @@ def create_app(
             db.session.commit()
             return jsonify(error="invalid_credentials"), 401
 
-        csrf_token = establish_session(user, "local")
+        authentication = "ldap" if ldap_identity is not None else "local"
+        csrf_token = establish_session(user, authentication)
         _add_audit(
             action="authentication.login",
             target_type="login",
@@ -647,7 +740,8 @@ def create_app(
             user=g.current_user.public_dict(),
             usage=_quota_usage(g.current_user.id),
             settings={
-                "guest_password_min_length": _guest_password_min_length()
+                "guest_password_min_length": _guest_password_min_length(),
+                "static_ipv4_networks": _static_ipv4_networks_text(),
             },
             csrf_token=session["csrf_token"],
         )
@@ -808,7 +902,8 @@ def create_app(
     def get_admin_settings():
         return jsonify(
             settings={
-                "guest_password_min_length": _guest_password_min_length()
+                "guest_password_min_length": _guest_password_min_length(),
+                "static_ipv4_networks": _static_ipv4_networks_text(),
             }
         )
 
@@ -818,11 +913,15 @@ def create_app(
     @csrf_protected
     def update_admin_settings():
         payload = request.get_json(silent=True)
-        if not isinstance(payload, dict) or set(payload) != {
-            "guest_password_min_length"
-        }:
+        allowed_settings = {"guest_password_min_length", "static_ipv4_networks"}
+        if not isinstance(payload, dict) or not payload or set(payload) - allowed_settings:
             return jsonify(errors={"body": "Paramètre non autorisé."}), 400
-        minimum = payload.get("guest_password_min_length")
+        minimum = payload.get(
+            "guest_password_min_length", _guest_password_min_length()
+        )
+        networks_text = payload.get(
+            "static_ipv4_networks", _static_ipv4_networks_text()
+        )
         if type(minimum) is not int or not 1 <= minimum <= 256:
             return (
                 jsonify(
@@ -834,6 +933,10 @@ def create_app(
                 ),
                 400,
             )
+        try:
+            normalized_networks = _normalize_static_ipv4_networks(networks_text)
+        except ValueError as error:
+            return jsonify(errors={"static_ipv4_networks": str(error)}), 400
         setting = db.session.get(PortalSetting, "guest_password_min_length")
         previous = _guest_password_min_length()
         if setting is None:
@@ -843,16 +946,33 @@ def create_app(
             db.session.add(setting)
         else:
             setting.value = str(minimum)
+        network_setting = db.session.get(PortalSetting, "static_ipv4_networks")
+        if network_setting is None:
+            network_setting = PortalSetting(
+                key="static_ipv4_networks", value=normalized_networks
+            )
+            db.session.add(network_setting)
+        else:
+            network_setting.value = normalized_networks
         _add_audit(
             action="settings.update",
             target_type="settings",
             target_id="guest_password_min_length",
             outcome="success",
             actor_user_id=g.current_user.id,
-            details={"previous": previous, "current": minimum},
+            details={
+                "previous": previous,
+                "current": minimum,
+                "static_ipv4_networks": normalized_networks.splitlines(),
+            },
         )
         db.session.commit()
-        return jsonify(settings={"guest_password_min_length": minimum})
+        return jsonify(
+            settings={
+                "guest_password_min_length": minimum,
+                "static_ipv4_networks": normalized_networks,
+            }
+        )
 
     @app.post("/api/admin/users")
     @login_required
@@ -1468,7 +1588,9 @@ def create_app(
                 400,
             )
         if profile.source_type == "iso" and (
-            vm_request.guest_username or vm_request.guest_password is not None
+            vm_request.guest_username
+            or vm_request.guest_password is not None
+            or vm_request.network_mode != "dhcp"
         ):
             return (
                 jsonify(
@@ -1478,6 +1600,10 @@ def create_app(
                 ),
                 400,
             )
+        if profile.source_type == "cloud_init" and vm_request.network_mode == "static":
+            static_error = _validate_static_ipv4_policy(vm_request)
+            if static_error is not None:
+                return jsonify(errors=static_error), 400
         allocation, job, reservation_error = _reserve_allocation(
             g.current_user.id, vm_request, profile
         )
@@ -1614,6 +1740,10 @@ def create_app(
             node=vm_request.node,
             iso=profile.iso,
             guest_username=vm_request.guest_username,
+            network_mode=vm_request.network_mode,
+            ipv4_cidr=vm_request.ipv4_cidr,
+            gateway=vm_request.gateway,
+            dns_servers=",".join(vm_request.dns_servers) or None,
             cpu=vm_request.cpu,
             ram_mb=vm_request.ram_mb,
             disk_gb=vm_request.disk_gb,
@@ -1679,6 +1809,67 @@ def _guest_password_min_length() -> int:
     return value if 1 <= value <= 256 else 8
 
 
+def _static_ipv4_networks_text() -> str:
+    setting = db.session.get(PortalSetting, "static_ipv4_networks")
+    return setting.value if setting is not None else ""
+
+
+def _normalize_static_ipv4_networks(value: object) -> str:
+    if not isinstance(value, str) or len(value) > 2048:
+        raise ValueError("Liste CIDR invalide.")
+    networks: list[str] = []
+    for raw_value in value.replace(",", "\n").splitlines():
+        raw_value = raw_value.strip()
+        if not raw_value:
+            continue
+        try:
+            network = IPv4Network(raw_value, strict=True)
+        except ValueError as error:
+            raise ValueError(f"Réseau IPv4 CIDR invalide : {raw_value}.") from error
+        if (
+            network.is_multicast
+            or network.is_unspecified
+            or network.is_loopback
+            or network.is_link_local
+            or network.is_reserved
+            or network.prefixlen < 8
+        ):
+            raise ValueError(f"Réseau IPv4 non autorisé : {raw_value}.")
+        networks.append(str(network))
+    return "\n".join(dict.fromkeys(networks))
+
+
+def _validate_static_ipv4_policy(vm_request: VMRequest) -> dict[str, str] | None:
+    if vm_request.ipv4_cidr is None:
+        return {"ipv4_cidr": "Adresse IPv4 fixe requise."}
+    setting = db.session.scalar(
+        select(PortalSetting)
+        .where(PortalSetting.key == "static_ipv4_networks")
+        .with_for_update()
+    )
+    allowed = [
+        IPv4Network(value)
+        for value in (setting.value if setting is not None else "").splitlines()
+        if value.strip()
+    ]
+    address = IPv4Interface(vm_request.ipv4_cidr).ip
+    if not allowed:
+        return {
+            "ipv4_cidr": "Les adresses fixes ne sont pas activées par l'administrateur."
+        }
+    if not any(address in network for network in allowed):
+        return {"ipv4_cidr": "Cette adresse est hors des réseaux autorisés."}
+    conflict = db.session.scalar(
+        select(VMAllocation.id).where(
+            VMAllocation.ipv4_cidr.like(f"{address}/%"),
+            VMAllocation.status != "deleted",
+        )
+    )
+    if conflict is not None:
+        return {"ipv4_cidr": "Cette adresse est déjà réservée par le portail."}
+    return None
+
+
 def _csv_safe_cell(value: object) -> str:
     text = "" if value is None else str(value)
     if text.startswith(("=", "+", "-", "@", "\t", "\r")):
@@ -1698,7 +1889,11 @@ def _validate_identity_configuration(app: Flask) -> None:
         missing = [key for key in oidc_keys if not app.config.get(key)]
         raise ValueError("Configuration OIDC incomplète: " + ", ".join(missing))
     app.config["PORTAL_OIDC_ENABLED"] = all(configured)
-    if not app.config["PORTAL_LOCAL_AUTH_ENABLED"] and not app.config["PORTAL_OIDC_ENABLED"]:
+    if (
+        not app.config["PORTAL_LOCAL_AUTH_ENABLED"]
+        and not app.config["PORTAL_OIDC_ENABLED"]
+        and not app.config["PORTAL_LDAP_URI"]
+    ):
         raise ValueError("Au moins un mode d'authentification doit être activé.")
     if not app.config["PORTAL_OIDC_ENABLED"]:
         return
@@ -1722,6 +1917,45 @@ def _validate_identity_configuration(app: Flask) -> None:
         value = app.config[key]
         if type(value) is not int or not 0 <= value <= maximum:
             raise ValueError(f"{key} est invalide.")
+
+
+def _configure_ldap(app: Flask, injected_client=None):
+    if injected_client is not None:
+        app.config["PORTAL_LDAP_ENABLED"] = True
+        return injected_client
+    if not app.config["PORTAL_LDAP_URI"]:
+        app.config["PORTAL_LDAP_ENABLED"] = False
+        return None
+    try:
+        client = LDAPClient(
+            uri=app.config["PORTAL_LDAP_URI"],
+            base_dn=app.config["PORTAL_LDAP_BASE_DN"],
+            user_filter=app.config["PORTAL_LDAP_USER_FILTER"],
+            username_attribute=app.config["PORTAL_LDAP_USERNAME_ATTRIBUTE"],
+            group_attribute=app.config["PORTAL_LDAP_GROUP_ATTRIBUTE"],
+            role_groups={
+                "admin": app.config["PORTAL_LDAP_GROUP_ADMIN"],
+                "operator": app.config["PORTAL_LDAP_GROUP_OPERATOR"],
+                "user": app.config["PORTAL_LDAP_GROUP_USER"],
+            },
+            bind_dn=app.config["PORTAL_LDAP_BIND_DN"],
+            bind_password=app.config["PORTAL_LDAP_BIND_PASSWORD"],
+            ca_file=app.config["PORTAL_LDAP_CA_FILE"],
+            start_tls=app.config["PORTAL_LDAP_START_TLS"],
+        )
+    except LDAPConfigurationError as error:
+        raise ValueError(f"Configuration LDAP invalide : {error}") from error
+    for key, maximum in (
+        ("PORTAL_LDAP_DEFAULT_QUOTA_VMS", 100),
+        ("PORTAL_LDAP_DEFAULT_QUOTA_CPU", 512),
+        ("PORTAL_LDAP_DEFAULT_QUOTA_RAM_MB", 1048576),
+        ("PORTAL_LDAP_DEFAULT_QUOTA_DISK_GB", 102400),
+    ):
+        value = app.config[key]
+        if type(value) is not int or not 0 <= value <= maximum:
+            raise ValueError(f"{key} est invalide.")
+    app.config["PORTAL_LDAP_ENABLED"] = True
+    return client
 
 
 def _validate_job_configuration(app: Flask) -> None:
@@ -1875,6 +2109,37 @@ def _find_or_create_oidc_user(app: Flask, identity: OIDCIdentity) -> User:
         quota_cpu=app.config["PORTAL_OIDC_DEFAULT_QUOTA_CPU"],
         quota_ram_mb=app.config["PORTAL_OIDC_DEFAULT_QUOTA_RAM_MB"],
         quota_disk_gb=app.config["PORTAL_OIDC_DEFAULT_QUOTA_DISK_GB"],
+    )
+    db.session.add(user)
+    db.session.flush()
+    return user
+
+
+def _find_or_create_ldap_user(app: Flask, identity: LDAPIdentity) -> User:
+    user = db.session.scalar(
+        select(User).where(
+            User.external_issuer == identity.issuer,
+            User.external_subject == identity.subject,
+        )
+    )
+    if user is not None:
+        return user
+    username = identity.username
+    if db.session.scalar(select(User.id).where(User.username == username)) is not None:
+        username = collision_safe_username(
+            identity.username, identity.issuer, identity.subject
+        )
+    user = User(
+        username=username,
+        password_hash=None,
+        auth_provider="ldap",
+        external_issuer=identity.issuer,
+        external_subject=identity.subject,
+        role=identity.role,
+        quota_vms=app.config["PORTAL_LDAP_DEFAULT_QUOTA_VMS"],
+        quota_cpu=app.config["PORTAL_LDAP_DEFAULT_QUOTA_CPU"],
+        quota_ram_mb=app.config["PORTAL_LDAP_DEFAULT_QUOTA_RAM_MB"],
+        quota_disk_gb=app.config["PORTAL_LDAP_DEFAULT_QUOTA_DISK_GB"],
     )
     db.session.add(user)
     db.session.flush()
