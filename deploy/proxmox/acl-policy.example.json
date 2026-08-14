@@ -11,15 +11,18 @@
       "VM.Config.Disk",
       "VM.Config.Memory",
       "VM.Config.Options",
+      "VM.GuestAgent.Audit",
       "VM.PowerMgmt"
     ],
     "/storage/portal-iso": ["Datastore.Audit"],
-    "/storage/portal-vm": ["Datastore.AllocateSpace", "Datastore.Audit"]
+    "/storage/portal-vm": ["Datastore.AllocateSpace", "Datastore.Audit"],
+    "/sdn/zones/localnetwork/vmbr0": ["SDN.Use"]
   },
   "required_paths": {
     "/pool/portal-vms": ["VM.Allocate", "VM.Audit", "VM.PowerMgmt"],
     "/storage/portal-iso": ["Datastore.Audit"],
-    "/storage/portal-vm": ["Datastore.AllocateSpace"]
+    "/storage/portal-vm": ["Datastore.AllocateSpace"],
+    "/sdn/zones/localnetwork/vmbr0": ["SDN.Use"]
   },
   "forbidden_privileges": [
     "Datastore.AllocateTemplate",

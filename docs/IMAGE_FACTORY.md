@@ -19,8 +19,9 @@ template Debian 13 depuis l'ISO netinst officielle, sans installation manuelle.
 - QEMU Guest Agent et cloud-init sont installés et activés ;
 - le firewall Proxmox est activé sur l'interface du template.
 
-L'ISO reste téléchargée par le nœud Proxmox depuis `cdimage.debian.org`. La
-construction s'arrête si son contenu ne correspond pas à la somme attendue.
+L'ISO `debian-13.6.0-amd64-netinst.iso` doit être présente dans le stockage ISO
+indiqué par `PACKER_PVE_ISO_STORAGE`. La construction s'arrête si son contenu ne
+correspond pas à la somme officielle attendue.
 
 ## Prérequis et ACL
 
@@ -28,8 +29,10 @@ Installer Packer et OpenSSL sur une machine d'administration isolée. Le compte
 de service PVE doit disposer, seulement sur le pool, le nœud et les deux
 stockages de construction, des droits requis par le builder ISO Proxmox :
 allocation/configuration de VM, allocation d'espace, audit du datastore et
-utilisation du pool. Ne réutilisez pas le token du portail et n'accordez jamais
-le rôle Administrateur global.
+utilisation du pool. Avec Proxmox VE 9, la découverte de l'adresse IP par QEMU
+Guest Agent requiert aussi `VM.GuestAgent.Audit` sur les VM de construction. Ne
+réutilisez pas le token du portail et n'accordez jamais le rôle Administrateur
+global.
 
 Le serveur HTTP temporaire de Packer doit être joignable depuis le VLAN de
 construction. Ce VLAN ne doit pas permettre d'atteindre le réseau de gestion
@@ -69,7 +72,7 @@ Le manifeste contient seulement l'identité du template, l'ISO, sa somme et les
 versions de recette. Valider ce fichier puis produire la charge JSON :
 
 ```bash
-python3 -m portal.image_manifest validate images/packer/promotion.json \
+python3 portal/image_manifest.py validate images/packer/promotion.json \
   > /tmp/debian-13-profile.json
 ```
 

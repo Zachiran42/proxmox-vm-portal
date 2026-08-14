@@ -489,6 +489,89 @@ def test_cloud_init_profile_uses_selected_password_and_starts_vm(app, pve_client
         assert "mot de passe choisi !" not in str([event.details for event in events])
 
 
+def test_owner_receives_vm_ipv4_and_ssh_identity_from_guest_agent(app, pve_client):
+    client, _job_id = enqueue_cloud(app, pve_client)
+    run_step(app, pve_client)
+    run_step(app, pve_client)
+    run_step(app, pve_client)
+    with app.app_context():
+        allocation = db.session.scalar(select(VMAllocation))
+        vm_id = allocation.id
+        assert allocation.vmid == 100
+    pve_client.vm_ipv4_addresses[("pve-a", 100)] = ["192.168.1.51"]
+
+    response = client.get(f"/api/vms/{vm_id}/network")
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "status": "ready",
+        "ipv4": "192.168.1.51",
+        "ipv4_addresses": ["192.168.1.51"],
+        "ssh_username": "hugo",
+    }
+
+
+def test_vm_network_is_hidden_from_another_user(app, pve_client):
+    _owner_client, _job_id = enqueue_cloud(app, pve_client)
+    run_step(app, pve_client)
+    run_step(app, pve_client)
+    run_step(app, pve_client)
+    with app.app_context():
+        allocation = db.session.scalar(select(VMAllocation))
+        vm_id = allocation.id
+        other = User(
+            username="other-user",
+            password_hash=generate_password_hash("other-user-strong-password"),
+            role="user",
+        )
+        db.session.add(other)
+        db.session.commit()
+        other_id = other.id
+    other_client = app.test_client()
+    with other_client.session_transaction() as portal_session:
+        portal_session["user_id"] = other_id
+        portal_session["authentication"] = "local"
+
+    assert other_client.get(f"/api/vms/{vm_id}/network").status_code == 404
+
+
+def test_vm_network_reports_lifecycle_and_guest_agent_states(app, pve_client):
+    client, _job_id = enqueue_cloud(app, pve_client)
+    with app.app_context():
+        allocation = db.session.scalar(select(VMAllocation))
+        vm_id = allocation.id
+
+    assert client.get("/api/vms/unknown/network").status_code == 404
+    assert client.get(f"/api/vms/{vm_id}/network").get_json() == {
+        "status": "unavailable",
+        "ipv4_addresses": [],
+    }
+
+    with app.app_context():
+        allocation = db.session.get(VMAllocation, vm_id)
+        allocation.vmid = 100
+        allocation.status = "stopped"
+        db.session.commit()
+    assert client.get(f"/api/vms/{vm_id}/network").get_json() == {
+        "status": "stopped",
+        "ipv4_addresses": [],
+    }
+
+    with app.app_context():
+        allocation = db.session.get(VMAllocation, vm_id)
+        allocation.status = "running"
+        db.session.commit()
+    assert client.get(f"/api/vms/{vm_id}/network").get_json()["status"] == "pending"
+
+    pve_client.get_vm_ipv4_addresses = lambda _node, _vmid: (_ for _ in ()).throw(
+        PVETransportError("offline")
+    )
+    assert client.get(f"/api/vms/{vm_id}/network").get_json() == {
+        "status": "temporarily_unavailable",
+        "ipv4_addresses": [],
+    }
+
+
 def test_operator_can_monitor_without_receiving_guest_password(app, pve_client):
     owner_client, job_id = enqueue_cloud(app, pve_client)
     run_step(app, pve_client)
@@ -535,6 +618,28 @@ def test_cloud_init_requires_non_root_username_and_selected_password(app, pve_cl
     assert missing.status_code == 400
     assert root.status_code == 400
     assert iso_with_user.status_code == 400
+
+
+def test_cloud_init_template_is_restricted_to_its_node(app, pve_client):
+    client = app.test_client()
+    login(client)
+    pve_client.templates.add(("pve-a", 9000))
+    create_cloud_profile(client)
+
+    response = client.post(
+        "/api/vms",
+        json={
+            **vm_payload("wrong-node-cloud-vm"),
+            "node": "pve-b",
+            "profile": "debian-cloud",
+            "guest_username": "hugo",
+            "guest_password": "mot de passe choisi !",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "node" in response.get_json()["errors"]
+    assert pve_client.requests == []
 
 
 def test_admin_controls_guest_password_minimum_without_complexity_rules(

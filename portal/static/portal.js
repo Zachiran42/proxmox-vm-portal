@@ -305,6 +305,7 @@ function renderProfiles() {
     activeProfiles.forEach((profile) => {
       const option = new Option(profile.label, profile.slug);
       option.dataset.cloudInit = String(profile.automatic_guest_access);
+      option.dataset.templateNode = profile.template_node || "";
       elements["vm-profile"].add(option);
     });
   }
@@ -356,6 +357,7 @@ async function loadNodes() {
   fillSelect(elements["template-node"], state.nodes, "Aucun nœud disponible");
   fillSelect(elements["iso-node"], state.nodes, "Aucun nœud disponible");
   fillSelect(elements["vm-node"], state.nodes, "Aucun nœud disponible");
+  updateGuestAccessField();
   if (state.nodes.length) await loadIsos(state.nodes[0]);
 }
 
@@ -423,6 +425,11 @@ function renderJob(job) {
   appendText(resources, "span", `${job.vm.cpu} vCPU · ${formatRam(job.vm.ram_mb)} · ${job.vm.disk_gb} Gio`);
   appendText(resources, "span", `Image ${job.vm.profile || "retirée"} · ${new Date(job.created_at).toLocaleString("fr-FR")}`);
   if (job.vm.guest_username) appendText(resources, "span", `SSH : ${job.vm.guest_username}`);
+  if (job.network?.status === "ready") {
+    appendText(resources, "span", `IPv4 : ${job.network.ipv4}`);
+  } else if (job.vm.status === "running" && job.vm.guest_username) {
+    appendText(resources, "span", "IPv4 : attribution en cours");
+  }
   card.append(resources);
 
   const result = document.createElement("div");
@@ -434,6 +441,20 @@ function renderJob(job) {
     access.target = "_blank";
     access.rel = "noopener noreferrer";
     access.title = `Compte ${job.guest_access.username} · ${job.guest_access.expire_after_views} vue(s) maximum`;
+  }
+  if (job.network?.status === "ready" && job.vm.guest_username) {
+    const command = `ssh ${job.vm.guest_username}@${job.network.ipv4}`;
+    const copy = appendText(result, "button", "Copier SSH", "credential-button");
+    copy.type = "button";
+    copy.title = command;
+    copy.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(command);
+        showToast(`Commande copiée : ${command}`);
+      } catch (_error) {
+        showToast(`Commande SSH : ${command}`);
+      }
+    });
   }
   if (job.operation && activeOperationStatuses.has(job.operation.status)) {
     appendText(result, "span", `${operationLabels[job.operation.action]} en cours`, "job-status status-progress");
@@ -475,7 +496,11 @@ function renderJobs() {
 
 function scheduleJobPoll() {
   window.clearTimeout(state.pollTimer);
-  if (state.jobs.some((job) => !terminalStatuses.has(job.status) || activeOperationStatuses.has(job.operation?.status))) {
+  if (state.jobs.some((job) =>
+    !terminalStatuses.has(job.status)
+    || activeOperationStatuses.has(job.operation?.status)
+    || (job.vm.status === "running" && job.vm.guest_username && job.network?.status !== "ready")
+  )) {
     state.pollTimer = window.setTimeout(loadJobs, 5000);
   }
 }
@@ -485,6 +510,14 @@ async function loadJobs() {
   try {
     const [history, session] = await Promise.all([api("/api/jobs"), api("/api/me")]);
     state.jobs = history.jobs;
+    await Promise.all(state.jobs.map(async (job) => {
+      if (job.vm.status !== "running" || !job.vm.vmid || !job.vm.guest_username) return;
+      try {
+        job.network = await api(`/api/vms/${encodeURIComponent(job.vm_id)}/network`);
+      } catch (_error) {
+        job.network = { status: "temporarily_unavailable", ipv4_addresses: [] };
+      }
+    }));
     state.usage = session.usage;
     state.csrfToken = session.csrf_token;
     renderQuotas();
@@ -550,6 +583,12 @@ async function submitVmAction(event) {
 function updateGuestAccessField() {
   const option = elements["vm-profile"].selectedOptions[0];
   const automatic = option?.dataset.cloudInit === "true";
+  const templateNode = option?.dataset.templateNode || "";
+  fillSelect(
+    elements["vm-node"],
+    automatic && templateNode ? [templateNode] : state.nodes,
+    "Aucun nœud disponible"
+  );
   elements["guest-access-step"].hidden = !automatic;
   elements["vm-guest-username"].required = automatic;
   elements["vm-guest-password"].required = automatic;

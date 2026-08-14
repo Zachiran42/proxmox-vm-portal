@@ -53,7 +53,7 @@ packer fmt -check "$SCRIPT_DIR/debian-13.pkr.hcl"
 packer validate "$SCRIPT_DIR/debian-13.pkr.hcl"
 packer build "$SCRIPT_DIR/debian-13.pkr.hcl"
 
-PYTHONPATH="$ROOT_DIR" python3 -m portal.image_manifest create \
+python3 "$ROOT_DIR/portal/image_manifest.py" create \
     --slug debian-13-cloud \
     --label "Debian 13 Cloud" \
     --description "Debian 13.6 durci, cloud-init, construit depuis l'ISO officielle verifiee" \

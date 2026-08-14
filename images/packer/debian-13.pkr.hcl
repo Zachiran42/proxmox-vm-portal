@@ -123,12 +123,11 @@ source "proxmox-iso" "debian_13" {
   ]
 
   boot_iso {
-    type             = "ide"
-    iso_url          = local.iso_url
-    iso_checksum     = "sha256:${local.iso_sha256}"
-    iso_storage_pool = var.iso_storage_pool
-    iso_download_pve = true
-    unmount          = true
+    type         = "ide"
+    index        = "2"
+    iso_file     = "${var.iso_storage_pool}:iso/debian-13.6.0-amd64-netinst.iso"
+    iso_checksum = "sha256:${local.iso_sha256}"
+    unmount      = true
   }
 
   http_content = {
@@ -168,7 +167,7 @@ build {
 
   provisioner "shell" {
     environment_vars = ["BUILD_USERNAME=${var.build_username}"]
-    execute_command  = "{{ .Vars }} sudo -n bash '{{ .Path }}'"
+    execute_command  = "sudo -n env {{ .Vars }} bash '{{ .Path }}'"
     script           = "${path.root}/scripts/harden.sh"
   }
 }

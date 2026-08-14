@@ -55,4 +55,7 @@ toute action manuelle, vérifiez le VMID et l'état réel de la VM dans Proxmox.
 
 Le token PVE doit être limité aux templates, nœuds et pools nécessaires, avec
 uniquement les droits de clonage, configuration cloud-init, redimensionnement et
-démarrage requis. Testez ces ACL avec un compte de service non-root.
+démarrage requis. `SDN.Use` est requis sur le bridge du template pour le clone,
+et `VM.GuestAgent.Audit` sur les VM permet au portail d'afficher l'adresse IP au
+propriétaire sans lui donner accès à Proxmox. Testez ces ACL avec un compte de
+service non-root.

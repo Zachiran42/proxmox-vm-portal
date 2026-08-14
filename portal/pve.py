@@ -4,6 +4,7 @@ import json
 import ssl
 from dataclasses import dataclass, field
 from email.message import Message
+from ipaddress import ip_address
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -325,6 +326,42 @@ class PVEClient:
             raise PVEProtocolError("L'état de la VM Proxmox est invalide.")
         return result["status"]
 
+    def get_vm_ipv4_addresses(self, node: str, vmid: int) -> list[str]:
+        """Retourne les IPv4 utilisables annoncées par QEMU Guest Agent."""
+        response = self._request(
+            f"/nodes/{quote(node, safe='')}/qemu/{vmid}/agent/network-get-interfaces"
+        )
+        interfaces = response.get("result") if isinstance(response, dict) else response
+        if not isinstance(interfaces, list):
+            raise PVEProtocolError("Les interfaces de la VM Proxmox sont invalides.")
+
+        addresses: set[str] = set()
+        for interface in interfaces:
+            if not isinstance(interface, dict):
+                continue
+            candidates = interface.get("ip-addresses", [])
+            if not isinstance(candidates, list):
+                continue
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                raw = candidate.get("ip-address")
+                if candidate.get("ip-address-type") != "ipv4" or not isinstance(raw, str):
+                    continue
+                try:
+                    parsed = ip_address(raw)
+                except ValueError:
+                    continue
+                if (
+                    parsed.version == 4
+                    and not parsed.is_loopback
+                    and not parsed.is_link_local
+                    and not parsed.is_multicast
+                    and not parsed.is_unspecified
+                ):
+                    addresses.add(str(parsed))
+        return sorted(addresses, key=lambda value: tuple(int(part) for part in value.split(".")))
+
 
 @dataclass
 class FakePVEClient:
@@ -340,6 +377,7 @@ class FakePVEClient:
     reboots: list[tuple[str, int]] = field(default_factory=list)
     deletions: list[tuple[str, int]] = field(default_factory=list)
     vm_statuses: dict[tuple[str, int], str] = field(default_factory=dict)
+    vm_ipv4_addresses: dict[tuple[str, int], list[str]] = field(default_factory=dict)
 
     def is_iso_available(self, node: str, iso: str) -> bool:
         return iso in self.accessible_isos.get(node, set())
@@ -364,6 +402,9 @@ class FakePVEClient:
 
     def get_vm_status(self, node: str, vmid: int) -> str:
         return self.vm_statuses.get((node, vmid), "stopped")
+
+    def get_vm_ipv4_addresses(self, node: str, vmid: int) -> list[str]:
+        return list(self.vm_ipv4_addresses.get((node, vmid), []))
 
     def configure_cloud_init_vm(self, **configuration: Any) -> None:
         self.configurations.append(configuration)

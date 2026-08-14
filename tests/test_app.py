@@ -4,7 +4,7 @@ import pytest
 from werkzeug.security import generate_password_hash
 
 from portal import create_app
-from portal.pve import FakePVEClient, PVEClient
+from portal.pve import FakePVEClient, PVEClient, PVEProtocolError
 
 
 @pytest.fixture
@@ -179,3 +179,43 @@ def test_pve_client_rejects_root_token(monkeypatch):
 
     with pytest.raises(ValueError, match="root"):
         PVEClient.from_environment()
+
+
+def test_pve_client_extracts_only_usable_ipv4_addresses(monkeypatch):
+    client = PVEClient("https://pve.example/api2/json", "portal@pve!token", "secret")
+    monkeypatch.setattr(
+        client,
+        "_request",
+        lambda _path: {
+            "result": [
+                "invalid-interface",
+                {"name": "broken", "ip-addresses": "invalid"},
+                {
+                    "name": "lo",
+                    "ip-addresses": [
+                        "invalid-address",
+                        {"ip-address": "not-an-ip", "ip-address-type": "ipv4"},
+                        {"ip-address": "127.0.0.1", "ip-address-type": "ipv4"},
+                    ],
+                },
+                {
+                    "name": "ens18",
+                    "ip-addresses": [
+                        {"ip-address": "192.168.1.51", "ip-address-type": "ipv4"},
+                        {"ip-address": "169.254.1.2", "ip-address-type": "ipv4"},
+                        {"ip-address": "fe80::1", "ip-address-type": "ipv6"},
+                    ],
+                },
+            ]
+        },
+    )
+
+    assert client.get_vm_ipv4_addresses("pve-a", 101) == ["192.168.1.51"]
+
+
+def test_pve_client_rejects_invalid_guest_agent_response(monkeypatch):
+    client = PVEClient("https://pve.example/api2/json", "portal@pve!token", "secret")
+    monkeypatch.setattr(client, "_request", lambda _path: {"result": "invalid"})
+
+    with pytest.raises(PVEProtocolError, match="interfaces"):
+        client.get_vm_ipv4_addresses("pve-a", 101)

@@ -1266,6 +1266,34 @@ def create_app(
             jobs=[job.public_dict(include_credentials=True) for job in jobs]
         )
 
+    @app.get("/api/vms/<vm_id>/network")
+    @login_required
+    def get_vm_network(vm_id: str):
+        allocation = db.session.get(VMAllocation, vm_id)
+        if allocation is None:
+            return jsonify(error="not_found"), 404
+        if (
+            allocation.owner_id != g.current_user.id
+            and g.current_user.role != "admin"
+        ):
+            return jsonify(error="not_found"), 404
+        if allocation.vmid is None or allocation.status == "deleted":
+            return jsonify(status="unavailable", ipv4_addresses=[])
+        if allocation.status != "running":
+            return jsonify(status="stopped", ipv4_addresses=[])
+        try:
+            addresses = client.get_vm_ipv4_addresses(
+                allocation.node, allocation.vmid
+            )
+        except (PVETransportError, PVEHTTPError, PVEProtocolError):
+            return jsonify(status="temporarily_unavailable", ipv4_addresses=[])
+        return jsonify(
+            status="ready" if addresses else "pending",
+            ipv4=addresses[0] if addresses else None,
+            ipv4_addresses=addresses,
+            ssh_username=allocation.guest_username,
+        )
+
     @app.post("/api/vms")
     @login_required
     @csrf_protected
@@ -1291,6 +1319,18 @@ def create_app(
                 jsonify(
                     errors={
                         "guest_username": "Identifiant Linux requis pour ce profil."
+                    }
+                ),
+                400,
+            )
+        if (
+            profile.source_type == "cloud_init"
+            and vm_request.node != profile.template_node
+        ):
+            return (
+                jsonify(
+                    errors={
+                        "node": "Ce template local doit être déployé sur son nœud Proxmox."
                     }
                 ),
                 400,
