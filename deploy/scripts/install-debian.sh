@@ -51,6 +51,7 @@ harden_portal_secrets() {
     for name in portal_database_url portal_session_secret \
         portal_admin_password_hash pve_token_secret portal_oidc_client_secret \
         portal_ldap_bind_password portal_ldap_ca_cert pve_ca_cert \
+        portal_netbox_api_token portal_netbox_ca_cert \
         portal_pwpush_api_token portal_metrics_token; do
         path="$SECRETS_DIR/$name"
         if [[ -e $path ]]; then
@@ -85,7 +86,8 @@ for name in portal_db_password portal_session_secret keycloak_db_password \
     secret "$name"
 done
 for name in pve_ca_cert portal_oidc_client_secret portal_ldap_bind_password \
-    portal_ldap_ca_cert portal_pwpush_api_token; do
+    portal_ldap_ca_cert portal_netbox_api_token portal_netbox_ca_cert \
+    portal_pwpush_api_token; do
     [[ -e $SECRETS_DIR/$name ]] || install -m 0600 /dev/null "$SECRETS_DIR/$name"
 done
 
@@ -118,7 +120,7 @@ portal_image=$(setting PORTAL_IMAGE)
 case "$deploy_mode" in
     source)
         "$COMPOSE" build api
-        portal_image=${portal_image:-proxmox-vm-portal:0.21.0}
+        portal_image=${portal_image:-proxmox-vm-portal:0.21.1}
         ;;
     release)
         release_tag=$(setting PORTAL_RELEASE_TAG)

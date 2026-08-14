@@ -1,8 +1,12 @@
 from pathlib import Path
 
 import pytest
+from werkzeug.security import generate_password_hash
 
+from portal import create_app
 from portal.config import MAX_SECRET_BYTES, environment_value
+from portal.models import db
+from portal.pve import FakePVEClient
 from portal.secret_cli import main
 
 
@@ -58,3 +62,28 @@ def test_secret_cli_rejects_invalid_password(monkeypatch, answers, message):
     monkeypatch.setattr("getpass.getpass", lambda _prompt: next(values))
     with pytest.raises(SystemExit, match=message):
         main()
+
+
+def test_netbox_configuration_requires_complete_https_settings(monkeypatch):
+    base = {
+        "TESTING": True,
+        "SQLALCHEMY_DATABASE_URI": "sqlite://",
+        "PORTAL_ADMIN_USERNAME": "admin",
+        "PORTAL_ADMIN_PASSWORD_HASH": generate_password_hash("password"),
+        "PORTAL_SESSION_SECRET": "test-session-secret-that-is-long-enough",
+    }
+    pve = FakePVEClient(accessible_isos={"pve-a": set()})
+    monkeypatch.setenv("PORTAL_NETBOX_URL", "https://netbox.example")
+    monkeypatch.delenv("PORTAL_NETBOX_API_TOKEN", raising=False)
+    with pytest.raises(ValueError, match="doivent être configurés ensemble"):
+        create_app(base, pve_client=pve)
+    monkeypatch.setenv("PORTAL_NETBOX_API_TOKEN", "token")
+    app = create_app(base, pve_client=pve)
+    assert app.config["PORTAL_NETBOX_ENABLED"] is True
+    assert app.extensions["netbox_client"].base_url == "https://netbox.example"
+    with app.app_context():
+        db.session.remove()
+        db.engine.dispose()
+    monkeypatch.setenv("PORTAL_NETBOX_URL", "http://netbox.example")
+    with pytest.raises(ValueError, match="doit utiliser HTTPS"):
+        create_app({**base, "TESTING": False}, pve_client=pve)

@@ -1,6 +1,6 @@
 "use strict";
 
-const state = { csrfToken: "", user: null, usage: {}, settings: {}, profiles: [], nodes: [], jobs: [], users: [], auditEvents: [], operations: null, pollTimer: null, showArchived: false, detailsSshCommand: "" };
+const state = { csrfToken: "", user: null, usage: {}, settings: {}, profiles: [], networkProfiles: [], nodes: [], jobs: [], users: [], auditEvents: [], operations: null, pollTimer: null, showArchived: false, detailsSshCommand: "" };
 const elements = Object.fromEntries(
   [
     "login-screen", "login-form", "local-login-fields", "login-error", "login-button",
@@ -14,7 +14,7 @@ const elements = Object.fromEntries(
     "template-vmid", "iso-node", "profile-iso", "toast", "machines-view", "images-view",
     "open-vm-dialog", "vm-dialog", "vm-form", "close-vm-dialog", "cancel-vm", "submit-vm",
     "vm-profile", "vm-node", "vm-name", "vm-cpu", "vm-ram", "vm-disk", "vm-error",
-    "network-step", "vm-network-mode", "vm-static-network", "vm-ipv4-cidr",
+    "network-step", "vm-network-profile", "vm-network-mode", "vm-static-network", "vm-ipv4-cidr",
     "vm-gateway", "vm-dns-servers",
     "guest-access-step", "vm-guest-username", "vm-guest-password",
     "vm-guest-password-confirmation", "guest-password-help", "quota-preview", "refresh-jobs", "show-archived", "job-list",
@@ -41,7 +41,11 @@ const elements = Object.fromEntries(
     "incident-dialog-intro", "incident-close-confirmation", "incident-confirm-name",
     "incident-confirm-expected", "incident-error", "close-incident-dialog",
     "cancel-incident", "submit-incident", "settings-form", "guest-password-min-length", "static-ipv4-networks",
-    "save-settings", "settings-error"
+    "save-settings", "settings-error", "network-profile-form", "network-profile-label",
+    "network-profile-slug", "network-profile-cidr", "network-profile-gateway",
+    "network-profile-dns", "network-profile-bridge", "network-profile-vlan",
+    "network-profile-netbox", "save-network-profile", "network-profile-error",
+    "network-profile-list"
   ].map((id) => [id, document.getElementById(id)])
 );
 
@@ -147,7 +151,7 @@ function showApplication(session) {
   renderQuotas();
   const requestedView = window.location.hash.slice(1);
   switchView(["images", "admin"].includes(requestedView) ? requestedView : "machines");
-  const loaders = [loadProfiles(), loadNodes(), loadJobs()];
+  const loaders = [loadProfiles(), loadNetworkProfiles(), loadNodes(), loadJobs()];
   if (session.user.role === "admin") loaders.push(loadUsers(), loadAudit(), loadOperations());
   if (session.user.role === "admin") {
     elements["guest-password-min-length"].value = state.settings.guest_password_min_length || 8;
@@ -333,6 +337,87 @@ async function loadProfiles() {
     elements["profile-count"].textContent = error.message;
   } finally {
     elements["refresh-profiles"].disabled = false;
+  }
+}
+
+function renderNetworkProfiles() {
+  const select = elements["vm-network-profile"];
+  const activeProfiles = state.networkProfiles.filter((profile) => profile.enabled !== false);
+  const placeholder = new Option(activeProfiles.length ? "Choisissez un réseau / VLAN" : "Réseau par défaut du template", "");
+  placeholder.disabled = activeProfiles.length > 0;
+  placeholder.selected = true;
+  select.replaceChildren(placeholder);
+  select.required = activeProfiles.length > 0;
+  activeProfiles.forEach((profile) => {
+    const suffix = profile.vlan_tag ? ` · VLAN ${profile.vlan_tag}` : "";
+    select.add(new Option(`${profile.label} · ${profile.cidr}${suffix}`, profile.slug));
+  });
+  if (state.user.role !== "admin") return;
+  const list = elements["network-profile-list"];
+  list.replaceChildren();
+  state.networkProfiles.forEach((profile) => {
+    const row = document.createElement("article");
+    row.className = "user-card";
+    const copy = document.createElement("div");
+    appendText(copy, "strong", profile.label);
+    appendText(copy, "span", `${profile.cidr} · ${profile.bridge}${profile.vlan_tag ? ` · VLAN ${profile.vlan_tag}` : ""}${profile.netbox_managed ? " · NetBox" : ""}`);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "button button-secondary";
+    button.textContent = profile.enabled ? "Suspendre" : "Réactiver";
+    button.addEventListener("click", () => toggleNetworkProfile(profile, button));
+    row.append(copy, button);
+    list.append(row);
+  });
+}
+
+async function loadNetworkProfiles() {
+  const endpoint = state.user.role === "admin" ? "/api/admin/network-profiles" : "/api/network-profiles";
+  state.networkProfiles = (await api(endpoint)).profiles;
+  renderNetworkProfiles();
+}
+
+async function toggleNetworkProfile(profile, button) {
+  setBusy(button, true, "Mise à jour…");
+  try {
+    await api(`/api/admin/network-profiles/${encodeURIComponent(profile.slug)}`, {
+      method: "PATCH", body: JSON.stringify({ enabled: !profile.enabled })
+    });
+    await loadNetworkProfiles();
+  } catch (error) {
+    showToast(error.message);
+    setBusy(button, false, "");
+  }
+}
+
+async function saveNetworkProfile(event) {
+  event.preventDefault();
+  showError(elements["network-profile-error"], "");
+  setBusy(elements["save-network-profile"], true, "Ajout…");
+  const optionalNumber = (id) => elements[id].value ? Number(elements[id].value) : null;
+  try {
+    await api("/api/admin/network-profiles", {
+      method: "POST",
+      body: JSON.stringify({
+        slug: elements["network-profile-slug"].value,
+        label: elements["network-profile-label"].value,
+        cidr: elements["network-profile-cidr"].value,
+        gateway: elements["network-profile-gateway"].value,
+        dns_servers: elements["network-profile-dns"].value.split(",").map((value) => value.trim()).filter(Boolean),
+        bridge: elements["network-profile-bridge"].value,
+        vlan_tag: optionalNumber("network-profile-vlan"),
+        netbox_prefix_id: optionalNumber("network-profile-netbox"),
+        enabled: true
+      })
+    });
+    elements["network-profile-form"].reset();
+    elements["network-profile-bridge"].value = "vmbr0";
+    showToast("Réseau ajouté.");
+    await loadNetworkProfiles();
+  } catch (error) {
+    showError(elements["network-profile-error"], error.message);
+  } finally {
+    setBusy(elements["save-network-profile"], false, "");
   }
 }
 
@@ -708,11 +793,23 @@ function updateGuestAccessField() {
 
 function updateNetworkFields() {
   const fixed = elements["vm-network-mode"].value === "static";
+  const network = state.networkProfiles.find((profile) => profile.slug === elements["vm-network-profile"].value);
   elements["vm-static-network"].hidden = !fixed;
   ["vm-ipv4-cidr", "vm-gateway", "vm-dns-servers"].forEach((id) => {
     elements[id].required = fixed;
     if (!fixed) elements[id].value = "";
   });
+  if (fixed && network) {
+    elements["vm-ipv4-cidr"].placeholder = `Adresse dans ${network.cidr}`;
+    elements["vm-gateway"].value = network.gateway;
+    elements["vm-dns-servers"].value = network.dns_servers.join(", ");
+    elements["vm-gateway"].readOnly = true;
+    elements["vm-dns-servers"].readOnly = true;
+  } else {
+    elements["vm-ipv4-cidr"].placeholder = "192.168.1.50/24";
+    elements["vm-gateway"].readOnly = false;
+    elements["vm-dns-servers"].readOnly = false;
+  }
 }
 
 function updateQuotaPreview() {
@@ -738,6 +835,7 @@ async function openVmDialog() {
   try {
     if (!state.nodes.length) await loadNodes();
     if (!state.profiles.length) await loadProfiles();
+    if (!state.networkProfiles.length) await loadNetworkProfiles();
     if (!elements["vm-node"].value || !elements["vm-profile"].value) {
       showError(elements["vm-error"], "Un nœud et une image active sont requis avant de créer une VM.");
     }
@@ -769,6 +867,7 @@ async function submitVm(event) {
     payload.guest_username = form.get("guest_username");
     payload.guest_password = form.get("guest_password");
     payload.network_mode = form.get("network_mode") || "dhcp";
+    if (form.get("network_profile")) payload.network_profile = form.get("network_profile");
     if (payload.network_mode === "static") {
       payload.ipv4_cidr = form.get("ipv4_cidr");
       payload.gateway = form.get("gateway");
@@ -1219,6 +1318,7 @@ elements["copy-vm-ssh"].addEventListener("click", async () => {
   }
 });
 elements["vm-profile"].addEventListener("change", updateGuestAccessField);
+elements["vm-network-profile"].addEventListener("change", updateNetworkFields);
 elements["vm-network-mode"].addEventListener("change", updateNetworkFields);
 elements["refresh-jobs"].addEventListener("click", loadJobs);
 elements["show-archived"].addEventListener("click", toggleArchivedJobs);
@@ -1228,6 +1328,7 @@ elements["close-user-dialog"].addEventListener("click", closeUserDialog);
 elements["cancel-user"].addEventListener("click", closeUserDialog);
 elements["user-form"].addEventListener("submit", saveUser);
 elements["settings-form"].addEventListener("submit", saveSettings);
+elements["network-profile-form"].addEventListener("submit", saveNetworkProfile);
 elements["refresh-users"].addEventListener("click", loadUsers);
 elements["refresh-operations"].addEventListener("click", loadOperations);
 elements["close-incident-dialog"].addEventListener("click", closeIncidentDialog);

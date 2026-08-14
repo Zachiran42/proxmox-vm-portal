@@ -143,6 +143,7 @@ Modèle de menaces et preuves de la revue :
 [`docs/SECURITY_REVIEW.md`](docs/SECURITY_REVIEW.md).
 Recette de qualification réelle : [`docs/PREPRODUCTION.md`](docs/PREPRODUCTION.md).
 Authentification LDAP/LDAPS native : [`docs/LDAP.md`](docs/LDAP.md).
+Profils réseau/VLAN et intégration NetBox : [`docs/NETWORKS_NETBOX.md`](docs/NETWORKS_NETBOX.md).
 Configuration Keycloak/OIDC et fédération LDAP : [`docs/KEYCLOAK.md`](docs/KEYCLOAK.md).
 Exploitation de la file de travaux : [`docs/JOBS.md`](docs/JOBS.md).
 Préparation sécurisée des templates et remise des accès : [`docs/GUEST_ACCESS.md`](docs/GUEST_ACCESS.md).

@@ -16,6 +16,7 @@ from portal.models import (
     VMAllocation,
     db,
 )
+from portal.netbox import FakeNetBoxClient, NetBoxUnavailable
 from portal.password_pusher import FakePasswordPusherClient
 from portal.pve import (
     FakePVEClient,
@@ -36,7 +37,12 @@ def password_pusher():
 
 
 @pytest.fixture
-def app(pve_client, password_pusher):
+def netbox_client():
+    return FakeNetBoxClient(reservations={}, prefixes={42: "10.10.12.0/24"})
+
+
+@pytest.fixture
+def app(pve_client, password_pusher, netbox_client):
     app = create_app(
         {
             "TESTING": True,
@@ -49,6 +55,7 @@ def app(pve_client, password_pusher):
         },
         pve_client=pve_client,
         password_pusher_client=password_pusher,
+        netbox_client=netbox_client,
     )
     yield app
     with app.app_context():
@@ -91,6 +98,7 @@ def run_step(app, pve_client):
         return process_next_job(
             pve_client,
             app.extensions["password_pusher_client"],
+            app.extensions["netbox_client"],
             worker_id="test-worker",
             poll_seconds=0,
             lease_seconds=60,
@@ -191,6 +199,7 @@ def test_owner_can_list_recent_jobs_with_safe_vm_details(app, pve_client):
                 "disk_gb": 40,
                 "guest_username": None,
                 "network_mode": "dhcp",
+                "network_profile": None,
                 "ipv4_cidr": None,
                 "gateway": None,
                 "dns_servers": [],
@@ -536,6 +545,267 @@ def test_cloud_init_static_ipv4_is_allowlisted_reserved_and_sent_to_pve(
     duplicate = client.post("/api/vms", json={**payload, "name": "fixed-vm-2"})
     assert duplicate.status_code == 400
     assert "déjà réservée" in duplicate.get_json()["errors"]["ipv4_cidr"]
+
+
+def test_vlan_profile_reserves_configures_and_releases_netbox(
+    app, pve_client, netbox_client
+):
+    client = app.test_client()
+    login(client)
+    pve_client.templates.add(("pve-a", 9000))
+    create_cloud_profile(client)
+    profile_payload = {
+        "slug": "chu-vlan-12",
+        "label": "CHU VLAN 12",
+        "cidr": "10.10.12.0/24",
+        "gateway": "10.10.12.254",
+        "dns_servers": ["10.10.1.10", "10.10.1.11"],
+        "bridge": "vmbr0",
+        "vlan_tag": 12,
+        "netbox_prefix_id": 42,
+        "enabled": True,
+    }
+    assert client.post("/api/admin/network-profiles", json=profile_payload).status_code == 201
+    assert client.get("/api/network-profiles").get_json()["profiles"][0]["netbox_managed"] is True
+    response = client.post(
+        "/api/vms",
+        json={
+            **vm_payload("chu-vm-01"),
+            "profile": "debian-cloud",
+            "guest_username": "hugo",
+            "guest_password": "password",
+            "network_profile": "chu-vlan-12",
+            "network_mode": "static",
+            "ipv4_cidr": "10.10.12.50/24",
+            "gateway": "10.10.12.254",
+            "dns_servers": ["10.10.1.10", "10.10.1.11"],
+        },
+    )
+    assert response.status_code == 202
+    vm_id = response.get_json()["vm_id"]
+    assert run_step(app, pve_client) is True
+    assert netbox_client.reservations == {1: "10.10.12.50/24"}
+    assert run_step(app, pve_client) is True
+    assert pve_client.configurations[0]["bridge"] == "vmbr0"
+    assert pve_client.configurations[0]["vlan_tag"] == 12
+    assert run_step(app, pve_client) is True
+
+    with app.app_context():
+        allocation = db.session.get(VMAllocation, vm_id)
+        allocation.status = "stopped"
+        pve_client.vm_statuses[(allocation.node, allocation.vmid)] = "stopped"
+        db.session.commit()
+    assert client.post(
+        f"/api/vms/{vm_id}/actions",
+        json={"action": "delete", "confirm_name": "chu-vm-01"},
+    ).status_code == 202
+    assert run_step(app, pve_client) is True
+    assert run_step(app, pve_client) is True
+    assert netbox_client.reservations == {}
+
+
+def test_vlan_profile_enforces_values_and_netbox_conflicts(
+    app, pve_client, netbox_client
+):
+    client = app.test_client()
+    login(client)
+    pve_client.templates.add(("pve-a", 9000))
+    create_cloud_profile(client)
+    assert client.post(
+        "/api/admin/network-profiles",
+        json={
+            "slug": "chu-vlan-12",
+            "label": "CHU VLAN 12",
+            "cidr": "10.10.12.0/24",
+            "gateway": "10.10.12.254",
+            "dns_servers": ["10.10.1.10"],
+            "bridge": "vmbr0",
+            "vlan_tag": 12,
+            "netbox_prefix_id": 42,
+            "enabled": True,
+        },
+    ).status_code == 201
+    payload = {
+        **vm_payload("chu-vm-conflict"),
+        "profile": "debian-cloud",
+        "guest_username": "hugo",
+        "guest_password": "password",
+        "network_profile": "chu-vlan-12",
+        "network_mode": "static",
+        "ipv4_cidr": "10.10.12.51/24",
+        "gateway": "10.10.12.254",
+        "dns_servers": ["10.10.1.10"],
+    }
+    assert client.post("/api/vms", json={**payload, "gateway": "10.10.12.1"}).status_code == 400
+    netbox_client.reservations[99] = "10.10.12.51/24"
+    created = client.post("/api/vms", json=payload)
+    assert created.status_code == 202
+    run_step(app, pve_client)
+    with app.app_context():
+        job = db.session.get(ProvisioningJob, created.get_json()["job_id"])
+        assert job.status == "failed"
+        assert job.error_code == "netbox_ip_conflict"
+
+
+def test_admin_network_profile_crud_and_validation(app, netbox_client):
+    client = app.test_client()
+    login(client)
+    assert app.test_cli_runner().invoke(args=["check-netbox"]).exit_code == 0
+    assert client.post("/api/admin/network-profiles", data="bad").status_code == 400
+    assert client.post("/api/admin/network-profiles", json={}).status_code == 400
+    invalid = client.post(
+        "/api/admin/network-profiles",
+        json={
+            "slug": "BAD",
+            "label": "",
+            "cidr": "0.0.0.0/2",
+            "gateway": "invalid",
+            "dns_servers": ["invalid"],
+            "bridge": "?",
+            "vlan_tag": 4095,
+            "netbox_prefix_id": 0,
+            "enabled": "yes",
+            "unexpected": True,
+        },
+    )
+    assert invalid.status_code == 400
+    assert set(invalid.get_json()["errors"]) == {
+        "unknown", "slug", "label", "cidr", "gateway", "dns_servers",
+        "bridge", "vlan_tag", "netbox_prefix_id", "enabled",
+    }
+    gateway_on_network = {
+        "slug": "bad-gateway", "label": "Bad gateway",
+        "cidr": "10.10.12.0/24", "gateway": "10.10.12.0",
+        "dns_servers": ["10.10.1.10"], "bridge": "vmbr0",
+        "vlan_tag": None, "netbox_prefix_id": None, "enabled": True,
+    }
+    assert client.post(
+        "/api/admin/network-profiles", json=gateway_on_network
+    ).status_code == 400
+    payload = {
+        "slug": "chu-vlan-12",
+        "label": "CHU VLAN 12",
+        "cidr": "10.10.12.0/24",
+        "gateway": "10.10.12.254",
+        "dns_servers": ["10.10.1.10"],
+        "bridge": "vmbr0",
+        "vlan_tag": 12,
+        "netbox_prefix_id": 42,
+        "enabled": True,
+    }
+    assert client.post("/api/admin/network-profiles", json=payload).status_code == 201
+    assert client.post("/api/admin/network-profiles", json=payload).status_code == 409
+    listed = client.get("/api/admin/network-profiles").get_json()
+    assert listed["netbox_enabled"] is True
+    assert listed["profiles"][0]["netbox_prefix_id"] == 42
+    assert client.patch("/api/admin/network-profiles/missing", json={}).status_code == 404
+    assert client.patch(
+        "/api/admin/network-profiles/chu-vlan-12", data="bad"
+    ).status_code == 400
+    assert client.patch(
+        "/api/admin/network-profiles/chu-vlan-12", json={"bridge": "?"}
+    ).status_code == 400
+    updated = client.patch(
+        "/api/admin/network-profiles/chu-vlan-12",
+        json={"label": "VLAN production", "enabled": False},
+    )
+    assert updated.status_code == 200
+    assert updated.get_json()["profile"]["label"] == "VLAN production"
+    netbox_client.unavailable = True
+    assert client.patch(
+        "/api/admin/network-profiles/chu-vlan-12", json={"enabled": True}
+    ).status_code == 502
+
+
+def test_netbox_outages_retry_without_replaying_proxmox(
+    app, pve_client, netbox_client
+):
+    client = app.test_client()
+    login(client)
+    pve_client.templates.add(("pve-a", 9000))
+    create_cloud_profile(client)
+    assert client.post(
+        "/api/admin/network-profiles",
+        json={
+            "slug": "chu-vlan-12", "label": "CHU VLAN 12",
+            "cidr": "10.10.12.0/24", "gateway": "10.10.12.254",
+            "dns_servers": ["10.10.1.10"], "bridge": "vmbr0",
+            "vlan_tag": 12, "netbox_prefix_id": 42, "enabled": True,
+        },
+    ).status_code == 201
+    created = client.post(
+        "/api/vms",
+        json={
+            **vm_payload("chu-retry"), "profile": "debian-cloud",
+            "guest_username": "hugo", "guest_password": "password",
+            "network_profile": "chu-vlan-12", "network_mode": "static",
+            "ipv4_cidr": "10.10.12.60/24", "gateway": "10.10.12.254",
+            "dns_servers": ["10.10.1.10"],
+        },
+    )
+    job_id = created.get_json()["job_id"]
+    netbox_client.unavailable = True
+    run_step(app, pve_client)
+    with app.app_context():
+        assert db.session.get(ProvisioningJob, job_id).error_code == "netbox_unavailable"
+    assert pve_client.requests == []
+    netbox_client.unavailable = False
+    run_step(app, pve_client)
+    run_step(app, pve_client)
+    netbox_client.unavailable = True
+    run_step(app, pve_client)
+    with app.app_context():
+        assert db.session.get(ProvisioningJob, job_id).error_code == "netbox_activation_failed"
+    assert len(pve_client.requests) == 1
+    netbox_client.unavailable = False
+    run_step(app, pve_client)
+    with app.app_context():
+        assert db.session.get(ProvisioningJob, job_id).status == "succeeded"
+
+
+@pytest.mark.parametrize("release_fails", [False, True])
+def test_rejected_proxmox_clone_releases_netbox_reservation(
+    app, pve_client, netbox_client, release_fails
+):
+    client = app.test_client()
+    login(client)
+    pve_client.templates.add(("pve-a", 9000))
+    create_cloud_profile(client)
+    assert client.post(
+        "/api/admin/network-profiles",
+        json={
+            "slug": "chu-vlan-12", "label": "CHU VLAN 12",
+            "cidr": "10.10.12.0/24", "gateway": "10.10.12.254",
+            "dns_servers": ["10.10.1.10"], "bridge": "vmbr0",
+            "vlan_tag": 12, "netbox_prefix_id": 42, "enabled": True,
+        },
+    ).status_code == 201
+    created = client.post(
+        "/api/vms",
+        json={
+            **vm_payload("chu-rejected"), "profile": "debian-cloud",
+            "guest_username": "hugo", "guest_password": "password",
+            "network_profile": "chu-vlan-12", "network_mode": "static",
+            "ipv4_cidr": "10.10.12.70/24", "gateway": "10.10.12.254",
+            "dns_servers": ["10.10.1.10"],
+        },
+    )
+    pve_client.create_vm = lambda _request: (_ for _ in ()).throw(
+        PVEHTTPError(403, "denied")
+    )
+    if release_fails:
+        netbox_client.release_ip = lambda _ip_id: (_ for _ in ()).throw(
+            NetBoxUnavailable("offline")
+        )
+    run_step(app, pve_client)
+    with app.app_context():
+        job = db.session.get(ProvisioningJob, created.get_json()["job_id"])
+        assert job.status == ("attention" if release_fails else "failed")
+        assert job.error_code == (
+            "netbox_release_failed" if release_fails else "pve_submission_rejected"
+        )
+    if not release_fails:
+        assert netbox_client.reservations == {}
 
 
 def test_static_ipv4_rejects_invalid_policy_and_iso_profiles(app, pve_client):

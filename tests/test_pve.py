@@ -300,6 +300,41 @@ def test_configure_cloud_init_supports_static_ipv4_and_dns(client):
     )
 
 
+def test_configure_cloud_init_preserves_nic_and_applies_bridge_and_vlan(client):
+    with patch.object(
+        client,
+        "_request",
+        side_effect=[
+            None,
+            {"net0": "virtio=AA:BB:CC:DD:EE:FF,bridge=vmbr1,firewall=1,tag=99"},
+            None,
+        ],
+    ) as request:
+        client.configure_cloud_init_vm(
+            node="pve-a",
+            vmid=101,
+            cpu=2,
+            ram_mb=4096,
+            disk_gb=40,
+            username="hugo",
+            password="generated-secret",
+            bridge="vmbr0",
+            vlan_tag=12,
+        )
+    assert request.call_args_list[2].kwargs["payload"]["net0"] == (
+        "virtio=AA:BB:CC:DD:EE:FF,firewall=1,bridge=vmbr0,tag=12"
+    )
+
+
+def test_configure_cloud_init_rejects_missing_network_adapter(client):
+    with patch.object(client, "_request", side_effect=[None, {}]):
+        with pytest.raises(PVEProtocolError, match="configuration réseau"):
+            client.configure_cloud_init_vm(
+                node="pve-a", vmid=101, cpu=2, ram_mb=4096, disk_gb=40,
+                username="hugo", password="secret", bridge="vmbr0",
+            )
+
+
 def test_lifecycle_methods_use_exact_proxmox_endpoints(client):
     with patch.object(
         client,

@@ -52,6 +52,7 @@ from .models import (
     ACTIVE_VM_STATUSES,
     AuditEvent,
     ImageProfile,
+    NetworkProfile,
     PortalSetting,
     ProvisioningJob,
     User,
@@ -60,6 +61,7 @@ from .models import (
     WorkerHeartbeat,
     db,
 )
+from .netbox import NetBoxClient, NetBoxUnavailable
 from .observability import render_prometheus_metrics
 from .oidc import (
     OIDCIdentity,
@@ -72,6 +74,7 @@ from .pve import PVEClient, PVEHTTPError, PVEProtocolError, PVETransportError
 from .validation import (
     ImageProfileCreateRequest,
     IncidentActionRequest,
+    NetworkProfileRequest,
     UserCreateRequest,
     UserUpdateRequest,
     ValidationError,
@@ -95,6 +98,7 @@ def create_app(
     oidc_client=None,
     ldap_client=None,
     password_pusher_client=None,
+    netbox_client=None,
 ) -> Flask:
     """Crée l'application; l'accès PVE peut être injecté pendant les tests."""
     app = Flask(__name__)
@@ -197,6 +201,11 @@ def create_app(
         PORTAL_PWPUSH_EXPIRE_VIEWS=int(
             os.environ.get("PORTAL_PWPUSH_EXPIRE_VIEWS", "1")
         ),
+        PORTAL_NETBOX_URL=os.environ.get("PORTAL_NETBOX_URL", "").strip(),
+        PORTAL_NETBOX_API_TOKEN=environment_value("PORTAL_NETBOX_API_TOKEN"),
+        PORTAL_NETBOX_CA_BUNDLE=os.environ.get(
+            "PORTAL_NETBOX_CA_BUNDLE", ""
+        ).strip(),
         PORTAL_DUMMY_PASSWORD_HASH=generate_password_hash(
             secrets.token_urlsafe(32), method="scrypt"
         ),
@@ -223,6 +232,7 @@ def create_app(
     _validate_login_throttle_configuration(app)
     _validate_observability_configuration(app)
     password_pusher = _configure_password_pusher(app, password_pusher_client)
+    netbox = _configure_netbox(app, netbox_client)
 
     db.init_app(app)
     Migrate(app, db)
@@ -234,6 +244,7 @@ def create_app(
     app.extensions["oidc_client"] = oidc
     app.extensions["ldap_client"] = ldap
     app.extensions["password_pusher_client"] = password_pusher
+    app.extensions["netbox_client"] = netbox
 
     client = pve_client or PVEClient.from_environment()
     app.extensions["pve_client"] = client
@@ -425,6 +436,7 @@ def create_app(
             processed = process_next_job(
                 client,
                 password_pusher,
+                netbox,
                 worker_id=worker_id,
                 poll_seconds=app.config["PORTAL_JOB_POLL_SECONDS"],
                 lease_seconds=app.config["PORTAL_JOB_LEASE_SECONDS"],
@@ -476,6 +488,17 @@ def create_app(
     @app.get("/healthz")
     def healthz():
         return jsonify(status="ok")
+
+    @app.cli.command("check-netbox")
+    def check_netbox_command():
+        """Vérifie TLS et le token API NetBox."""
+        if netbox is None:
+            raise click.ClickException("NetBox n'est pas configuré.")
+        try:
+            netbox.check_connection()
+        except NetBoxUnavailable as error:
+            raise click.ClickException(str(error)) from error
+        click.echo("Connexion NetBox et token API validés.")
 
     @app.get("/metrics")
     def metrics():
@@ -880,6 +903,142 @@ def create_app(
             outcome="success",
             actor_user_id=g.current_user.id,
             details={"enabled": profile.enabled},
+        )
+        db.session.commit()
+        return jsonify(profile=profile.public_dict())
+
+    @app.get("/api/network-profiles")
+    @login_required
+    def list_network_profiles():
+        profiles = db.session.scalars(
+            select(NetworkProfile)
+            .where(NetworkProfile.enabled.is_(True))
+            .order_by(NetworkProfile.label)
+        ).all()
+        return jsonify(
+            profiles=[
+                {
+                    "slug": profile.slug,
+                    "label": profile.label,
+                    "cidr": profile.cidr,
+                    "gateway": profile.gateway,
+                    "dns_servers": profile.dns_servers.split(","),
+                    "vlan_tag": profile.vlan_tag,
+                    "netbox_managed": profile.netbox_prefix_id is not None,
+                }
+                for profile in profiles
+            ]
+        )
+
+    @app.get("/api/admin/network-profiles")
+    @login_required
+    @role_required("admin")
+    def list_admin_network_profiles():
+        profiles = db.session.scalars(
+            select(NetworkProfile).order_by(NetworkProfile.label)
+        ).all()
+        return jsonify(
+            profiles=[profile.public_dict() for profile in profiles],
+            netbox_enabled=app.config["PORTAL_NETBOX_ENABLED"],
+        )
+
+    @app.post("/api/admin/network-profiles")
+    @login_required
+    @role_required("admin")
+    @csrf_protected
+    def create_network_profile():
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify(errors={"body": "Un objet JSON est requis."}), 400
+        try:
+            profile_request = NetworkProfileRequest.from_dict(payload)
+        except ValidationError as error:
+            return jsonify(errors=error.errors), 400
+        if profile_request.netbox_prefix_id is not None and netbox is None:
+            return jsonify(errors={"netbox_prefix_id": "Configurez NetBox avant d'activer ce profil."}), 409
+        netbox_vrf_id = None
+        if profile_request.netbox_prefix_id is not None:
+            try:
+                netbox_vrf_id = netbox.validate_prefix(
+                    profile_request.netbox_prefix_id, profile_request.cidr
+                )
+            except NetBoxUnavailable as error:
+                return jsonify(errors={"netbox_prefix_id": str(error)}), 502
+        profile = NetworkProfile(
+            slug=profile_request.slug,
+            label=profile_request.label,
+            cidr=profile_request.cidr,
+            gateway=profile_request.gateway,
+            dns_servers=",".join(profile_request.dns_servers),
+            bridge=profile_request.bridge,
+            vlan_tag=profile_request.vlan_tag,
+            netbox_prefix_id=profile_request.netbox_prefix_id,
+            netbox_vrf_id=netbox_vrf_id,
+            enabled=profile_request.enabled,
+        )
+        db.session.add(profile)
+        _add_audit(
+            action="network_profile.create",
+            target_type="network_profile",
+            target_id=profile.slug,
+            outcome="success",
+            actor_user_id=g.current_user.id,
+            details={"cidr": profile.cidr, "vlan_tag": profile.vlan_tag},
+        )
+        try:
+            db.session.commit()
+        except IntegrityError:
+            db.session.rollback()
+            return jsonify(errors={"slug": "Cet identifiant réseau existe déjà."}), 409
+        return jsonify(profile=profile.public_dict()), 201
+
+    @app.patch("/api/admin/network-profiles/<slug>")
+    @login_required
+    @role_required("admin")
+    @csrf_protected
+    def update_network_profile(slug: str):
+        profile = db.session.scalar(
+            select(NetworkProfile).where(NetworkProfile.slug == slug).with_for_update()
+        )
+        if profile is None:
+            return jsonify(error="not_found"), 404
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify(errors={"body": "Un objet JSON est requis."}), 400
+        current = profile.public_dict()
+        current.pop("netbox_managed", None)
+        current.pop("netbox_vrf_id", None)
+        merged = {**current, **payload, "slug": slug}
+        try:
+            profile_request = NetworkProfileRequest.from_dict(merged)
+        except ValidationError as error:
+            return jsonify(errors=error.errors), 400
+        if profile_request.netbox_prefix_id is not None and netbox is None:
+            return jsonify(errors={"netbox_prefix_id": "Configurez NetBox avant d'activer ce profil."}), 409
+        netbox_vrf_id = None
+        if profile_request.netbox_prefix_id is not None:
+            try:
+                netbox_vrf_id = netbox.validate_prefix(
+                    profile_request.netbox_prefix_id, profile_request.cidr
+                )
+            except NetBoxUnavailable as error:
+                return jsonify(errors={"netbox_prefix_id": str(error)}), 502
+        profile.label = profile_request.label
+        profile.cidr = profile_request.cidr
+        profile.gateway = profile_request.gateway
+        profile.dns_servers = ",".join(profile_request.dns_servers)
+        profile.bridge = profile_request.bridge
+        profile.vlan_tag = profile_request.vlan_tag
+        profile.netbox_prefix_id = profile_request.netbox_prefix_id
+        profile.netbox_vrf_id = netbox_vrf_id
+        profile.enabled = profile_request.enabled
+        _add_audit(
+            action="network_profile.update",
+            target_type="network_profile",
+            target_id=profile.slug,
+            outcome="success",
+            actor_user_id=g.current_user.id,
+            details={"enabled": profile.enabled, "vlan_tag": profile.vlan_tag},
         )
         db.session.commit()
         return jsonify(profile=profile.public_dict())
@@ -1545,6 +1704,20 @@ def create_app(
         )
         if profile is None:
             return jsonify(errors={"profile": "Profil indisponible."}), 400
+        network_profile = None
+        if vm_request.network_profile:
+            network_profile = db.session.scalar(
+                select(NetworkProfile).where(
+                    NetworkProfile.slug == vm_request.network_profile,
+                    NetworkProfile.enabled.is_(True),
+                )
+            )
+            if network_profile is None:
+                return jsonify(errors={"network_profile": "Réseau indisponible."}), 400
+        elif profile.source_type == "cloud_init" and db.session.scalar(
+            select(func.count(NetworkProfile.id)).where(NetworkProfile.enabled.is_(True))
+        ):
+            return jsonify(errors={"network_profile": "Sélectionnez un réseau autorisé."}), 400
         if profile.source_type == "cloud_init" and not vm_request.guest_username:
             return (
                 jsonify(
@@ -1591,6 +1764,7 @@ def create_app(
             vm_request.guest_username
             or vm_request.guest_password is not None
             or vm_request.network_mode != "dhcp"
+            or vm_request.network_profile is not None
         ):
             return (
                 jsonify(
@@ -1601,11 +1775,11 @@ def create_app(
                 400,
             )
         if profile.source_type == "cloud_init" and vm_request.network_mode == "static":
-            static_error = _validate_static_ipv4_policy(vm_request)
+            static_error = _validate_static_ipv4_policy(vm_request, network_profile)
             if static_error is not None:
                 return jsonify(errors=static_error), 400
         allocation, job, reservation_error = _reserve_allocation(
-            g.current_user.id, vm_request, profile
+            g.current_user.id, vm_request, profile, network_profile
         )
         if reservation_error:
             error_code, errors = reservation_error
@@ -1692,7 +1866,10 @@ def create_app(
         return jsonify(operation=operation.public_dict()), 202
 
     def _reserve_allocation(
-        user_id: int, vm_request: VMRequest, profile: ImageProfile
+        user_id: int,
+        vm_request: VMRequest,
+        profile: ImageProfile,
+        network_profile: NetworkProfile | None,
     ) -> tuple[
         VMAllocation | None,
         ProvisioningJob | None,
@@ -1736,6 +1913,7 @@ def create_app(
         allocation = VMAllocation(
             owner_id=user.id,
             profile_id=profile.id,
+            network_profile_id=network_profile.id if network_profile else None,
             name=vm_request.name,
             node=vm_request.node,
             iso=profile.iso,
@@ -1744,6 +1922,14 @@ def create_app(
             ipv4_cidr=vm_request.ipv4_cidr,
             gateway=vm_request.gateway,
             dns_servers=",".join(vm_request.dns_servers) or None,
+            network_bridge=network_profile.bridge if network_profile else None,
+            vlan_tag=network_profile.vlan_tag if network_profile else None,
+            netbox_prefix_id=network_profile.netbox_prefix_id
+            if network_profile
+            else None,
+            netbox_vrf_id=network_profile.netbox_vrf_id
+            if network_profile
+            else None,
             cpu=vm_request.cpu,
             ram_mb=vm_request.ram_mb,
             disk_gb=vm_request.disk_gb,
@@ -1839,19 +2025,30 @@ def _normalize_static_ipv4_networks(value: object) -> str:
     return "\n".join(dict.fromkeys(networks))
 
 
-def _validate_static_ipv4_policy(vm_request: VMRequest) -> dict[str, str] | None:
+def _validate_static_ipv4_policy(
+    vm_request: VMRequest, network_profile: NetworkProfile | None = None
+) -> dict[str, str] | None:
     if vm_request.ipv4_cidr is None:
         return {"ipv4_cidr": "Adresse IPv4 fixe requise."}
-    setting = db.session.scalar(
-        select(PortalSetting)
-        .where(PortalSetting.key == "static_ipv4_networks")
-        .with_for_update()
-    )
-    allowed = [
-        IPv4Network(value)
-        for value in (setting.value if setting is not None else "").splitlines()
-        if value.strip()
-    ]
+    if network_profile is not None:
+        allowed = [IPv4Network(network_profile.cidr)]
+        if vm_request.gateway != network_profile.gateway:
+            return {"gateway": "La passerelle est imposée par le réseau sélectionné."}
+        if vm_request.dns_servers != network_profile.dns_servers.split(","):
+            return {"dns_servers": "Les DNS sont imposés par le réseau sélectionné."}
+        if IPv4Interface(vm_request.ipv4_cidr).network != allowed[0]:
+            return {"ipv4_cidr": "Le préfixe doit correspondre au réseau sélectionné."}
+    else:
+        setting = db.session.scalar(
+            select(PortalSetting)
+            .where(PortalSetting.key == "static_ipv4_networks")
+            .with_for_update()
+        )
+        allowed = [
+            IPv4Network(value)
+            for value in (setting.value if setting is not None else "").splitlines()
+            if value.strip()
+        ]
     address = IPv4Interface(vm_request.ipv4_cidr).ip
     if not allowed:
         return {
@@ -2059,6 +2256,29 @@ def _configure_password_pusher(app: Flask, injected_client):
         expire_after_days=app.config["PORTAL_PWPUSH_EXPIRE_DAYS"],
         expire_after_views=app.config["PORTAL_PWPUSH_EXPIRE_VIEWS"],
         ca_bundle=app.config["PORTAL_PWPUSH_CA_BUNDLE"] or None,
+    )
+
+
+def _configure_netbox(app: Flask, injected_client=None):
+    if injected_client is not None:
+        app.config["PORTAL_NETBOX_ENABLED"] = True
+        return injected_client
+    url = app.config["PORTAL_NETBOX_URL"]
+    token = app.config["PORTAL_NETBOX_API_TOKEN"]
+    if not url and not token:
+        app.config["PORTAL_NETBOX_ENABLED"] = False
+        return None
+    if not url or not token:
+        raise ValueError(
+            "PORTAL_NETBOX_URL et PORTAL_NETBOX_API_TOKEN doivent être configurés ensemble."
+        )
+    if not app.config.get("TESTING") and not url.startswith("https://"):
+        raise ValueError("PORTAL_NETBOX_URL doit utiliser HTTPS.")
+    app.config["PORTAL_NETBOX_ENABLED"] = True
+    return NetBoxClient(
+        base_url=url,
+        api_token=token,
+        ca_bundle=app.config["PORTAL_NETBOX_CA_BUNDLE"],
     )
 
 

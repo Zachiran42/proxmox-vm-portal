@@ -123,6 +123,49 @@ class ImageProfile(db.Model):
         }
 
 
+class NetworkProfile(db.Model):
+    __tablename__ = "network_profiles"
+    __table_args__ = (
+        CheckConstraint("vlan_tag IS NULL OR (vlan_tag >= 1 AND vlan_tag <= 4094)", name="ck_network_profiles_vlan_tag"),
+        CheckConstraint("netbox_prefix_id IS NULL OR netbox_prefix_id > 0", name="ck_network_profiles_netbox_prefix"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    slug: Mapped[str] = mapped_column(db.String(63), unique=True, nullable=False)
+    label: Mapped[str] = mapped_column(db.String(100), nullable=False)
+    cidr: Mapped[str] = mapped_column(db.String(18), nullable=False)
+    gateway: Mapped[str] = mapped_column(db.String(15), nullable=False)
+    dns_servers: Mapped[str] = mapped_column(db.String(64), nullable=False)
+    bridge: Mapped[str] = mapped_column(db.String(32), nullable=False, default="vmbr0")
+    vlan_tag: Mapped[int | None] = mapped_column()
+    netbox_prefix_id: Mapped[int | None] = mapped_column()
+    netbox_vrf_id: Mapped[int | None] = mapped_column()
+    enabled: Mapped[bool] = mapped_column(nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        db.DateTime(timezone=True), nullable=False, default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        db.DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow
+    )
+
+    allocations: Mapped[list[VMAllocation]] = relationship(back_populates="network_profile")
+
+    def public_dict(self) -> dict[str, Any]:
+        return {
+            "slug": self.slug,
+            "label": self.label,
+            "cidr": self.cidr,
+            "gateway": self.gateway,
+            "dns_servers": self.dns_servers.split(","),
+            "bridge": self.bridge,
+            "vlan_tag": self.vlan_tag,
+            "netbox_managed": self.netbox_prefix_id is not None,
+            "netbox_prefix_id": self.netbox_prefix_id,
+            "netbox_vrf_id": self.netbox_vrf_id,
+            "enabled": self.enabled,
+        }
+
+
 class VMAllocation(db.Model):
     __tablename__ = "vm_allocations"
     __table_args__ = (
@@ -154,6 +197,9 @@ class VMAllocation(db.Model):
     profile_id: Mapped[int | None] = mapped_column(
         db.ForeignKey("image_profiles.id", ondelete="SET NULL")
     )
+    network_profile_id: Mapped[int | None] = mapped_column(
+        db.ForeignKey("network_profiles.id", ondelete="RESTRICT")
+    )
     name: Mapped[str] = mapped_column(db.String(63), nullable=False)
     node: Mapped[str] = mapped_column(db.String(63), nullable=False)
     iso: Mapped[str | None] = mapped_column(db.String(255))
@@ -165,6 +211,11 @@ class VMAllocation(db.Model):
     ipv4_cidr: Mapped[str | None] = mapped_column(db.String(18))
     gateway: Mapped[str | None] = mapped_column(db.String(15))
     dns_servers: Mapped[str | None] = mapped_column(db.String(64))
+    network_bridge: Mapped[str | None] = mapped_column(db.String(32))
+    vlan_tag: Mapped[int | None] = mapped_column()
+    netbox_ip_id: Mapped[int | None] = mapped_column()
+    netbox_prefix_id: Mapped[int | None] = mapped_column()
+    netbox_vrf_id: Mapped[int | None] = mapped_column()
     credential_url: Mapped[str | None] = mapped_column(db.String(1024))
     credential_created_at: Mapped[datetime | None] = mapped_column(
         db.DateTime(timezone=True)
@@ -190,6 +241,7 @@ class VMAllocation(db.Model):
 
     owner: Mapped[User] = relationship(back_populates="allocations")
     profile: Mapped[ImageProfile | None] = relationship()
+    network_profile: Mapped[NetworkProfile | None] = relationship(back_populates="allocations")
     job: Mapped[ProvisioningJob | None] = relationship(
         back_populates="allocation", uselist=False
     )
@@ -270,6 +322,9 @@ class ProvisioningJob(db.Model):
                 "disk_gb": self.allocation.disk_gb,
                 "guest_username": self.allocation.guest_username,
                 "network_mode": self.allocation.network_mode,
+                "network_profile": self.allocation.network_profile.slug
+                if self.allocation.network_profile is not None
+                else None,
                 "ipv4_cidr": self.allocation.ipv4_cidr,
                 "gateway": self.allocation.gateway,
                 "dns_servers": self.allocation.dns_servers.split(",")

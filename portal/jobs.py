@@ -7,12 +7,14 @@ from sqlalchemy import select
 
 from .guest_secrets import GuestSecretError, decrypt_guest_password
 from .models import AuditEvent, ProvisioningJob, VMOperation, WorkerHeartbeat, db
+from .netbox import NetBoxConflict, NetBoxUnavailable
 from .pve import PVEHTTPError, PVEProtocolError, PVETransportError
 
 
 def process_next_job(
     pve_client,
     password_pusher=None,
+    netbox_client=None,
     *,
     worker_id: str,
     poll_seconds: int = 5,
@@ -25,15 +27,16 @@ def process_next_job(
     if claimed is None:
         return _process_next_operation(
             pve_client,
+            netbox_client=netbox_client,
             worker_id=worker_id,
             poll_seconds=poll_seconds,
             lease_seconds=lease_seconds,
         )
     job_id, phase = claimed
     if phase == "validating":
-        _submit_job(pve_client, job_id, poll_seconds)
+        _submit_job(pve_client, netbox_client, job_id, poll_seconds)
     else:
-        _poll_job(pve_client, password_pusher, job_id, poll_seconds)
+        _poll_job(pve_client, password_pusher, netbox_client, job_id, poll_seconds)
     return True
 
 
@@ -69,7 +72,7 @@ def _claim_job(worker_id: str) -> tuple[str, str] | None:
     return job.id, job.status
 
 
-def _submit_job(pve_client, job_id: str, poll_seconds: int) -> None:
+def _submit_job(pve_client, netbox_client, job_id: str, poll_seconds: int) -> None:
     job = db.session.get(ProvisioningJob, job_id)
     if job is None:
         return
@@ -106,6 +109,29 @@ def _submit_job(pve_client, job_id: str, poll_seconds: int) -> None:
         )
         return
 
+    if (
+        allocation.network_mode == "static"
+        and allocation.netbox_prefix_id is not None
+        and allocation.netbox_ip_id is None
+    ):
+        if netbox_client is None:
+            _fail(job, "netbox_not_configured")
+            return
+        try:
+            allocation.netbox_ip_id = netbox_client.reserve_ip(
+                address=allocation.ipv4_cidr or "",
+                description=f"proxmox-vm-portal: {allocation.name} ({allocation.id})",
+                dns_name=allocation.name,
+                vrf_id=allocation.netbox_vrf_id,
+            )
+            db.session.commit()
+        except NetBoxConflict:
+            _fail(job, "netbox_ip_conflict")
+            return
+        except NetBoxUnavailable:
+            _reschedule(job, "queued", poll_seconds, "netbox_unavailable")
+            return
+
     job.status = "submitting"
     job.error_code = None
     allocation.status = "provisioning"
@@ -126,6 +152,9 @@ def _submit_job(pve_client, job_id: str, poll_seconds: int) -> None:
     except PVEHTTPError as error:
         status = error.status
         if status is not None and 400 <= status < 500 and status not in {408, 429}:
+            if not _release_failed_reservation(netbox_client, allocation):
+                _attention(job, "netbox_release_failed")
+                return
             _fail(job, "pve_submission_rejected")
         else:
             _attention(job, "pve_submission_unknown")
@@ -145,7 +174,7 @@ def _submit_job(pve_client, job_id: str, poll_seconds: int) -> None:
     _reschedule(job, "submitted", poll_seconds)
 
 
-def _poll_job(pve_client, password_pusher, job_id: str, poll_seconds: int) -> None:
+def _poll_job(pve_client, password_pusher, netbox_client, job_id: str, poll_seconds: int) -> None:
     job = db.session.get(ProvisioningJob, job_id)
     if job is None:
         return
@@ -175,7 +204,7 @@ def _poll_job(pve_client, password_pusher, job_id: str, poll_seconds: int) -> No
                 pve_client, password_pusher, job, poll_seconds
             )
         else:
-            _complete(job)
+            _complete(job, netbox_client, poll_seconds)
         return
     if job.stage == "start":
         _attention(job, "pve_start_failed")
@@ -218,6 +247,8 @@ def _bootstrap_cloud_init_access(
             dns_servers=allocation.dns_servers.split(",")
             if allocation.dns_servers
             else [],
+            bridge=allocation.network_bridge,
+            vlan_tag=allocation.vlan_tag,
         )
     except PVETransportError:
         _retry_guest_access(job, poll_seconds, "pve_guest_config_unavailable")
@@ -253,7 +284,17 @@ def _retry_guest_access(
         _reschedule(job, "submitted", poll_seconds, error_code)
 
 
-def _complete(job: ProvisioningJob) -> None:
+def _complete(job: ProvisioningJob, netbox_client=None, poll_seconds: int = 5) -> None:
+    allocation = job.allocation
+    if allocation.netbox_ip_id is not None:
+        if netbox_client is None:
+            _attention(job, "netbox_not_configured")
+            return
+        try:
+            netbox_client.activate_ip(allocation.netbox_ip_id)
+        except NetBoxUnavailable:
+            _reschedule(job, "submitted", poll_seconds, "netbox_activation_failed")
+            return
     job.status = "succeeded"
     job.error_code = None
     job.completed_at = datetime.now(UTC)
@@ -262,6 +303,20 @@ def _complete(job: ProvisioningJob) -> None:
     job.allocation.status = "running" if job.stage == "start" else "accepted"
     _audit(job, "success", {"name": job.allocation.name})
     db.session.commit()
+
+
+def _release_failed_reservation(netbox_client, allocation) -> bool:
+    if allocation.netbox_ip_id is None:
+        return True
+    if netbox_client is None:
+        return False
+    try:
+        netbox_client.release_ip(allocation.netbox_ip_id)
+    except NetBoxUnavailable:
+        return False
+    allocation.netbox_ip_id = None
+    db.session.commit()
+    return True
 
 
 def _reschedule(
@@ -345,6 +400,7 @@ def _recover_stale_jobs(lease_seconds: int) -> None:
 def _process_next_operation(
     pve_client,
     *,
+    netbox_client=None,
     worker_id: str,
     poll_seconds: int,
     lease_seconds: int,
@@ -357,7 +413,7 @@ def _process_next_operation(
     if phase == "submitting":
         _submit_operation(pve_client, operation_id, poll_seconds)
     else:
-        _poll_operation(pve_client, operation_id, poll_seconds)
+        _poll_operation(pve_client, netbox_client, operation_id, poll_seconds)
     return True
 
 
@@ -432,7 +488,7 @@ def _submit_operation(pve_client, operation_id: str, poll_seconds: int) -> None:
     _reschedule_operation(operation, "submitted", poll_seconds)
 
 
-def _poll_operation(pve_client, operation_id: str, poll_seconds: int) -> None:
+def _poll_operation(pve_client, netbox_client, operation_id: str, poll_seconds: int) -> None:
     operation = db.session.get(VMOperation, operation_id)
     if operation is None:
         return
@@ -454,7 +510,7 @@ def _poll_operation(pve_client, operation_id: str, poll_seconds: int) -> None:
     if result["status"] == "running":
         _reschedule_operation(operation, "submitted", poll_seconds)
     elif result.get("exitstatus") == "OK":
-        _complete_operation(operation)
+        _complete_operation(operation, netbox_client, poll_seconds)
     else:
         _fail_operation(operation, "pve_operation_failed")
 
@@ -473,8 +529,22 @@ def _reschedule_operation(
     db.session.commit()
 
 
-def _complete_operation(operation: VMOperation) -> None:
+def _complete_operation(
+    operation: VMOperation, netbox_client=None, poll_seconds: int = 5
+) -> None:
     allocation = operation.allocation
+    if operation.action == "delete" and allocation.netbox_ip_id is not None:
+        if netbox_client is None:
+            _attention_operation(operation, "netbox_not_configured")
+            return
+        try:
+            netbox_client.release_ip(allocation.netbox_ip_id)
+        except NetBoxUnavailable:
+            _reschedule_operation(
+                operation, "submitted", poll_seconds, "netbox_release_failed"
+            )
+            return
+        allocation.netbox_ip_id = None
     allocation.status = {
         "start": "running",
         "stop": "stopped",

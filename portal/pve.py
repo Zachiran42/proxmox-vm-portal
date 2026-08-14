@@ -272,6 +272,8 @@ class PVEClient:
         ipv4_cidr: str | None = None,
         gateway: str | None = None,
         dns_servers: list[str] | None = None,
+        bridge: str | None = None,
+        vlan_tag: int | None = None,
     ) -> None:
         path = f"/nodes/{quote(node, safe='')}/qemu/{vmid}"
         self._request(
@@ -293,6 +295,15 @@ class PVEClient:
         }
         if dns_servers:
             config_payload["nameserver"] = " ".join(dns_servers)
+        if bridge:
+            current = self._request(f"{path}/config")
+            if not isinstance(current, dict) or not isinstance(current.get("net0"), str):
+                raise PVEProtocolError("La configuration réseau de la VM est invalide.")
+            parts = [part for part in current["net0"].split(",") if not part.startswith(("bridge=", "tag="))]
+            parts.append(f"bridge={bridge}")
+            if vlan_tag is not None:
+                parts.append(f"tag={vlan_tag}")
+            config_payload["net0"] = ",".join(parts)
         self._request(
             f"{path}/config",
             method="PUT",
