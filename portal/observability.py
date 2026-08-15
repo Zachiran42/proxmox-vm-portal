@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import func, select
 
 from .models import (
+    PortalSetting,
     ProvisioningJob,
     User,
     VMAllocation,
@@ -138,6 +139,40 @@ def render_prometheus_metrics(pve_client, *, now: datetime | None = None) -> str
     lines.extend(
         f"portal_vm_allocations{_labels(status=status)} {allocations.get(status, 0)}"
         for status in ALLOCATION_STATUSES
+    )
+    warning_setting = db.session.get(PortalSetting, "expiration_warning_days")
+    try:
+        warning_days = int(warning_setting.value) if warning_setting else 14
+    except ValueError:
+        warning_days = 14
+    active_filter = VMAllocation.status.not_in(("deleted", "failed"))
+    expired = db.session.scalar(
+        select(func.count(VMAllocation.id)).where(
+            active_filter,
+            VMAllocation.expires_at.is_not(None),
+            VMAllocation.expires_at <= now,
+        )
+    )
+    warning = db.session.scalar(
+        select(func.count(VMAllocation.id)).where(
+            active_filter,
+            VMAllocation.expires_at > now,
+            VMAllocation.expires_at <= now + timedelta(days=warning_days),
+        )
+    )
+    unmanaged = db.session.scalar(
+        select(func.count(VMAllocation.id)).where(
+            active_filter, VMAllocation.expires_at.is_(None)
+        )
+    )
+    lines.extend(
+        (
+            "# HELP portal_vm_lifecycle VM allocations by lifecycle deadline state.",
+            "# TYPE portal_vm_lifecycle gauge",
+            f'portal_vm_lifecycle{{state="expired"}} {int(expired or 0)}',
+            f'portal_vm_lifecycle{{state="warning"}} {int(warning or 0)}',
+            f'portal_vm_lifecycle{{state="unmanaged"}} {int(unmanaged or 0)}',
+        )
     )
 
     user_rows = db.session.execute(

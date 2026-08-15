@@ -2,7 +2,7 @@ FROM python:3.13.14-alpine3.24@sha256:399babc8b49529dabfd9c922f2b5eea81d611e4512
 
 ARG PORTAL_VERSION=dev
 ARG PORTAL_VCS_REF=unknown
-ARG PORTAL_SOURCE=https://github.com/hugofelix088-spec/proxmox-vm-portal
+ARG PORTAL_SOURCE=https://github.com/zachiran42/proxmox-vm-portal
 
 LABEL org.opencontainers.image.source="$PORTAL_SOURCE" \
       org.opencontainers.image.description="Secure self-hosted Proxmox VM provisioning portal" \

@@ -780,6 +780,9 @@ def create_app(
             settings={
                 "guest_password_min_length": _guest_password_min_length(),
                 "static_ipv4_networks": _static_ipv4_networks_text(),
+                "default_vm_lifetime_days": _default_vm_lifetime_days(),
+                "max_vm_lifetime_days": _max_vm_lifetime_days(),
+                "expiration_warning_days": _expiration_warning_days(),
             },
             csrf_token=session["csrf_token"],
         )
@@ -1332,6 +1335,9 @@ def create_app(
             settings={
                 "guest_password_min_length": _guest_password_min_length(),
                 "static_ipv4_networks": _static_ipv4_networks_text(),
+                "default_vm_lifetime_days": _default_vm_lifetime_days(),
+                "max_vm_lifetime_days": _max_vm_lifetime_days(),
+                "expiration_warning_days": _expiration_warning_days(),
             }
         )
 
@@ -1341,7 +1347,13 @@ def create_app(
     @csrf_protected
     def update_admin_settings():
         payload = request.get_json(silent=True)
-        allowed_settings = {"guest_password_min_length", "static_ipv4_networks"}
+        allowed_settings = {
+            "guest_password_min_length",
+            "static_ipv4_networks",
+            "default_vm_lifetime_days",
+            "max_vm_lifetime_days",
+            "expiration_warning_days",
+        }
         if not isinstance(payload, dict) or not payload or set(payload) - allowed_settings:
             return jsonify(errors={"body": "Paramètre non autorisé."}), 400
         minimum = payload.get(
@@ -1349,6 +1361,15 @@ def create_app(
         )
         networks_text = payload.get(
             "static_ipv4_networks", _static_ipv4_networks_text()
+        )
+        default_lifetime = payload.get(
+            "default_vm_lifetime_days", _default_vm_lifetime_days()
+        )
+        maximum_lifetime = payload.get(
+            "max_vm_lifetime_days", _max_vm_lifetime_days()
+        )
+        warning_days = payload.get(
+            "expiration_warning_days", _expiration_warning_days()
         )
         if type(minimum) is not int or not 1 <= minimum <= 256:
             return (
@@ -1361,6 +1382,17 @@ def create_app(
                 ),
                 400,
             )
+        lifetime_values = {
+            "default_vm_lifetime_days": default_lifetime,
+            "max_vm_lifetime_days": maximum_lifetime,
+            "expiration_warning_days": warning_days,
+        }
+        if any(type(value) is not int or not 1 <= value <= 3650 for value in lifetime_values.values()):
+            return jsonify(errors={"lifecycle": "Valeurs entières requises entre 1 et 3650 jours."}), 400
+        if default_lifetime > maximum_lifetime:
+            return jsonify(errors={"default_vm_lifetime_days": "La durée par défaut ne peut pas dépasser la durée maximale."}), 400
+        if warning_days > maximum_lifetime:
+            return jsonify(errors={"expiration_warning_days": "Le préavis ne peut pas dépasser la durée maximale."}), 400
         try:
             normalized_networks = _normalize_static_ipv4_networks(networks_text)
         except ValueError as error:
@@ -1382,6 +1414,12 @@ def create_app(
             db.session.add(network_setting)
         else:
             network_setting.value = normalized_networks
+        for key, value in lifetime_values.items():
+            lifecycle_setting = db.session.get(PortalSetting, key)
+            if lifecycle_setting is None:
+                db.session.add(PortalSetting(key=key, value=str(value)))
+            else:
+                lifecycle_setting.value = str(value)
         _add_audit(
             action="settings.update",
             target_type="settings",
@@ -1392,6 +1430,7 @@ def create_app(
                 "previous": previous,
                 "current": minimum,
                 "static_ipv4_networks": normalized_networks.splitlines(),
+                **lifetime_values,
             },
         )
         db.session.commit()
@@ -1399,6 +1438,7 @@ def create_app(
             settings={
                 "guest_password_min_length": minimum,
                 "static_ipv4_networks": normalized_networks,
+                **lifetime_values,
             }
         )
 
@@ -1685,6 +1725,31 @@ def create_app(
                 )
             )
         )
+        warning_cutoff = now + timedelta(days=_expiration_warning_days())
+        lifecycle_allocations = db.session.scalars(
+            select(VMAllocation)
+            .where(
+                VMAllocation.expires_at.is_not(None),
+                VMAllocation.expires_at <= warning_cutoff,
+                VMAllocation.status.not_in(("deleted", "failed")),
+            )
+            .order_by(VMAllocation.expires_at)
+            .limit(50)
+        ).all()
+        lifecycle_items = [
+            {
+                "id": allocation.id,
+                "name": allocation.name,
+                "owner": allocation.owner.username,
+                "node": allocation.node,
+                "vmid": allocation.vmid,
+                "status": allocation.status,
+                **allocation.lifecycle_dict(
+                    warning_days=_expiration_warning_days(), now=now
+                ),
+            }
+            for allocation in lifecycle_allocations
+        ]
         return jsonify(
             services={
                 "database": {"status": "healthy"},
@@ -1702,7 +1767,63 @@ def create_app(
                 "attention": len(incidents),
             },
             incidents=incidents[:50],
+            lifecycle={
+                "expired": sum(item["state"] == "expired" for item in lifecycle_items),
+                "warning": sum(item["state"] == "warning" for item in lifecycle_items),
+                "items": lifecycle_items,
+            },
             checked_at=now.isoformat(),
+        )
+
+    @app.patch("/api/admin/vms/<vm_id>/lifecycle")
+    @login_required
+    @role_required("admin")
+    @csrf_protected
+    def extend_vm_lifecycle(vm_id: str):
+        payload = request.get_json(silent=True)
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"extend_days"}
+            or type(payload["extend_days"]) is not int
+            or not 1 <= payload["extend_days"] <= 3650
+        ):
+            return jsonify(errors={"extend_days": "Valeur entière requise entre 1 et 3650 jours."}), 400
+        allocation = db.session.scalar(
+            select(VMAllocation).where(VMAllocation.id == vm_id).with_for_update()
+        )
+        if allocation is None:
+            return jsonify(error="not_found"), 404
+        if allocation.status in {"deleted", "failed"}:
+            return jsonify(error="lifecycle_invalid_state"), 409
+        now = datetime.now(UTC)
+        previous = allocation.expires_at
+        base = previous or now
+        if base.tzinfo is None:
+            base = base.replace(tzinfo=UTC)
+        if base < now:
+            base = now
+        expires_at = base + timedelta(days=payload["extend_days"])
+        if expires_at > now + timedelta(days=_max_vm_lifetime_days()):
+            return jsonify(error="lifecycle_limit_exceeded"), 409
+        allocation.expires_at = expires_at
+        _add_audit(
+            action="vm.lifecycle.extend",
+            target_type="vm",
+            target_id=allocation.id,
+            outcome="success",
+            actor_user_id=g.current_user.id,
+            details={
+                "extend_days": payload["extend_days"],
+                "previous_expires_at": previous.isoformat() if previous else None,
+                "expires_at": expires_at.isoformat(),
+                "owner": allocation.owner.username,
+            },
+        )
+        db.session.commit()
+        return jsonify(
+            lifecycle=allocation.lifecycle_dict(
+                warning_days=_expiration_warning_days(), now=now
+            )
         )
 
     @app.post("/api/admin/incidents/<kind>/<incident_id>/actions")
@@ -1796,7 +1917,8 @@ def create_app(
             return jsonify(error="forbidden"), 403
         return jsonify(
             job=job.public_dict(
-                include_credentials=job.allocation.owner_id == g.current_user.id
+                include_credentials=job.allocation.owner_id == g.current_user.id,
+                expiration_warning_days=_expiration_warning_days(),
             )
         )
 
@@ -1817,7 +1939,13 @@ def create_app(
             .limit(25)
         ).all()
         return jsonify(
-            jobs=[job.public_dict(include_credentials=True) for job in jobs]
+            jobs=[
+                job.public_dict(
+                    include_credentials=True,
+                    expiration_warning_days=_expiration_warning_days(),
+                )
+                for job in jobs
+            ]
         )
 
     @app.get("/api/vms/<vm_id>")
@@ -1835,7 +1963,8 @@ def create_app(
         return jsonify(
             details={
                 **job.public_dict(
-                    include_credentials=allocation.owner_id == g.current_user.id
+                    include_credentials=allocation.owner_id == g.current_user.id,
+                    expiration_warning_days=_expiration_warning_days(),
                 ),
                 "profile_label": allocation.profile.label
                 if allocation.profile is not None
@@ -2030,6 +2159,10 @@ def create_app(
                 ),
                 400,
             )
+        lifetime_days = vm_request.lifetime_days or _default_vm_lifetime_days()
+        if lifetime_days > _max_vm_lifetime_days():
+            return jsonify(errors={"lifetime_days": "Cette durée dépasse la limite définie par l’administrateur."}), 400
+        vm_request = replace(vm_request, lifetime_days=lifetime_days)
         if profile.source_type == "iso" and (
             vm_request.guest_username
             or vm_request.guest_password is not None
@@ -2118,6 +2251,11 @@ def create_app(
             return jsonify(error="not_found"), 404
         if allocation.vmid is None:
             return jsonify(error="vm_not_ready"), 409
+        if (
+            action_request.action in {"start", "reboot"}
+            and allocation.lifecycle_dict()["state"] == "expired"
+        ):
+            return jsonify(error="vm_expired"), 409
         if (
             action_request.action == "delete"
             and not compare_digest(action_request.confirm_name or "", allocation.name)
@@ -2228,6 +2366,7 @@ def create_app(
             ram_mb=vm_request.ram_mb,
             disk_gb=vm_request.disk_gb,
             status="queued",
+            expires_at=datetime.now(UTC) + timedelta(days=vm_request.lifetime_days or _default_vm_lifetime_days()),
         )
         job = ProvisioningJob(allocation=allocation)
         if vm_request.guest_password is not None:
@@ -2287,6 +2426,29 @@ def _guest_password_min_length() -> int:
     except ValueError:
         return 8
     return value if 1 <= value <= 256 else 8
+
+
+def _integer_portal_setting(key: str, default: int) -> int:
+    setting = db.session.get(PortalSetting, key)
+    if setting is None:
+        return default
+    try:
+        value = int(setting.value)
+    except ValueError:
+        return default
+    return value if 1 <= value <= 3650 else default
+
+
+def _default_vm_lifetime_days() -> int:
+    return _integer_portal_setting("default_vm_lifetime_days", 90)
+
+
+def _max_vm_lifetime_days() -> int:
+    return _integer_portal_setting("max_vm_lifetime_days", 365)
+
+
+def _expiration_warning_days() -> int:
+    return _integer_portal_setting("expiration_warning_days", 14)
 
 
 def _static_ipv4_networks_text() -> str:

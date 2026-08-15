@@ -283,6 +283,7 @@ class VMAllocation(db.Model):
         db.DateTime(timezone=True)
     )
     archived_at: Mapped[datetime | None] = mapped_column(db.DateTime(timezone=True))
+    expires_at: Mapped[datetime | None] = mapped_column(db.DateTime(timezone=True))
     cpu: Mapped[int] = mapped_column(nullable=False)
     ram_mb: Mapped[int] = mapped_column(nullable=False)
     disk_gb: Mapped[int] = mapped_column(nullable=False)
@@ -306,6 +307,29 @@ class VMAllocation(db.Model):
         cascade="all, delete-orphan",
         order_by="VMOperation.created_at",
     )
+
+    def lifecycle_dict(
+        self, *, warning_days: int = 14, now: datetime | None = None
+    ) -> dict[str, Any]:
+        if self.expires_at is None:
+            return {"state": "unmanaged", "expires_at": None, "days_remaining": None}
+        current = now or datetime.now(UTC)
+        expires_at = self.expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=UTC)
+        seconds_remaining = (expires_at - current).total_seconds()
+        days_remaining = max(0, int((seconds_remaining + 86399) // 86400))
+        if seconds_remaining <= 0:
+            state = "expired"
+        elif seconds_remaining <= warning_days * 86400:
+            state = "warning"
+        else:
+            state = "active"
+        return {
+            "state": state,
+            "expires_at": expires_at.isoformat(),
+            "days_remaining": days_remaining,
+        }
 
 
 class ProvisioningJob(db.Model):
@@ -351,7 +375,9 @@ class ProvisioningJob(db.Model):
 
     allocation: Mapped[VMAllocation] = relationship(back_populates="job")
 
-    def public_dict(self, *, include_credentials: bool = False) -> dict[str, Any]:
+    def public_dict(
+        self, *, include_credentials: bool = False, expiration_warning_days: int = 14
+    ) -> dict[str, Any]:
         latest_operation = (
             self.allocation.operations[-1] if self.allocation.operations else None
         )
@@ -392,6 +418,9 @@ class ProvisioningJob(db.Model):
                 if self.allocation.network_observed_at is not None
                 else None,
                 "status": self.allocation.status,
+                "lifecycle": self.allocation.lifecycle_dict(
+                    warning_days=expiration_warning_days
+                ),
             },
         }
         if latest_operation is not None:

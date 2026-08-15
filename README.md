@@ -48,6 +48,9 @@ stocké dans le dépôt.
   choisit son mot de passe SSH selon une longueur minimale administrable, sans
   règle de complexité imposée. Le secret reste chiffré pendant le travail puis
   est supprimé dès son injection dans cloud-init.
+- Chaque nouvelle VM reçoit une échéance administrable. Le portail avertit avant
+  expiration et bloque ensuite uniquement son démarrage ou redémarrage jusqu'à
+  prolongation par un administrateur. Il ne supprime jamais automatiquement une VM.
 
 Le token de service PVE doit être limité par ACL aux nœuds, stockages et opérations requis. N'utilisez jamais `root@pam`.
 
@@ -108,6 +111,8 @@ d'ajuster leurs rôles et quotas et de consulter les 100 derniers événements
 d'audit. Il centralise aussi l’état des services et les interventions manuelles
 sur les travaux ambigus. Les rôles des identités OIDC restent gérés dans Keycloak.
 Le journal d’audit peut être exporté en CSV neutralisé pour les tableurs.
+La même page permet de définir la durée de vie par défaut, la durée maximale et
+le préavis, puis de prolonger de façon auditée les VM arrivant à échéance.
 
 En production, servez l'application derrière TLS avec un serveur WSGI et conservez `PORTAL_SESSION_COOKIE_SECURE=true`. N'activez pas le mode debug.
 
@@ -154,6 +159,7 @@ Construction reproductible des templates Debian depuis l'ISO :
 [`docs/IMAGE_FACTORY.md`](docs/IMAGE_FACTORY.md).
 Métriques, règles d’alerte et export d’audit :
 [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md).
+Cycle de vie, échéances et procédures MCO : [`docs/MCO.md`](docs/MCO.md).
 Publication, SBOM, provenance et vérification des signatures :
 [`docs/RELEASES.md`](docs/RELEASES.md).
 
@@ -164,6 +170,7 @@ Endpoints : `GET /healthz`, `GET /metrics`, `GET /`, `POST /login`, `POST /logou
 `GET|POST /api/admin/users`, `PATCH /api/admin/users/<id>`,
 `GET /api/admin/audit-events`, `GET /api/admin/audit-events.csv`,
 `GET /api/admin/operations`, `POST /api/admin/incidents/<kind>/<id>/actions`,
+`PATCH /api/admin/vms/<id>/lifecycle`,
 `GET|POST /api/admin/image-profiles`, `PATCH /api/admin/image-profiles/<slug>`,
 `GET /auth/oidc/login` et `GET /auth/oidc/callback`.
 
@@ -179,7 +186,7 @@ La réponse contient un jeton CSRF à envoyer dans l'en-tête `X-CSRF-Token` pou
 Exemple de demande authentifiée (avec cet en-tête) :
 
 ```json
-{"name":"web-01","node":"pve-a","profile":"debian-12","cpu":2,"ram_mb":4096,"disk_gb":40}
+{"name":"web-01","node":"pve-a","profile":"debian-12","cpu":2,"ram_mb":4096,"disk_gb":40,"lifetime_days":90}
 ```
 
 La réponse HTTP 202 contient `job_id`. Consultez ensuite

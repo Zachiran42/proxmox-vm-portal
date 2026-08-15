@@ -379,6 +379,9 @@ def test_invalid_stored_guest_password_policy_falls_back_safely(app):
     assert client.get("/api/me").get_json()["settings"] == {
         "guest_password_min_length": 8,
         "static_ipv4_networks": "",
+        "default_vm_lifetime_days": 90,
+        "max_vm_lifetime_days": 365,
+        "expiration_warning_days": 14,
     }
 
 
@@ -488,6 +491,10 @@ def test_initial_migration_and_bootstrap_admin(tmp_path, pve_client):
             "proxmox_configuration",
             "alembic_version",
         } <= set(inspect(db.engine).get_table_names())
+        assert "expires_at" in {
+            column["name"]
+            for column in inspect(db.engine).get_columns("vm_allocations")
+        }
 
     first = runner.invoke(args=["bootstrap-admin"])
     second = runner.invoke(args=["bootstrap-admin"])

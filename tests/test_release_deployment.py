@@ -4,9 +4,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
 DIGEST = "a" * 64
-REPOSITORY = "hugofelix088-spec/proxmox-vm-portal"
+REPOSITORY = "zachiran42/proxmox-vm-portal"
 IMAGE = f"ghcr.io/{REPOSITORY}@sha256:{DIGEST}"
-OFFLINE_IMAGE = f"ghcr.io/{REPOSITORY}:offline-0.22.0"
+OFFLINE_IMAGE = f"ghcr.io/{REPOSITORY}:offline-0.23.0"
 
 
 def fake_docker_environment(tmp_path: Path) -> tuple[dict[str, str], Path]:
@@ -41,7 +41,7 @@ def test_compose_wrapper_uses_only_the_base_file_in_source_mode(tmp_path):
     environment, log = fake_docker_environment(tmp_path)
     env_file = tmp_path / "portal.env"
     env_file.write_text(
-        "PORTAL_DEPLOY_MODE=source\nPORTAL_IMAGE=proxmox-vm-portal:0.22.0\n",
+        "PORTAL_DEPLOY_MODE=source\nPORTAL_IMAGE=proxmox-vm-portal:0.23.0\n",
         encoding="utf-8",
     )
     environment["PORTAL_ENV_FILE"] = str(env_file)
@@ -144,7 +144,7 @@ def test_cosign_verification_is_exact_and_confined(tmp_path):
     result = run_script(
         "deploy/scripts/verify-published-image.sh",
         IMAGE,
-        "v0.22.0",
+        "v0.23.0",
         REPOSITORY,
         "private",
         environment=environment,
@@ -158,8 +158,8 @@ def test_cosign_verification_is_exact_and_confined(tmp_path):
     assert "--insecure-ignore-tlog=true" in arguments
     assert "--use-signed-timestamps" in arguments
     assert (
-        "https://github.com/hugofelix088-spec/proxmox-vm-portal/"
-        ".github/workflows/release.yml@refs/tags/v0.22.0"
+        "https://github.com/zachiran42/proxmox-vm-portal/"
+        ".github/workflows/release.yml@refs/tags/v0.23.0"
     ) in arguments
     assert IMAGE in arguments
     assert any("cosign:v3.0.6@sha256:" in argument for argument in arguments)
@@ -171,7 +171,7 @@ def test_public_cosign_verification_requires_transparency_log(tmp_path):
     result = run_script(
         "deploy/scripts/verify-published-image.sh",
         IMAGE,
-        "v0.22.0",
+        "v0.23.0",
         REPOSITORY,
         "public",
         environment=environment,
@@ -187,7 +187,7 @@ def test_cosign_verification_rejects_another_repository_before_docker(tmp_path):
     result = run_script(
         "deploy/scripts/verify-published-image.sh",
         IMAGE,
-        "v0.22.0",
+        "v0.23.0",
         "another-owner/another-repository",
         environment=environment,
     )
@@ -204,7 +204,7 @@ def test_version_check_does_not_require_a_tag_on_a_branch_push(tmp_path):
 
     result = run_script(
         "deploy/scripts/verify-release.sh",
-        "v0.22.0",
+        "v0.23.0",
         environment=environment,
     )
 

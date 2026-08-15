@@ -2,9 +2,9 @@
 set -Eeuo pipefail
 umask 077
 
-REPOSITORY="hugofelix088-spec/proxmox-vm-portal"
-RELEASE_TAG="v0.22.0"
-RELEASE_VERSION="0.22.0"
+REPOSITORY="zachiran42/proxmox-vm-portal"
+RELEASE_TAG="v0.23.0"
+RELEASE_VERSION="0.23.0"
 TARGET_DIR="/opt/proxmox-vm-portal"
 API_ROOT="https://api.github.com/repos/$REPOSITORY"
 work_dir=""
@@ -29,7 +29,7 @@ fail() {
 [[ ${ID:-} == debian ]] || fail "Ce bootstrap prend uniquement en charge Debian."
 [[ -n ${PORTAL_GITHUB_TOKEN:-} ]] || fail \
     "PORTAL_GITHUB_TOKEN est requis tant que le dépôt et GHCR restent privés."
-[[ ${PORTAL_GITHUB_USERNAME:-hugofelix088-spec} =~ ^[A-Za-z0-9-]+$ ]] || fail \
+[[ ${PORTAL_GITHUB_USERNAME:-zachiran42} =~ ^[A-Za-z0-9-]+$ ]] || fail \
     "PORTAL_GITHUB_USERNAME est invalide."
 [[ ! -e $TARGET_DIR ]] || fail \
     "$TARGET_DIR existe déjà. Utilisez deploy/scripts/update.sh pour une installation existante."
@@ -157,5 +157,5 @@ install -m 0644 "$manifest_file" \
 
 echo "Source $RELEASE_TAG préparée depuis le commit $manifest_commit."
 echo "L'image $manifest_image@$manifest_digest sera vérifiée avant son téléchargement."
-export PORTAL_GITHUB_USERNAME=${PORTAL_GITHUB_USERNAME:-hugofelix088-spec}
+export PORTAL_GITHUB_USERNAME=${PORTAL_GITHUB_USERNAME:-zachiran42}
 bash "$TARGET_DIR/deploy/scripts/install-debian.sh"

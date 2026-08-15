@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import select
 from werkzeug.security import generate_password_hash
 
 from portal import create_app
+from portal.models import VMAllocation, db
 from portal.pve import FakePVEClient, PVEClient, PVEProtocolError
 
 
@@ -99,6 +101,37 @@ def test_valid_vm_request_is_accepted_and_sent_to_client(authenticated_client, p
     assert response.get_json()["job_id"]
     assert response.get_json()["vm_id"]
     assert pve_client.requests == []
+
+
+def test_vm_lifetime_policy_is_applied_to_new_requests(app, authenticated_client):
+    changed = authenticated_client.patch(
+        "/api/admin/settings",
+        json={"default_vm_lifetime_days": 10, "max_vm_lifetime_days": 30},
+    )
+    assert changed.status_code == 200
+    payload = {
+        "name": "lifetime-vm",
+        "node": "pve-a",
+        "profile": "debian-12",
+        "cpu": 2,
+        "ram_mb": 4096,
+        "disk_gb": 40,
+    }
+    rejected = authenticated_client.post(
+        "/api/vms", json={**payload, "lifetime_days": 31}
+    )
+    created = authenticated_client.post(
+        "/api/vms", json={**payload, "lifetime_days": 20}
+    )
+    assert rejected.status_code == 400
+    assert "lifetime_days" in rejected.get_json()["errors"]
+    assert created.status_code == 202
+    with app.app_context():
+        allocation = db.session.scalar(
+            select(VMAllocation).where(VMAllocation.id == created.get_json()["vm_id"])
+        )
+        assert allocation.expires_at is not None
+        assert 19 <= (allocation.expires_at - allocation.created_at).days <= 20
 
 
 @pytest.mark.parametrize(

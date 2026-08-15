@@ -9,6 +9,10 @@ administrateur ou un paramètre d’URL ne remplacent jamais ce jeton.
 Les métriques ne contiennent ni nom d’utilisateur, VMID, nom de VM, URL
 Password Pusher, UPID ou autre identifiant individuel. Elles exposent seulement
 des compteurs agrégés, l’âge du dernier heartbeat et la disponibilité Proxmox.
+`portal_vm_lifecycle{state="expired|warning|unmanaged"}` expose aussi les
+volumes à traiter pour la MCO, sans aucun identifiant individuel.
+`portal_vm_lifecycle{state="expired|warning|unmanaged"}` expose aussi les
+volumes à traiter pour la MCO, sans aucun identifiant individuel.
 
 ## Prometheus et Alertmanager
 

@@ -134,6 +134,82 @@ def test_owner_can_run_full_lifecycle_and_delete_releases_quota(app, pve_client)
         )] == ["vm.start", "vm.reboot", "vm.stop", "vm.delete"]
 
 
+def test_expired_vm_requires_admin_extension_before_restart(app):
+    vm_id = seed_vm(app, status="stopped")
+    client = app.test_client()
+    login(client)
+    with app.app_context():
+        allocation = db.session.get(VMAllocation, vm_id)
+        allocation.expires_at = datetime.now(UTC) - timedelta(days=1)
+        db.session.commit()
+
+    blocked = request_action(client, vm_id, "start")
+    overview = client.get("/api/admin/operations")
+    extended = client.patch(
+        f"/api/admin/vms/{vm_id}/lifecycle", json={"extend_days": 30}
+    )
+
+    assert blocked.status_code == 409
+    assert blocked.get_json()["error"] == "vm_expired"
+    assert overview.status_code == 200
+    assert overview.get_json()["lifecycle"]["expired"] == 1
+    assert overview.get_json()["lifecycle"]["items"][0]["id"] == vm_id
+    assert extended.status_code == 200
+    assert extended.get_json()["lifecycle"]["state"] == "active"
+    assert request_action(client, vm_id, "start").status_code == 202
+    with app.app_context():
+        event = db.session.scalar(
+            select(AuditEvent).where(AuditEvent.action == "vm.lifecycle.extend")
+        )
+        assert event.details["extend_days"] == 30
+
+
+def test_lifecycle_extension_validates_payload_state_and_maximum(app):
+    vm_id = seed_vm(app, status="stopped")
+    client = app.test_client()
+    login(client)
+    assert client.patch(
+        f"/api/admin/vms/{vm_id}/lifecycle", json={"extend_days": 0}
+    ).status_code == 400
+    assert client.patch(
+        "/api/admin/vms/missing/lifecycle", json={"extend_days": 30}
+    ).status_code == 404
+    assert client.patch(
+        f"/api/admin/vms/{vm_id}/lifecycle", json={"extend_days": 366}
+    ).get_json()["error"] == "lifecycle_limit_exceeded"
+    with app.app_context():
+        allocation = db.session.get(VMAllocation, vm_id)
+        allocation.status = "deleted"
+        db.session.commit()
+    assert client.patch(
+        f"/api/admin/vms/{vm_id}/lifecycle", json={"extend_days": 30}
+    ).get_json()["error"] == "lifecycle_invalid_state"
+
+
+def test_lifecycle_settings_are_consistent(app):
+    client = app.test_client()
+    login(client)
+    assert client.patch(
+        "/api/admin/settings",
+        json={
+            "default_vm_lifetime_days": 120,
+            "max_vm_lifetime_days": 365,
+            "expiration_warning_days": 30,
+        },
+    ).status_code == 200
+    assert client.patch(
+        "/api/admin/settings",
+        json={"default_vm_lifetime_days": 400, "max_vm_lifetime_days": 365},
+    ).status_code == 400
+    assert client.patch(
+        "/api/admin/settings",
+        json={"expiration_warning_days": 400, "max_vm_lifetime_days": 365},
+    ).status_code == 400
+    assert client.patch(
+        "/api/admin/settings", json={"default_vm_lifetime_days": "90"}
+    ).status_code == 400
+
+
 @pytest.mark.parametrize(
     ("payload", "field"),
     [

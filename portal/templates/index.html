@@ -159,6 +159,11 @@
           </div>
           <div class="incident-list" id="incident-list" aria-live="polite"></div>
           <div class="empty-state compact" id="incident-empty" hidden><span>✓</span><h3>Aucune intervention requise</h3><p>Les travaux ambigus apparaîtront ici sans être rejoués automatiquement.</p></div>
+          <div class="incident-heading lifecycle-heading">
+            <div><h3>Échéances des machines</h3><p id="lifecycle-count">Chargement des échéances…</p></div>
+          </div>
+          <div class="incident-list" id="lifecycle-list" aria-live="polite"></div>
+          <div class="empty-state compact" id="lifecycle-empty" hidden><span>✓</span><h3>Aucune échéance proche</h3><p>Les VM à prolonger apparaîtront ici avant leur expiration.</p></div>
         </section>
 
         <section class="stats admin-stats" aria-label="Résumé des utilisateurs">
@@ -171,7 +176,7 @@
           <div class="section-heading">
             <div><h2 id="settings-title">Paramètres de provisionnement</h2><p>Politiques SSH et réseau appliquées aux nouvelles machines.</p></div>
           </div>
-          <form id="settings-form" class="settings-form">
+          <form id="settings-form" class="settings-form lifecycle-settings">
             <div>
               <label for="guest-password-min-length">Longueur minimale du mot de passe SSH</label>
               <input id="guest-password-min-length" name="guest_password_min_length" type="number" min="1" max="256" required>
@@ -181,6 +186,18 @@
               <label for="static-ipv4-networks">Réseaux autorisés pour les IP fixes</label>
               <textarea id="static-ipv4-networks" name="static_ipv4_networks" maxlength="2048" placeholder="192.168.10.0/24&#10;10.20.0.0/16"></textarea>
               <p class="field-help">Un réseau CIDR par ligne. Une liste vide désactive les IP fixes.</p>
+            </div>
+            <div>
+              <label for="default-vm-lifetime-days">Durée de vie par défaut (jours)</label>
+              <input id="default-vm-lifetime-days" type="number" min="1" max="3650" required>
+            </div>
+            <div>
+              <label for="max-vm-lifetime-days">Durée maximale (jours)</label>
+              <input id="max-vm-lifetime-days" type="number" min="1" max="3650" required>
+            </div>
+            <div>
+              <label for="expiration-warning-days">Préavis d’expiration (jours)</label>
+              <input id="expiration-warning-days" type="number" min="1" max="3650" required>
             </div>
             <button class="button button-primary" type="submit" id="save-settings">Enregistrer</button>
           </form>
@@ -317,6 +334,9 @@
             <div><label for="vm-ram">Mémoire (Mio)</label><input id="vm-ram" name="ram_mb" type="number" min="512" max="131072" step="256" value="4096" required></div>
             <div><label for="vm-disk">Disque (Gio)</label><input id="vm-disk" name="disk_gb" type="number" min="8" max="2048" value="40" required></div>
           </div>
+          <label for="vm-lifetime-days">Durée de mise à disposition (jours)</label>
+          <input id="vm-lifetime-days" name="lifetime_days" type="number" min="1" max="3650" required>
+          <p class="field-help" id="vm-lifetime-help">La machine restera disponible jusqu’à cette échéance. Sa suppression ne sera jamais automatique.</p>
           <p class="quota-preview" id="quota-preview">Cette demande respecte vos quotas actuels.</p>
         </div>
       </section>

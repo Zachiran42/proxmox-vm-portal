@@ -179,6 +179,7 @@ def test_owner_can_list_recent_jobs_with_safe_vm_details(app, pve_client):
     client, job_id = enqueue(app)
 
     response = client.get("/api/jobs")
+    lifecycle = response.get_json()["jobs"][0]["vm"]["lifecycle"]
 
     assert response.status_code == 200
     assert response.get_json()["jobs"] == [
@@ -209,6 +210,11 @@ def test_owner_can_list_recent_jobs_with_safe_vm_details(app, pve_client):
                 "last_ipv4": None,
                 "network_observed_at": None,
                 "status": "queued",
+                "lifecycle": {
+                    "state": "active",
+                    "expires_at": lifecycle["expires_at"],
+                    "days_remaining": 90,
+                },
             },
         }
     ]
@@ -1377,6 +1383,9 @@ def test_admin_controls_guest_password_minimum_without_complexity_rules(
     assert client.get("/api/admin/settings").get_json()["settings"] == {
         "guest_password_min_length": 12,
         "static_ipv4_networks": "",
+        "default_vm_lifetime_days": 90,
+        "max_vm_lifetime_days": 365,
+        "expiration_warning_days": 14,
     }
     changed_again = client.patch(
         "/api/admin/settings", json={"guest_password_min_length": 10}
@@ -1385,6 +1394,9 @@ def test_admin_controls_guest_password_minimum_without_complexity_rules(
     assert client.get("/api/me").get_json()["settings"] == {
         "guest_password_min_length": 10,
         "static_ipv4_networks": "",
+        "default_vm_lifetime_days": 90,
+        "max_vm_lifetime_days": 365,
+        "expiration_warning_days": 14,
     }
     pve_client.templates.add(("pve-a", 9000))
     create_cloud_profile(client)

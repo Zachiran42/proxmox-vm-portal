@@ -44,6 +44,7 @@ def test_portal_shell_loads_self_hosted_assets_and_strict_csp(app):
     assert 'id="vm-confirm-name"' in html
     assert 'id="service-grid"' in html
     assert 'id="incident-list"' in html
+    assert 'id="lifecycle-list"' in html
     assert 'id="incident-dialog"' in html
     assert 'href="/api/admin/audit-events.csv"' in html
     assert 'id="job-list"' in html
@@ -53,6 +54,10 @@ def test_portal_shell_loads_self_hosted_assets_and_strict_csp(app):
     assert 'id="vm-operation-history"' in html
     assert 'id="vm-guest-password"' in html
     assert 'id="guest-password-min-length"' in html
+    assert 'id="default-vm-lifetime-days"' in html
+    assert 'id="max-vm-lifetime-days"' in html
+    assert 'id="expiration-warning-days"' in html
+    assert 'id="vm-lifetime-days"' in html
     assert 'id="network-step"' in html
     assert 'id="vm-network-mode"' in html
     assert 'id="vm-network-profile"' in html

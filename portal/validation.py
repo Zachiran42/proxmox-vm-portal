@@ -18,6 +18,7 @@ _FIELDS = {
     "cpu",
     "ram_mb",
     "disk_gb",
+    "lifetime_days",
     "guest_username",
     "guest_password",
     "network_mode",
@@ -34,6 +35,7 @@ _VM_REQUIRED_FIELDS = _FIELDS - {
     "ipv4_cidr",
     "gateway",
     "dns_servers",
+    "lifetime_days",
 }
 _USER_FIELDS = {"username", "password", "role", "quota"}
 _USER_UPDATE_FIELDS = {"password", "role", "is_active", "quota"}
@@ -76,6 +78,7 @@ class VMRequest:
     cpu: int
     ram_mb: int
     disk_gb: int
+    lifetime_days: int | None
     guest_username: str | None
     guest_password: str | None
     network_mode: str
@@ -183,6 +186,7 @@ class VMRequest:
             ("cpu", 1, 32, 1),
             ("ram_mb", 512, 131072, 256),
             ("disk_gb", 8, 2048, 1),
+            ("lifetime_days", 1, 3650, 1),
         ):
             value = data.get(field)
             if value is not None and (type(value) is not int or not minimum <= value <= maximum or value % multiple):
@@ -192,6 +196,7 @@ class VMRequest:
             raise ValidationError(errors)
         return cls(
             **{field: data[field] for field in _VM_REQUIRED_FIELDS},
+            lifetime_days=data.get("lifetime_days"),
             guest_username=guest_username,
             guest_password=guest_password,
             network_mode=network_mode,
@@ -209,6 +214,7 @@ class VMRequest:
             "cpu": self.cpu,
             "ram_mb": self.ram_mb,
             "disk_gb": self.disk_gb,
+            "lifetime_days": self.lifetime_days,
             "guest_username": self.guest_username,
             "network_mode": self.network_mode,
             "network_profile": self.network_profile,

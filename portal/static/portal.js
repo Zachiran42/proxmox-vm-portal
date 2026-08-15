@@ -13,7 +13,7 @@ const elements = Object.fromEntries(
     "profile-error", "publish-profile", "cloud-fields", "iso-fields", "template-node",
     "template-vmid", "iso-node", "profile-iso", "toast", "machines-view", "images-view",
     "open-vm-dialog", "vm-dialog", "vm-form", "close-vm-dialog", "cancel-vm", "submit-vm",
-    "vm-profile", "vm-node", "vm-name", "vm-cpu", "vm-ram", "vm-disk", "vm-error",
+    "vm-profile", "vm-node", "vm-name", "vm-cpu", "vm-ram", "vm-disk", "vm-lifetime-days", "vm-lifetime-help", "vm-error",
     "network-step", "vm-network-profile", "vm-network-mode", "vm-static-network", "vm-ipv4-cidr",
     "vm-gateway", "vm-dns-servers",
     "guest-access-step", "vm-guest-username", "vm-guest-password",
@@ -36,11 +36,11 @@ const elements = Object.fromEntries(
     "vm-details-created", "vm-details-access", "vm-details-command", "copy-vm-ssh",
     "vm-operation-history", "close-vm-details", "operations-checked", "refresh-operations",
     "service-grid", "incident-count",
-    "queue-count", "incident-list", "incident-empty", "incident-dialog", "incident-form",
+    "queue-count", "incident-list", "incident-empty", "lifecycle-count", "lifecycle-list", "lifecycle-empty", "incident-dialog", "incident-form",
     "incident-kind", "incident-id", "incident-action", "incident-dialog-title",
     "incident-dialog-intro", "incident-close-confirmation", "incident-confirm-name",
     "incident-confirm-expected", "incident-error", "close-incident-dialog",
-    "cancel-incident", "submit-incident", "settings-form", "guest-password-min-length", "static-ipv4-networks",
+    "cancel-incident", "submit-incident", "settings-form", "guest-password-min-length", "static-ipv4-networks", "default-vm-lifetime-days", "max-vm-lifetime-days", "expiration-warning-days",
     "save-settings", "settings-error", "network-profile-form", "network-profile-label",
     "network-profile-slug", "network-profile-cidr", "network-profile-gateway",
     "network-profile-dns", "network-profile-bridge", "network-profile-vlan",
@@ -72,6 +72,8 @@ function errorMessage(payload, fallback) {
     quota_exceeded: "Cette demande dépasse votre quota disponible.",
     ip_pool_exhausted: "La plage d’adresses de ce réseau est épuisée.",
     name_conflict: "Une machine active utilise déjà ce nom.",
+    vm_expired: "Cette machine a expiré. Un administrateur doit prolonger sa mise à disposition avant de la redémarrer.",
+    lifecycle_limit_exceeded: "Cette prolongation dépasserait la durée maximale autorisée.",
     self_admin_protection: "Vous ne pouvez pas désactiver ou rétrograder votre propre compte administrateur.",
     last_admin_protection: "Le dernier administrateur actif doit être conservé.",
     external_identity_managed: "Le rôle et le mot de passe de cette identité sont gérés par son fournisseur d’identité.",
@@ -164,6 +166,9 @@ function showApplication(session) {
   if (session.user.role === "admin") {
     elements["guest-password-min-length"].value = state.settings.guest_password_min_length || 8;
     elements["static-ipv4-networks"].value = state.settings.static_ipv4_networks || "";
+    elements["default-vm-lifetime-days"].value = state.settings.default_vm_lifetime_days || 90;
+    elements["max-vm-lifetime-days"].value = state.settings.max_vm_lifetime_days || 365;
+    elements["expiration-warning-days"].value = state.settings.expiration_warning_days || 14;
   }
   Promise.all(loaders).catch(() => {});
 }
@@ -617,6 +622,12 @@ function renderJob(job) {
   appendText(resources, "span", `${job.vm.cpu} vCPU · ${formatRam(job.vm.ram_mb)} · ${job.vm.disk_gb} Gio`);
   appendText(resources, "span", `Image ${job.vm.profile || "retirée"} · ${new Date(job.created_at).toLocaleString("fr-FR")}`);
   appendText(resources, "span", job.vm.network_mode === "static" ? `Réseau fixe : ${job.vm.ipv4_cidr}` : "Réseau : DHCP");
+  if (job.vm.lifecycle?.expires_at) {
+    const label = job.vm.lifecycle.state === "expired" ? "Expirée" : `Échéance : ${new Date(job.vm.lifecycle.expires_at).toLocaleDateString("fr-FR")}`;
+    appendText(resources, "span", label, job.vm.lifecycle.state === "expired" ? "job-error" : "");
+  } else {
+    appendText(resources, "span", "Échéance : non gérée");
+  }
   if (job.vm.guest_username) appendText(resources, "span", `SSH : ${job.vm.guest_username}`);
   const displayedIp = job.network?.ipv4 || job.network?.last_ipv4 || job.vm.last_ipv4;
   if (displayedIp) {
@@ -681,6 +692,9 @@ function renderJob(job) {
 function lifecycleControls(job) {
   if (job.status !== "succeeded" || activeOperationStatuses.has(job.operation?.status)) return [];
   if (["accepted", "stopped"].includes(job.vm.status)) {
+    if (job.vm.lifecycle?.state === "expired") {
+      return [{ action: "delete", label: "Supprimer", danger: true }];
+    }
     return [{ action: "start", label: "Démarrer" }, { action: "delete", label: "Supprimer", danger: true }];
   }
   if (job.vm.status === "running") {
@@ -934,6 +948,9 @@ function updateQuotaPreview() {
 
 async function openVmDialog() {
   elements["vm-form"].reset();
+  elements["vm-lifetime-days"].value = state.settings.default_vm_lifetime_days || 90;
+  elements["vm-lifetime-days"].max = state.settings.max_vm_lifetime_days || 365;
+  elements["vm-lifetime-help"].textContent = `Durée maximale autorisée : ${state.settings.max_vm_lifetime_days || 365} jours. Aucune suppression automatique.`;
   showError(elements["vm-error"], "");
   updateGuestAccessField();
   updateQuotaPreview();
@@ -962,7 +979,8 @@ async function submitVm(event) {
   const form = new FormData(elements["vm-form"]);
   const payload = {
     name: form.get("name"), node: form.get("node"), profile: form.get("profile"),
-    cpu: Number(form.get("cpu")), ram_mb: Number(form.get("ram_mb")), disk_gb: Number(form.get("disk_gb"))
+    cpu: Number(form.get("cpu")), ram_mb: Number(form.get("ram_mb")), disk_gb: Number(form.get("disk_gb")),
+    lifetime_days: Number(form.get("lifetime_days"))
   };
   if (!elements["guest-access-step"].hidden) {
     if (elements["vm-guest-password"].value !== elements["vm-guest-password-confirmation"].value) {
@@ -1006,7 +1024,10 @@ async function saveSettings(event) {
       method: "PATCH",
       body: JSON.stringify({
         guest_password_min_length: minimum,
-        static_ipv4_networks: elements["static-ipv4-networks"].value
+        static_ipv4_networks: elements["static-ipv4-networks"].value,
+        default_vm_lifetime_days: Number(elements["default-vm-lifetime-days"].value),
+        max_vm_lifetime_days: Number(elements["max-vm-lifetime-days"].value),
+        expiration_warning_days: Number(elements["expiration-warning-days"].value)
       })
     });
     state.settings = response.settings;
@@ -1055,6 +1076,45 @@ function renderOperations() {
   elements["incident-count"].textContent = `${state.operations.queue.attention} incident${state.operations.queue.attention > 1 ? "s" : ""} ouvert${state.operations.queue.attention > 1 ? "s" : ""}`;
   elements["incident-list"].replaceChildren(...state.operations.incidents.map(renderIncident));
   elements["incident-empty"].hidden = state.operations.incidents.length !== 0;
+  const lifecycle = state.operations.lifecycle || { expired: 0, warning: 0, items: [] };
+  elements["lifecycle-count"].textContent = `${lifecycle.expired} expirée(s) · ${lifecycle.warning} proche(s) de l’échéance`;
+  elements["lifecycle-list"].replaceChildren(...lifecycle.items.map(renderLifecycleItem));
+  elements["lifecycle-empty"].hidden = lifecycle.items.length !== 0;
+}
+
+function renderLifecycleItem(item) {
+  const card = document.createElement("article");
+  card.className = "incident-card";
+  const identity = document.createElement("div");
+  identity.className = "incident-identity";
+  appendText(identity, "strong", item.name);
+  appendText(identity, "span", `${item.owner} · ${item.node}${item.vmid ? ` · VMID ${item.vmid}` : ""}`);
+  card.append(identity);
+  const wording = item.state === "expired" ? "Expirée" : `${item.days_remaining} jour(s) restant(s)`;
+  appendText(card, "p", `${wording} · ${new Date(item.expires_at).toLocaleString("fr-FR")}`, item.state === "expired" ? "job-error" : "incident-detail");
+  const actions = document.createElement("div");
+  actions.className = "incident-actions";
+  for (const days of [30, 90]) {
+    const button = appendText(actions, "button", `+ ${days} jours`, "incident-button");
+    button.type = "button";
+    button.addEventListener("click", () => extendLifecycle(item, days, button));
+  }
+  card.append(actions);
+  return card;
+}
+
+async function extendLifecycle(item, days, button) {
+  setBusy(button, true, "Prolongation…");
+  try {
+    await api(`/api/admin/vms/${encodeURIComponent(item.id)}/lifecycle`, {
+      method: "PATCH", body: JSON.stringify({ extend_days: days })
+    });
+    showToast(`${item.name} prolongée de ${days} jours.`);
+    await Promise.all([loadOperations(), loadAudit()]);
+  } catch (error) {
+    showToast(error.message);
+    setBusy(button, false, "");
+  }
 }
 
 function renderIncident(incident) {

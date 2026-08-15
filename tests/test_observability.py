@@ -132,6 +132,7 @@ def test_metrics_require_exact_bearer_token_and_expose_only_aggregates(
     assert 4 <= worker_age <= 10
     assert 'portal_jobs{status="attention"} 1' in metrics
     assert 'portal_vm_allocations{status="provisioning"} 1' in metrics
+    assert 'portal_vm_lifecycle{state="unmanaged"} 1' in metrics
     assert 'portal_users{role="operator",active="false"} 1' in metrics
     assert "portal_proxmox_online_nodes 2" in metrics
     assert "private-vm-name" not in metrics
