@@ -1005,9 +1005,9 @@ def create_app(
                 else None
             )
         except IntegrationSecretError:
-            return jsonify(errors={"api_token": "Le token enregistré est illisible; remplacez-le."}), 409
+            return jsonify(errors={"api_token": "Le token enregistré est illisible; remplacez-le."}), 409  # nosec B105
         if not api_token:
-            return jsonify(errors={"api_token": "Le token NetBox est requis."}), 400
+            return jsonify(errors={"api_token": "Le token NetBox est requis."}), 400  # nosec B105
         try:
             ca_certificate = _updated_ca_certificate(
                 current=configuration.ca_certificate if configuration else None,
@@ -1062,7 +1062,7 @@ def create_app(
                 "configured": True,
                 "source": "portal",
                 "base_url": configuration.base_url,
-                "token_configured": True,
+                "token_configured": True,  # nosec B105
                 "ca_configured": bool(configuration.ca_certificate),
                 "enabled": configuration.enabled,
             }
@@ -1084,7 +1084,7 @@ def create_app(
                 "token_id": configuration.token_id
                 if configuration is not None
                 else getattr(fallback, "token_id", ""),
-                "token_configured": True,
+                "token_configured": True,  # nosec B105
                 "ca_configured": bool(
                     configuration.ca_certificate
                     if configuration is not None
@@ -1120,9 +1120,9 @@ def create_app(
                 else None
             )
         except IntegrationSecretError:
-            return jsonify(errors={"token_secret": "Le secret enregistré est illisible; remplacez-le."}), 409
+            return jsonify(errors={"token_secret": "Le secret enregistré est illisible; remplacez-le."}), 409  # nosec B105
         if not token_secret:
-            return jsonify(errors={"token_secret": "Le secret du token est requis."}), 400
+            return jsonify(errors={"token_secret": "Le secret du token est requis."}), 400  # nosec B105
         try:
             ca_certificate = _updated_ca_certificate(
                 current=configuration.ca_certificate if configuration else None,
@@ -1183,7 +1183,7 @@ def create_app(
                 "source": "portal",
                 "api_url": configuration.api_url,
                 "token_id": configuration.token_id,
-                "token_configured": True,
+                "token_configured": True,  # nosec B105
                 "ca_configured": bool(configuration.ca_certificate),
                 "enabled": configuration.enabled,
                 "nodes": nodes if integration_request.enabled else [],

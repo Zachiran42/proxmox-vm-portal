@@ -413,7 +413,7 @@ class NetBoxConfigurationRequest:
         if api_token is not None and (
             not isinstance(api_token, str) or not 1 <= len(api_token) <= 2048
         ):
-            errors["api_token"] = "Token NetBox invalide."
+            errors["api_token"] = "Token NetBox invalide."  # nosec B105
         ca_certificate = data.get("ca_certificate")
         if ca_certificate is not None and (
             not isinstance(ca_certificate, str) or len(ca_certificate) > 65536
@@ -462,12 +462,12 @@ class ProxmoxConfigurationRequest:
             or "!" not in token_id
             or token_id.startswith("root@")
         ):
-            errors["token_id"] = "Identifiant de token non-root requis."
+            errors["token_id"] = "Identifiant de token non-root requis."  # nosec B105
         token_secret = data.get("token_secret")
         if token_secret is not None and (
             not isinstance(token_secret, str) or not 1 <= len(token_secret) <= 2048
         ):
-            errors["token_secret"] = "Secret du token Proxmox invalide."
+            errors["token_secret"] = "Secret du token Proxmox invalide."  # nosec B105
         ca_certificate = data.get("ca_certificate")
         if ca_certificate is not None and (
             not isinstance(ca_certificate, str) or len(ca_certificate) > 65536

@@ -4,8 +4,8 @@ umask 077
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 ROOT_DIR=$(CDPATH='' cd -- "${PORTAL_SOURCE_ROOT:-$SCRIPT_DIR/../..}" && pwd)
-REPOSITORY="zachiran42/proxmox-vm-portal"
-RELEASE_TAG=${PORTAL_RELEASE_TAG:-v0.23.0}
+REPOSITORY="Zachiran42/proxmox-vm-portal"
+RELEASE_TAG=${PORTAL_RELEASE_TAG:-v0.23.1}
 OUTPUT_DIR=${1:-$PWD}
 API_ROOT="https://api.github.com/repos/$REPOSITORY"
 COSIGN_IMAGE="ghcr.io/sigstore/cosign/cosign:v3.0.6@sha256:de9c65609e6bde17e6b48de485ee788407c9502fa08b8f4459f595b21f56cd00"
@@ -25,7 +25,7 @@ for command in curl docker git jq sha256sum tar; do
 done
 [[ -n ${PORTAL_GITHUB_TOKEN:-} ]] || fail \
     "PORTAL_GITHUB_TOKEN est requis uniquement sur le poste connecté de préparation."
-[[ ${PORTAL_GITHUB_USERNAME:-zachiran42} =~ ^[A-Za-z0-9-]+$ ]] || fail \
+[[ ${PORTAL_GITHUB_USERNAME:-Zachiran42} =~ ^[A-Za-z0-9-]+$ ]] || fail \
     "PORTAL_GITHUB_USERNAME est invalide."
 [[ $RELEASE_TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "Tag de release invalide."
 [[ $(dpkg --print-architecture 2>/dev/null || true) == amd64 ]] || fail \
@@ -104,7 +104,7 @@ docker run --rm --network none --read-only --cap-drop ALL \
     --insecure-ignore-tlog=true /work/release-manifest.json
 
 printf '%s' "$PORTAL_GITHUB_TOKEN" | docker --config "$docker_config" login ghcr.io \
-    --username "${PORTAL_GITHUB_USERNAME:-zachiran42}" --password-stdin >/dev/null
+    --username "${PORTAL_GITHUB_USERNAME:-Zachiran42}" --password-stdin >/dev/null
 docker --config "$docker_config" pull "$image"
 
 mapfile -t service_images < <(

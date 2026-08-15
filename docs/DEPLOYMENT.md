@@ -44,8 +44,8 @@ sudo docker login ghcr.io
 
 PORTAL_DEPLOY_MODE=release
 PORTAL_IMAGE=ghcr.io/zachiran42/proxmox-vm-portal@sha256:DIGEST_RELEASE
-PORTAL_RELEASE_TAG=v0.23.0
-PORTAL_RELEASE_REPOSITORY=zachiran42/proxmox-vm-portal
+PORTAL_RELEASE_TAG=v0.23.1
+PORTAL_RELEASE_REPOSITORY=Zachiran42/proxmox-vm-portal
 PORTAL_RELEASE_TRANSPARENCY=private
 ```
 
@@ -67,13 +67,13 @@ avant son téléchargement.
 ```bash
 read -rsp "Token GitHub temporaire : " PORTAL_GITHUB_TOKEN && echo
 export PORTAL_GITHUB_TOKEN
-export PORTAL_GITHUB_USERNAME="zachiran42"
+export PORTAL_GITHUB_USERNAME="Zachiran42"
 bootstrap=$(mktemp)
 printf 'header = "Authorization: Bearer %s"\n' "$PORTAL_GITHUB_TOKEN" | \
 curl --config - --proto '=https' --tlsv1.2 --fail --silent --show-error \
   -H "Accept: application/vnd.github.raw+json" \
   -H "X-GitHub-Api-Version: 2022-11-28" \
-  "https://api.github.com/repos/zachiran42/proxmox-vm-portal/contents/deploy/scripts/bootstrap-debian.sh?ref=v0.23.0" \
+  "https://api.github.com/repos/Zachiran42/proxmox-vm-portal/contents/deploy/scripts/bootstrap-debian.sh?ref=v0.23.1" \
   --output "$bootstrap" && \
 bash -n "$bootstrap" && \
 sudo --preserve-env=PORTAL_GITHUB_TOKEN,PORTAL_GITHUB_USERNAME bash "$bootstrap"
@@ -93,7 +93,7 @@ Révoquez le token temporaire après le test si vous ne souhaitez pas le conserv
 
 ```bash
 sudo apt-get update && sudo apt-get install -y git
-sudo git clone https://github.com/zachiran42/proxmox-vm-portal.git /opt/proxmox-vm-portal
+sudo git clone https://github.com/Zachiran42/proxmox-vm-portal.git /opt/proxmox-vm-portal
 cd /opt/proxmox-vm-portal
 sudo cp .env.production.example .env.production
 sudoedit .env.production
