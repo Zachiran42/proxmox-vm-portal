@@ -1,4 +1,4 @@
-FROM python:3.13.14-alpine3.24@sha256:399babc8b49529dabfd9c922f2b5eea81d611e4512e3ed250d75bd2e7683f4b0 AS runtime
+FROM python:3.14.7-alpine3.24@sha256:05b2b8b732ecd268fee8727a369f936f022d1321b59befd13c30ede22769dcdc AS runtime
 
 ARG PORTAL_VERSION=dev
 ARG PORTAL_VCS_REF=unknown
