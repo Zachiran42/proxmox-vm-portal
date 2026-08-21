@@ -11,8 +11,9 @@ Password Pusher, UPID ou autre identifiant individuel. Elles exposent seulement
 des compteurs agrégés, l’âge du dernier heartbeat et la disponibilité Proxmox.
 `portal_vm_lifecycle{state="expired|warning|unmanaged"}` expose aussi les
 volumes à traiter pour la MCO, sans aucun identifiant individuel.
-`portal_vm_lifecycle{state="expired|warning|unmanaged"}` expose aussi les
-volumes à traiter pour la MCO, sans aucun identifiant individuel.
+Les demandes soumises à validation sont visibles uniquement sous forme agrégée
+avec `portal_jobs{status="approval_pending"}` et
+`portal_vm_allocations{status="pending_approval"}`.
 
 ## Prometheus et Alertmanager
 

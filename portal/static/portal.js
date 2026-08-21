@@ -1,13 +1,13 @@
 "use strict";
 
-const state = { csrfToken: "", user: null, usage: {}, settings: {}, profiles: [], networkProfiles: [], nodes: [], jobs: [], users: [], auditEvents: [], operations: null, integrations: {}, pollTimer: null, showArchived: false, detailsSshCommand: "" };
+const state = { csrfToken: "", user: null, usage: {}, settings: {}, profiles: [], networkProfiles: [], nodes: [], jobs: [], notifications: [], unreadNotifications: 0, users: [], auditEvents: [], operations: null, fleet: null, integrations: {}, pollTimer: null, showArchived: false, detailsSshCommand: "" };
 const elements = Object.fromEntries(
   [
     "login-screen", "login-form", "local-login-fields", "login-error", "login-button",
     "login-separator", "oidc-login", "app-shell", "user-avatar", "user-name", "user-role",
     "first-password-dialog", "first-password-form", "first-password", "first-password-confirmation",
     "first-password-error", "save-first-password",
-    "logout-button", "open-profile-dialog", "refresh-profiles", "profile-grid", "empty-state",
+    "logout-button", "notifications-button", "notification-badge", "notifications-dialog", "notifications-summary", "notification-list", "notifications-empty", "close-notifications", "read-all-notifications", "open-profile-dialog", "refresh-profiles", "profile-grid", "empty-state",
     "profile-count", "stat-active", "stat-cloud", "stat-disabled", "profile-dialog",
     "profile-form", "close-profile-dialog", "cancel-profile", "profile-label", "profile-slug",
     "profile-error", "publish-profile", "cloud-fields", "iso-fields", "template-node",
@@ -20,7 +20,7 @@ const elements = Object.fromEntries(
     "vm-guest-password-confirmation", "guest-password-help", "quota-preview", "refresh-jobs", "show-archived", "job-list",
     "jobs-empty", "job-count", "quota-vms", "quota-cpu", "quota-ram", "quota-disk",
     "quota-vms-progress", "quota-cpu-progress", "quota-ram-progress", "quota-disk-progress",
-    "admin-nav", "admin-mobile-nav", "admin-view", "open-user-dialog", "refresh-users",
+    "operations-nav", "operations-mobile-nav", "operations-view", "admin-nav", "admin-mobile-nav", "admin-view", "open-user-dialog", "refresh-users",
     "user-list", "user-count", "stat-users-active", "stat-users-oidc", "stat-users-admin",
     "audit-list", "audit-empty", "audit-count", "audit-outcome", "audit-search", "refresh-audit",
     "user-dialog", "user-form", "user-id", "user-dialog-title", "user-dialog-intro",
@@ -35,12 +35,12 @@ const elements = Object.fromEntries(
     "vm-details-resources", "vm-details-ssh-user", "vm-details-ipv4", "vm-details-observed",
     "vm-details-created", "vm-details-access", "vm-details-command", "copy-vm-ssh",
     "vm-operation-history", "close-vm-details", "operations-checked", "refresh-operations",
-    "service-grid", "incident-count",
-    "queue-count", "incident-list", "incident-empty", "lifecycle-count", "lifecycle-list", "lifecycle-empty", "incident-dialog", "incident-form",
+    "service-grid", "incident-count", "fleet-filters", "fleet-search", "fleet-status", "fleet-node", "fleet-scope", "fleet-count", "fleet-list", "fleet-empty", "refresh-fleet",
+    "queue-count", "approval-count", "approval-list", "approval-empty", "incident-list", "incident-empty", "lifecycle-count", "lifecycle-list", "lifecycle-empty", "incident-dialog", "incident-form",
     "incident-kind", "incident-id", "incident-action", "incident-dialog-title",
     "incident-dialog-intro", "incident-close-confirmation", "incident-confirm-name",
     "incident-confirm-expected", "incident-error", "close-incident-dialog",
-    "cancel-incident", "submit-incident", "settings-form", "guest-password-min-length", "static-ipv4-networks", "default-vm-lifetime-days", "max-vm-lifetime-days", "expiration-warning-days",
+    "cancel-incident", "submit-incident", "settings-form", "guest-password-min-length", "static-ipv4-networks", "default-vm-lifetime-days", "max-vm-lifetime-days", "expiration-warning-days", "vm-approval-required",
     "save-settings", "settings-error", "network-profile-form", "network-profile-label",
     "network-profile-slug", "network-profile-cidr", "network-profile-gateway",
     "network-profile-dns", "network-profile-bridge", "network-profile-vlan",
@@ -86,6 +86,7 @@ function errorMessage(payload, fallback) {
     archive_invalid_state: "Seules les demandes échouées ou les VM supprimées peuvent être archivées.",
     incident_not_open: "Cet incident a déjà été traité.",
     incident_not_resumable: "Aucun identifiant Proxmox exploitable ne permet de reprendre ce suivi.",
+    approval_already_decided: "Cette demande a déjà été traitée.",
     forbidden: "Cette action est réservée aux administrateurs."
   };
   return (payload && known[payload.error]) || fallback;
@@ -132,6 +133,9 @@ function showLogin() {
   window.clearTimeout(state.pollTimer);
   state.csrfToken = "";
   state.user = null;
+  state.notifications = [];
+  state.unreadNotifications = 0;
+  if (elements["notifications-dialog"].open) elements["notifications-dialog"].close();
   if (elements["first-password-dialog"].open) elements["first-password-dialog"].close();
   elements["app-shell"].hidden = true;
   elements["login-screen"].hidden = false;
@@ -156,19 +160,24 @@ function showApplication(session) {
   elements["user-role"].textContent = { admin: "administrateur", operator: "opérateur", user: "utilisateur" }[session.user.role] || session.user.role;
   elements["user-avatar"].textContent = session.user.username.slice(0, 1).toUpperCase();
   elements["open-profile-dialog"].hidden = session.user.role !== "admin";
+  const canOperate = ["admin", "operator"].includes(session.user.role);
+  elements["operations-nav"].hidden = !canOperate;
+  elements["operations-mobile-nav"].hidden = !canOperate;
   elements["admin-nav"].hidden = session.user.role !== "admin";
   elements["admin-mobile-nav"].hidden = session.user.role !== "admin";
   renderQuotas();
   const requestedView = window.location.hash.slice(1);
-  switchView(["images", "admin"].includes(requestedView) ? requestedView : "machines");
+  switchView(["images", "operations", "admin"].includes(requestedView) ? requestedView : "machines");
   const loaders = [loadProfiles(), loadNetworkProfiles(), loadNodes(), loadJobs()];
-  if (session.user.role === "admin") loaders.push(loadUsers(), loadAudit(), loadOperations(), loadIntegrations());
+  if (canOperate) loaders.push(loadOperations(), loadFleet());
+  if (session.user.role === "admin") loaders.push(loadUsers(), loadAudit(), loadIntegrations());
   if (session.user.role === "admin") {
     elements["guest-password-min-length"].value = state.settings.guest_password_min_length || 8;
     elements["static-ipv4-networks"].value = state.settings.static_ipv4_networks || "";
     elements["default-vm-lifetime-days"].value = state.settings.default_vm_lifetime_days || 90;
     elements["max-vm-lifetime-days"].value = state.settings.max_vm_lifetime_days || 365;
     elements["expiration-warning-days"].value = state.settings.expiration_warning_days || 14;
+    elements["vm-approval-required"].checked = Boolean(state.settings.vm_approval_required);
   }
   Promise.all(loaders).catch(() => {});
 }
@@ -235,9 +244,11 @@ async function saveFirstPassword(event) {
 }
 
 function switchView(view) {
+  if (view === "operations" && !["admin", "operator"].includes(state.user?.role)) view = "machines";
   if (view === "admin" && state.user?.role !== "admin") view = "machines";
   elements["machines-view"].hidden = view !== "machines";
   elements["images-view"].hidden = view !== "images";
+  elements["operations-view"].hidden = view !== "operations";
   elements["admin-view"].hidden = view !== "admin";
   document.querySelectorAll("[data-view]").forEach((control) => {
     const active = control.dataset.view === view;
@@ -570,15 +581,15 @@ async function loadIsos(node) {
   }
 }
 
-const terminalStatuses = new Set(["succeeded", "failed", "attention"]);
+const terminalStatuses = new Set(["approval_pending", "succeeded", "failed", "attention"]);
 const statusLabels = {
-  queued: "En file", validating: "Validation", submitting: "Création",
+  approval_pending: "En attente d’approbation", queued: "En file", validating: "Validation", submitting: "Création",
   submitted: "En cours", polling: "En cours", succeeded: "Prête",
   failed: "Échec", attention: "À vérifier"
 };
 const vmStatusLabels = {
-  queued: "Réservée", provisioning: "Provisionnement", accepted: "Prête",
-  running: "Démarrée", stopped: "Arrêtée", failed: "Échec", deleted: "Supprimée"
+  pending_approval: "Approbation requise", queued: "Réservée", provisioning: "Provisionnement", accepted: "Prête",
+  running: "Démarrée", stopped: "Arrêtée", rejected: "Refusée", failed: "Échec", deleted: "Supprimée"
 };
 const operationLabels = { start: "Démarrage", stop: "Arrêt", reboot: "Redémarrage", delete: "Suppression" };
 const activeOperationStatuses = new Set(["queued", "submitting", "submitted", "polling"]);
@@ -594,13 +605,15 @@ const jobErrorLabels = {
   pve_operation_failed: "Action échouée dans Proxmox",
   vm_must_be_stopped: "Arrêtez la VM avant de la supprimer",
   password_pusher_not_configured: "Remise d’accès indisponible",
-  password_pusher_unavailable: "Password Pusher indisponible"
+  password_pusher_unavailable: "Password Pusher indisponible",
+  approval_rejected: "Demande refusée par un administrateur"
 };
 
 function jobStatusClass(status) {
   if (status === "succeeded") return "status-success";
   if (status === "failed") return "status-error";
   if (status === "attention") return "status-attention";
+  if (status === "approval_pending") return "status-attention";
   return "status-progress";
 }
 
@@ -640,6 +653,9 @@ function renderJob(job) {
   const result = document.createElement("div");
   result.className = "job-result";
   if (job.error_code) appendText(result, "span", jobErrorLabels[job.error_code] || "Une vérification est nécessaire", "job-error");
+  if (job.vm.approval?.status === "rejected" && job.vm.approval.reason) {
+    appendText(result, "span", `Motif : ${job.vm.approval.reason}`, "job-error");
+  }
   if (job.guest_access) {
     const access = appendText(result, "a", "Voir l’accès", "credential-button");
     access.href = job.guest_access.password_url;
@@ -678,7 +694,7 @@ function renderJob(job) {
     button.type = "button";
     button.addEventListener("click", () => openVmActionDialog(job, action));
   });
-  if (["failed", "deleted"].includes(job.vm.status)) {
+  if (["rejected", "failed", "deleted"].includes(job.vm.status)) {
     const archived = Boolean(job.archived_at);
     const archive = appendText(actions, "button", archived ? "Restaurer" : "Archiver", "vm-action-button");
     archive.type = "button";
@@ -740,11 +756,91 @@ async function loadJobs() {
     renderQuotas();
     renderJobs();
     scheduleJobPoll();
+    await loadNotifications(false);
   } catch (error) {
     if (error.status === 401) return showLogin();
     elements["job-count"].textContent = error.message;
   } finally {
     elements["refresh-jobs"].disabled = false;
+  }
+}
+
+function renderNotificationBadge() {
+  const count = state.unreadNotifications;
+  elements["notification-badge"].textContent = count > 99 ? "99+" : String(count);
+  elements["notification-badge"].hidden = count === 0;
+  elements["notifications-button"].setAttribute(
+    "aria-label",
+    count ? `Ouvrir les notifications, ${count} non lue(s)` : "Ouvrir les notifications"
+  );
+}
+
+function renderNotifications() {
+  const cards = state.notifications.map((notification) => {
+    const item = document.createElement("article");
+    item.className = `notification-item${notification.read_at ? "" : " unread"}`;
+    appendText(item, "span", "", "notification-dot");
+    const copy = document.createElement("div");
+    copy.className = "notification-copy";
+    appendText(copy, "strong", notification.title);
+    appendText(copy, "p", notification.message);
+    appendText(copy, "span", new Date(notification.created_at).toLocaleString("fr-FR"));
+    item.append(copy);
+    if (!notification.read_at) {
+      const read = appendText(item, "button", "Marquer comme lue", "notification-read");
+      read.type = "button";
+      read.addEventListener("click", () => markNotificationRead(notification, read));
+    }
+    return item;
+  });
+  elements["notification-list"].replaceChildren(...cards);
+  elements["notifications-empty"].hidden = state.notifications.length !== 0;
+  elements["notifications-summary"].textContent = `${state.unreadNotifications} notification${state.unreadNotifications > 1 ? "s" : ""} non lue${state.unreadNotifications > 1 ? "s" : ""}`;
+  elements["read-all-notifications"].disabled = state.unreadNotifications === 0;
+  renderNotificationBadge();
+}
+
+async function loadNotifications(renderList = false) {
+  try {
+    const response = await api("/api/notifications?limit=50");
+    state.notifications = response.notifications;
+    state.unreadNotifications = response.unread_count;
+    if (renderList) renderNotifications();
+    else renderNotificationBadge();
+  } catch (error) {
+    if (error.status === 401) return;
+    if (renderList) elements["notifications-summary"].textContent = error.message;
+  }
+}
+
+async function openNotifications() {
+  elements["notifications-dialog"].showModal();
+  await loadNotifications(true);
+}
+
+async function markNotificationRead(notification, button) {
+  setBusy(button, true, "Lecture…");
+  try {
+    const response = await api(`/api/notifications/${encodeURIComponent(notification.id)}/read`, { method: "POST" });
+    Object.assign(notification, response.notification);
+    state.unreadNotifications = Math.max(0, state.unreadNotifications - 1);
+    renderNotifications();
+  } catch (error) {
+    showToast(error.message);
+    setBusy(button, false, "");
+  }
+}
+
+async function markAllNotificationsRead() {
+  setBusy(elements["read-all-notifications"], true, "Mise à jour…");
+  try {
+    await api("/api/notifications/read-all", { method: "POST" });
+    await loadNotifications(true);
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    setBusy(elements["read-all-notifications"], false, "");
+    elements["read-all-notifications"].disabled = state.unreadNotifications === 0;
   }
 }
 
@@ -999,9 +1095,9 @@ async function submitVm(event) {
     }
   }
   try {
-    await api("/api/vms", { method: "POST", body: JSON.stringify(payload) });
+    const response = await api("/api/vms", { method: "POST", body: JSON.stringify(payload) });
     closeVmDialog();
-    showToast("La machine a été réservée et placée dans la file.");
+    showToast(response.status === "pending_approval" ? "La demande attend l’approbation d’un administrateur." : "La machine a été réservée et placée dans la file.");
     const session = await api("/api/me");
     state.usage = session.usage;
     state.csrfToken = session.csrf_token;
@@ -1027,7 +1123,8 @@ async function saveSettings(event) {
         static_ipv4_networks: elements["static-ipv4-networks"].value,
         default_vm_lifetime_days: Number(elements["default-vm-lifetime-days"].value),
         max_vm_lifetime_days: Number(elements["max-vm-lifetime-days"].value),
-        expiration_warning_days: Number(elements["expiration-warning-days"].value)
+        expiration_warning_days: Number(elements["expiration-warning-days"].value),
+        vm_approval_required: elements["vm-approval-required"].checked
       })
     });
     state.settings = response.settings;
@@ -1080,6 +1177,59 @@ function renderOperations() {
   elements["lifecycle-count"].textContent = `${lifecycle.expired} expirée(s) · ${lifecycle.warning} proche(s) de l’échéance`;
   elements["lifecycle-list"].replaceChildren(...lifecycle.items.map(renderLifecycleItem));
   elements["lifecycle-empty"].hidden = lifecycle.items.length !== 0;
+  const approvals = state.operations.approvals || { pending: 0, items: [] };
+  elements["approval-count"].textContent = `${approvals.pending} demande${approvals.pending > 1 ? "s" : ""} en attente`;
+  elements["approval-list"].replaceChildren(...approvals.items.map(renderApprovalItem));
+  elements["approval-empty"].hidden = approvals.items.length !== 0;
+}
+
+function renderApprovalItem(item) {
+  const card = document.createElement("article");
+  card.className = "incident-card";
+  const identity = document.createElement("div");
+  identity.className = "incident-identity";
+  appendText(identity, "strong", item.name);
+  appendText(identity, "span", `${item.owner} · ${item.node} · ${item.profile || "profil retiré"}`);
+  card.append(identity);
+  const network = item.ipv4_cidr ? ` · IP ${item.ipv4_cidr}` : " · DHCP";
+  appendText(card, "p", `${item.cpu} vCPU · ${formatRam(item.ram_mb)} · ${item.disk_gb} Gio${network} · ${new Date(item.requested_at).toLocaleString("fr-FR")}`, "incident-detail");
+  if (state.user?.role === "admin") {
+    const actions = document.createElement("div");
+    actions.className = "incident-actions";
+    const approve = appendText(actions, "button", "Approuver", "incident-button");
+    approve.type = "button";
+    approve.addEventListener("click", () => decideApproval(item, "approve", approve));
+    const reject = appendText(actions, "button", "Refuser", "incident-button danger");
+    reject.type = "button";
+    reject.addEventListener("click", () => decideApproval(item, "reject", reject));
+    card.append(actions);
+  } else {
+    appendText(card, "span", "Lecture seule", "queue-count");
+  }
+  return card;
+}
+
+async function decideApproval(item, action, button) {
+  let reason = null;
+  if (action === "reject") {
+    reason = window.prompt(`Motif du refus pour ${item.name} (visible par l’utilisateur) :`);
+    if (reason === null) return;
+    reason = reason.trim();
+    if (!reason) return showToast("Un motif de refus est requis.");
+  } else if (!window.confirm(`Approuver le provisionnement de ${item.name} pour ${item.owner} ?`)) {
+    return;
+  }
+  setBusy(button, true, action === "approve" ? "Approbation…" : "Refus…");
+  try {
+    await api(`/api/admin/vms/${encodeURIComponent(item.id)}/approval`, {
+      method: "POST", body: JSON.stringify({ action, reason })
+    });
+    showToast(action === "approve" ? `${item.name} placée dans la file de provisionnement.` : `${item.name} refusée.`);
+    await Promise.all([loadOperations(), loadAudit(), loadUsers()]);
+  } catch (error) {
+    showToast(error.message);
+    setBusy(button, false, "");
+  }
 }
 
 function renderLifecycleItem(item) {
@@ -1092,14 +1242,18 @@ function renderLifecycleItem(item) {
   card.append(identity);
   const wording = item.state === "expired" ? "Expirée" : `${item.days_remaining} jour(s) restant(s)`;
   appendText(card, "p", `${wording} · ${new Date(item.expires_at).toLocaleString("fr-FR")}`, item.state === "expired" ? "job-error" : "incident-detail");
-  const actions = document.createElement("div");
-  actions.className = "incident-actions";
-  for (const days of [30, 90]) {
-    const button = appendText(actions, "button", `+ ${days} jours`, "incident-button");
-    button.type = "button";
-    button.addEventListener("click", () => extendLifecycle(item, days, button));
+  if (state.user?.role === "admin") {
+    const actions = document.createElement("div");
+    actions.className = "incident-actions";
+    for (const days of [30, 90]) {
+      const button = appendText(actions, "button", `+ ${days} jours`, "incident-button");
+      button.type = "button";
+      button.addEventListener("click", () => extendLifecycle(item, days, button));
+    }
+    card.append(actions);
+  } else {
+    appendText(card, "span", "Lecture seule", "queue-count");
   }
-  card.append(actions);
   return card;
 }
 
@@ -1127,17 +1281,21 @@ function renderIncident(incident) {
   card.append(identity);
   const action = incident.action === "provision" ? "Provisionnement" : operationLabels[incident.action];
   appendText(card, "p", `${action} · ${jobErrorLabels[incident.error_code] || incident.error_code || "État ambigu"} · ${new Date(incident.updated_at).toLocaleString("fr-FR")}`, "incident-detail");
-  const actions = document.createElement("div");
-  actions.className = "incident-actions";
-  if (incident.can_resume) {
-    const resume = appendText(actions, "button", "Reprendre le suivi", "incident-button");
-    resume.type = "button";
-    resume.addEventListener("click", () => openIncidentDialog(incident, "resume_tracking"));
+  if (state.user?.role === "admin") {
+    const actions = document.createElement("div");
+    actions.className = "incident-actions";
+    if (incident.can_resume) {
+      const resume = appendText(actions, "button", "Reprendre le suivi", "incident-button");
+      resume.type = "button";
+      resume.addEventListener("click", () => openIncidentDialog(incident, "resume_tracking"));
+    }
+    const close = appendText(actions, "button", "Clôturer en échec", "incident-button danger");
+    close.type = "button";
+    close.addEventListener("click", () => openIncidentDialog(incident, "close_failed"));
+    card.append(actions);
+  } else {
+    appendText(card, "span", "Lecture seule", "queue-count");
   }
-  const close = appendText(actions, "button", "Clôturer en échec", "incident-button danger");
-  close.type = "button";
-  close.addEventListener("click", () => openIncidentDialog(incident, "close_failed"));
-  card.append(actions);
   return card;
 }
 
@@ -1151,6 +1309,59 @@ async function loadOperations() {
     elements["operations-checked"].textContent = error.message;
   } finally {
     elements["refresh-operations"].disabled = false;
+  }
+}
+
+function replaceFilterOptions(select, values, emptyLabel, labeler = (value) => value) {
+  const selected = select.value;
+  select.replaceChildren(new Option(emptyLabel, ""));
+  values.forEach((value) => select.add(new Option(labeler(value), value)));
+  if ([...select.options].some((option) => option.value === selected)) select.value = selected;
+}
+
+function renderFleet() {
+  if (!state.fleet) return;
+  const rows = state.fleet.items.map((vm) => {
+    const row = document.createElement("tr");
+    const machine = document.createElement("td");
+    appendText(machine, "strong", vm.name);
+    appendText(machine, "span", vm.profile || "Profil retiré");
+    row.append(machine);
+    appendText(row, "td", vm.owner);
+    appendText(row, "td", `${vm.node}${vm.vmid ? ` · ${vm.vmid}` : " · VMID en attente"}`);
+    const network = document.createElement("td");
+    appendText(network, "strong", vm.ipv4 || "IP en attente");
+    appendText(network, "span", vm.network_mode === "static" ? "IP fixe" : "DHCP");
+    row.append(network);
+    appendText(row, "td", `${vm.cpu} vCPU · ${formatRam(vm.ram_mb)} · ${vm.disk_gb} Gio`);
+    const status = appendText(row, "td", vmStatusLabels[vm.status] || vm.status);
+    status.className = `fleet-status ${["failed", "rejected"].includes(vm.status) ? "status-error" : ["running", "accepted"].includes(vm.status) ? "status-success" : "status-progress"}`;
+    const lifecycle = vm.lifecycle || {};
+    appendText(row, "td", lifecycle.expires_at ? `${lifecycle.days_remaining} j` : "Non gérée");
+    return row;
+  });
+  elements["fleet-list"].replaceChildren(...rows);
+  elements["fleet-empty"].hidden = rows.length !== 0;
+  elements["fleet-count"].textContent = `${state.fleet.count} machine${state.fleet.count > 1 ? "s" : ""} affichée${state.fleet.count > 1 ? "s" : ""}`;
+  replaceFilterOptions(elements["fleet-status"], state.fleet.filters.statuses, "Tous les états", (value) => vmStatusLabels[value] || value);
+  replaceFilterOptions(elements["fleet-node"], state.fleet.filters.nodes, "Tous les nœuds");
+}
+
+async function loadFleet() {
+  elements["refresh-fleet"].disabled = true;
+  const parameters = new URLSearchParams();
+  if (elements["fleet-search"].value.trim()) parameters.set("search", elements["fleet-search"].value.trim());
+  if (elements["fleet-status"].value) parameters.set("status", elements["fleet-status"].value);
+  if (elements["fleet-node"].value) parameters.set("node", elements["fleet-node"].value);
+  parameters.set("scope", elements["fleet-scope"].value);
+  try {
+    state.fleet = await api(`/api/operations/vms?${parameters}`);
+    renderFleet();
+  } catch (error) {
+    if (error.status === 401) return showLogin();
+    elements["fleet-count"].textContent = error.message;
+  } finally {
+    elements["refresh-fleet"].disabled = false;
   }
 }
 
@@ -1462,6 +1673,9 @@ elements["login-form"].addEventListener("submit", login);
 elements["first-password-form"].addEventListener("submit", saveFirstPassword);
 elements["first-password-dialog"].addEventListener("cancel", (event) => event.preventDefault());
 elements["logout-button"].addEventListener("click", logout);
+elements["notifications-button"].addEventListener("click", openNotifications);
+elements["close-notifications"].addEventListener("click", () => elements["notifications-dialog"].close());
+elements["read-all-notifications"].addEventListener("click", markAllNotificationsRead);
 document.querySelectorAll("[data-view]").forEach((control) => control.addEventListener("click", (event) => {
   event.preventDefault();
   switchView(control.dataset.view);
@@ -1500,6 +1714,11 @@ elements["network-profile-form"].addEventListener("submit", saveNetworkProfile);
 elements["network-profile-automatic"].addEventListener("change", updateNetworkPoolFields);
 elements["refresh-users"].addEventListener("click", loadUsers);
 elements["refresh-operations"].addEventListener("click", loadOperations);
+elements["refresh-fleet"].addEventListener("click", loadFleet);
+elements["fleet-filters"].addEventListener("submit", (event) => {
+  event.preventDefault();
+  loadFleet();
+});
 elements["close-incident-dialog"].addEventListener("click", closeIncidentDialog);
 elements["cancel-incident"].addEventListener("click", closeIncidentDialog);
 elements["incident-form"].addEventListener("submit", submitIncident);
@@ -1534,6 +1753,9 @@ elements["user-dialog"].addEventListener("click", (event) => {
 });
 elements["incident-dialog"].addEventListener("click", (event) => {
   if (event.target === elements["incident-dialog"]) closeIncidentDialog();
+});
+elements["notifications-dialog"].addEventListener("click", (event) => {
+  if (event.target === elements["notifications-dialog"]) elements["notifications-dialog"].close();
 });
 
 configureAuthenticationChoices();

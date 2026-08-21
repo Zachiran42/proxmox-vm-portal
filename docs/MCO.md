@@ -39,4 +39,4 @@ bash deploy/scripts/compose.sh exec -T api flask --app portal:create_app db curr
 curl --cacert /root/proxmox-vm-portal-local-ca.crt https://ADRESSE_DU_PORTAIL/healthz
 ```
 
-La révision attendue est `0014_vm_lifecycle_mco`.
+La révision attendue est `0017_lifecycle_notifications`.

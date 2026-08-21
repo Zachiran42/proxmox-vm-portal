@@ -201,8 +201,8 @@ def test_owner_can_list_recent_jobs_with_safe_vm_details(app, pve_client):
                 "ram_mb": 4096,
                 "disk_gb": 40,
                 "guest_username": None,
-                    "network_mode": "dhcp",
-                    "automatic_ip": False,
+                "network_mode": "dhcp",
+                "automatic_ip": False,
                 "network_profile": None,
                 "ipv4_cidr": None,
                 "gateway": None,
@@ -210,6 +210,12 @@ def test_owner_can_list_recent_jobs_with_safe_vm_details(app, pve_client):
                 "last_ipv4": None,
                 "network_observed_at": None,
                 "status": "queued",
+                "approval": {
+                    "status": "not_required",
+                    "requested_at": None,
+                    "decided_at": None,
+                    "reason": None,
+                },
                 "lifecycle": {
                     "state": "active",
                     "expires_at": lifecycle["expires_at"],
@@ -1386,6 +1392,7 @@ def test_admin_controls_guest_password_minimum_without_complexity_rules(
         "default_vm_lifetime_days": 90,
         "max_vm_lifetime_days": 365,
         "expiration_warning_days": 14,
+        "vm_approval_required": False,
     }
     changed_again = client.patch(
         "/api/admin/settings", json={"guest_password_min_length": 10}
@@ -1397,6 +1404,7 @@ def test_admin_controls_guest_password_minimum_without_complexity_rules(
         "default_vm_lifetime_days": 90,
         "max_vm_lifetime_days": 365,
         "expiration_warning_days": 14,
+        "vm_approval_required": False,
     }
     pve_client.templates.add(("pve-a", 9000))
     create_cloud_profile(client)

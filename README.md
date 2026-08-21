@@ -51,6 +51,13 @@ stocké dans le dépôt.
 - Chaque nouvelle VM reçoit une échéance administrable. Le portail avertit avant
   expiration et bloque ensuite uniquement son démarrage ou redémarrage jusqu'à
   prolongation par un administrateur. Il ne supprime jamais automatiquement une VM.
+- Un circuit d'approbation peut être activé par l'administrateur. Une demande
+  attend alors une décision auditée avant tout appel à Proxmox ou NetBox ; un
+  refus motivé efface le secret invité et libère les quotas.
+- Un centre de notifications interne informe les administrateurs des demandes
+  à traiter et les propriétaires des décisions et résultats de provisionnement,
+  ainsi que des échéances proches ou atteintes, sans dépendance SMTP ni
+  exposition de secret.
 
 Le token de service PVE doit être limité par ACL aux nœuds, stockages et opérations requis. N'utilisez jamais `root@pam`.
 
@@ -160,6 +167,10 @@ Construction reproductible des templates Debian depuis l'ISO :
 Métriques, règles d’alerte et export d’audit :
 [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md).
 Cycle de vie, échéances et procédures MCO : [`docs/MCO.md`](docs/MCO.md).
+Approbation administrative optionnelle : [`docs/APPROVALS.md`](docs/APPROVALS.md).
+Centre de notifications interne : [`docs/NOTIFICATIONS.md`](docs/NOTIFICATIONS.md).
+Inventaire global et rôle opérateur : [`docs/OPERATIONS.md`](docs/OPERATIONS.md).
+Notes de la version 0.24.0 : [`docs/RELEASE_0.24.0.md`](docs/RELEASE_0.24.0.md).
 Publication, SBOM, provenance et vérification des signatures :
 [`docs/RELEASES.md`](docs/RELEASES.md).
 
@@ -167,9 +178,12 @@ Endpoints : `GET /healthz`, `GET /metrics`, `GET /`, `POST /login`, `POST /logou
 `GET /api/me`, `POST /api/me/password`, `GET /api/nodes`, `GET /api/nodes/<node>/isos`,
 `GET /api/image-profiles`, `POST /api/vms`, `POST /api/vms/<id>/actions`,
 `GET /api/jobs`, `GET /api/jobs/<id>`,
+`GET /api/notifications`, `POST /api/notifications/<id>/read`,
+`POST /api/notifications/read-all`,
 `GET|POST /api/admin/users`, `PATCH /api/admin/users/<id>`,
 `GET /api/admin/audit-events`, `GET /api/admin/audit-events.csv`,
-`GET /api/admin/operations`, `POST /api/admin/incidents/<kind>/<id>/actions`,
+`GET /api/admin/operations`, `GET /api/operations/vms`, `POST /api/admin/incidents/<kind>/<id>/actions`,
+`POST /api/admin/vms/<id>/approval`,
 `PATCH /api/admin/vms/<id>/lifecycle`,
 `GET|POST /api/admin/image-profiles`, `PATCH /api/admin/image-profiles/<slug>`,
 `GET /auth/oidc/login` et `GET /auth/oidc/callback`.

@@ -45,6 +45,10 @@ Keycloak est le fournisseur OIDC recommandé. Il peut fédérer LDAP ou LDAPS et
 permet d'éviter de stocker les mots de passe d'entreprise dans le portail. Les
 rôles applicatifs minimaux sont `admin`, `operator` et `user`.
 
+Le rôle `operator` est cantonné à la vue d'exploitation en lecture seule
+(inventaire global, santé, incidents et échéances). Les décisions et mutations,
+ainsi que les paramètres et secrets d'intégration, restent réservés à `admin`.
+
 Un mode local de secours peut exister pour une installation autonome, avec mots
 de passe utilisant une fonction de dérivation mémoire-dure, MFA administrateur,
 verrouillage progressif et sessions
@@ -128,3 +132,17 @@ d'administrateur, jamais une URL libre fournie par un utilisateur.
     des demandes terminales, choix DHCP ou IPv4 fixe cloud-init et liste de
     réseaux fixes autorisés. Une réservation DHCP ou un IPAM externe reste une
     intégration propre à l'infrastructure cible.**
+14. Ajouter la gouvernance des demandes. **Livré : circuit d'approbation
+    administrateur optionnel, réservation des quotas sans appel à Proxmox ou
+    NetBox, décision irréversible auditée, motif de refus visible et effacement
+    du secret invité avant libération des quotas.**
+15. Informer les acteurs sans dépendance externe. **Livré : notifications
+    internes privées et dédupliquées pour les demandes à approuver, les
+    décisions et les résultats du provisionnement, avec compteur non lu et
+    protection CSRF des changements d'état.**
+16. Séparer l'exploitation de la configuration sensible. **Livré : inventaire
+    global filtrable et supervision accessibles aux opérateurs en lecture seule,
+    tandis que les remédiations et paramètres restent réservés aux administrateurs.**
+17. Prévenir les propriétaires avant les échéances. **Livré : balayage périodique
+    par le worker, rappels privés dédupliqués au début du préavis et à
+    l'expiration, recalculés après prolongation sans action automatique sur la VM.**

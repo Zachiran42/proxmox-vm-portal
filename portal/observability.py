@@ -17,6 +17,7 @@ from .models import (
 from .pve import PVEHTTPError, PVEProtocolError, PVETransportError
 
 PROVISIONING_STATUSES = (
+    "approval_pending",
     "queued",
     "validating",
     "submitting",
@@ -36,11 +37,13 @@ OPERATION_STATUSES = (
     "attention",
 )
 ALLOCATION_STATUSES = (
+    "pending_approval",
     "queued",
     "provisioning",
     "accepted",
     "running",
     "stopped",
+    "rejected",
     "failed",
     "deleted",
 )
@@ -145,7 +148,7 @@ def render_prometheus_metrics(pve_client, *, now: datetime | None = None) -> str
         warning_days = int(warning_setting.value) if warning_setting else 14
     except ValueError:
         warning_days = 14
-    active_filter = VMAllocation.status.not_in(("deleted", "failed"))
+    active_filter = VMAllocation.status.not_in(("deleted", "rejected", "failed"))
     expired = db.session.scalar(
         select(func.count(VMAllocation.id)).where(
             active_filter,

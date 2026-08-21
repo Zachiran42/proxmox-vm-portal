@@ -16,6 +16,7 @@ from .models import (
     db,
 )
 from .netbox import NetBoxConflict, NetBoxUnavailable
+from .notifications import create_notification
 from .pve import PVEHTTPError, PVEProtocolError, PVETransportError
 
 
@@ -357,6 +358,7 @@ def _complete(job: ProvisioningJob, netbox_client=None, poll_seconds: int = 5) -
     job.locked_by = None
     job.allocation.status = "running" if job.stage == "start" else "accepted"
     _audit(job, "success", {"name": job.allocation.name})
+    _notify_provisioning(job, "succeeded")
     db.session.commit()
 
 
@@ -397,6 +399,7 @@ def _fail(job: ProvisioningJob, error_code: str) -> None:
     job.allocation.status = "failed"
     job.guest_password_ciphertext = None
     _audit(job, "failure", {"error_code": error_code})
+    _notify_provisioning(job, "failed")
     db.session.commit()
 
 
@@ -407,6 +410,7 @@ def _attention(job: ProvisioningJob, error_code: str) -> None:
     job.locked_at = None
     job.locked_by = None
     _audit(job, "failure", {"error_code": error_code, "manual_review": True})
+    _notify_provisioning(job, "attention")
     db.session.commit()
 
 
@@ -421,6 +425,36 @@ def _audit(job: ProvisioningJob, outcome: str, details: dict) -> None:
             request_id=job.id,
             details=details,
         )
+    )
+
+
+def _notify_provisioning(job: ProvisioningJob, status: str) -> None:
+    content = {
+        "succeeded": (
+            "provisioning_succeeded",
+            "Machine prête",
+            f"La machine {job.allocation.name} est prête.",
+        ),
+        "failed": (
+            "provisioning_failed",
+            "Échec du provisionnement",
+            f"La création de {job.allocation.name} a échoué.",
+        ),
+        "attention": (
+            "provisioning_attention",
+            "Vérification requise",
+            f"La création de {job.allocation.name} nécessite une vérification administrative.",
+        ),
+    }
+    kind, title, message = content[status]
+    create_notification(
+        user_id=job.allocation.owner_id,
+        kind=kind,
+        title=title,
+        message=message,
+        dedup_key=f"provisioning:{job.id}:{status}",
+        target_type="vm",
+        target_id=job.allocation_id,
     )
 
 
@@ -446,6 +480,7 @@ def _recover_stale_jobs(lease_seconds: int) -> None:
                 "failure",
                 {"reason": "worker_crashed_during_submission"},
             )
+            _notify_provisioning(job, "attention")
         job.locked_at = None
         job.locked_by = None
     if jobs:

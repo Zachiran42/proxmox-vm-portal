@@ -5,7 +5,7 @@ umask 077
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 ROOT_DIR=$(CDPATH='' cd -- "${PORTAL_SOURCE_ROOT:-$SCRIPT_DIR/../..}" && pwd)
 REPOSITORY="Zachiran42/proxmox-vm-portal"
-RELEASE_TAG=${PORTAL_RELEASE_TAG:-v0.23.1}
+RELEASE_TAG=${PORTAL_RELEASE_TAG:-v0.24.0}
 OUTPUT_DIR=${1:-$PWD}
 API_ROOT="https://api.github.com/repos/$REPOSITORY"
 COSIGN_IMAGE="ghcr.io/sigstore/cosign/cosign:v3.0.6@sha256:de9c65609e6bde17e6b48de485ee788407c9502fa08b8f4459f595b21f56cd00"

@@ -11,7 +11,14 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 db = SQLAlchemy()
 
 ROLES = ("admin", "operator", "user")
-ACTIVE_VM_STATUSES = ("queued", "provisioning", "accepted", "running", "stopped")
+ACTIVE_VM_STATUSES = (
+    "pending_approval",
+    "queued",
+    "provisioning",
+    "accepted",
+    "running",
+    "stopped",
+)
 
 
 def utcnow() -> datetime:
@@ -61,7 +68,12 @@ class User(db.Model):
         db.DateTime(timezone=True), nullable=False, default=utcnow
     )
 
-    allocations: Mapped[list[VMAllocation]] = relationship(back_populates="owner")
+    allocations: Mapped[list[VMAllocation]] = relationship(
+        back_populates="owner", foreign_keys="VMAllocation.owner_id"
+    )
+    notifications: Mapped[list[UserNotification]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
 
     def public_dict(self) -> dict[str, Any]:
         return {
@@ -225,8 +237,13 @@ class VMAllocation(db.Model):
     __tablename__ = "vm_allocations"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('queued', 'provisioning', 'accepted', 'running', 'stopped', 'failed', 'deleted')",
+            "status IN ('pending_approval', 'queued', 'provisioning', 'accepted', "
+            "'running', 'stopped', 'rejected', 'failed', 'deleted')",
             name="ck_vm_allocations_status",
+        ),
+        CheckConstraint(
+            "approval_status IN ('not_required', 'pending', 'approved', 'rejected')",
+            name="ck_vm_allocations_approval_status",
         ),
         CheckConstraint(
             "network_mode IN ('dhcp', 'static')",
@@ -284,6 +301,19 @@ class VMAllocation(db.Model):
     )
     archived_at: Mapped[datetime | None] = mapped_column(db.DateTime(timezone=True))
     expires_at: Mapped[datetime | None] = mapped_column(db.DateTime(timezone=True))
+    approval_status: Mapped[str] = mapped_column(
+        db.String(16), nullable=False, default="not_required"
+    )
+    approval_requested_at: Mapped[datetime | None] = mapped_column(
+        db.DateTime(timezone=True)
+    )
+    approval_decided_at: Mapped[datetime | None] = mapped_column(
+        db.DateTime(timezone=True)
+    )
+    approval_decided_by_id: Mapped[int | None] = mapped_column(
+        db.ForeignKey("users.id", ondelete="SET NULL")
+    )
+    approval_reason: Mapped[str | None] = mapped_column(db.String(500))
     cpu: Mapped[int] = mapped_column(nullable=False)
     ram_mb: Mapped[int] = mapped_column(nullable=False)
     disk_gb: Mapped[int] = mapped_column(nullable=False)
@@ -296,7 +326,12 @@ class VMAllocation(db.Model):
         db.DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow
     )
 
-    owner: Mapped[User] = relationship(back_populates="allocations")
+    owner: Mapped[User] = relationship(
+        back_populates="allocations", foreign_keys=[owner_id]
+    )
+    approval_decided_by: Mapped[User | None] = relationship(
+        foreign_keys=[approval_decided_by_id]
+    )
     profile: Mapped[ImageProfile | None] = relationship()
     network_profile: Mapped[NetworkProfile | None] = relationship(back_populates="allocations")
     job: Mapped[ProvisioningJob | None] = relationship(
@@ -336,7 +371,8 @@ class ProvisioningJob(db.Model):
     __tablename__ = "provisioning_jobs"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('queued', 'validating', 'submitting', 'submitted', 'polling', 'succeeded', 'failed', 'attention')",
+            "status IN ('approval_pending', 'queued', 'validating', 'submitting', "
+            "'submitted', 'polling', 'succeeded', 'failed', 'attention')",
             name="ck_provisioning_jobs_status",
         ),
         CheckConstraint(
@@ -418,6 +454,16 @@ class ProvisioningJob(db.Model):
                 if self.allocation.network_observed_at is not None
                 else None,
                 "status": self.allocation.status,
+                "approval": {
+                    "status": self.allocation.approval_status,
+                    "requested_at": self.allocation.approval_requested_at.isoformat()
+                    if self.allocation.approval_requested_at is not None
+                    else None,
+                    "decided_at": self.allocation.approval_decided_at.isoformat()
+                    if self.allocation.approval_decided_at is not None
+                    else None,
+                    "reason": self.allocation.approval_reason,
+                },
                 "lifecycle": self.allocation.lifecycle_dict(
                     warning_days=expiration_warning_days
                 ),
@@ -518,6 +564,59 @@ class PortalSetting(db.Model):
     updated_at: Mapped[datetime] = mapped_column(
         db.DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow
     )
+
+
+class UserNotification(db.Model):
+    __tablename__ = "user_notifications"
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('approval_requested', 'approval_approved', "
+            "'approval_rejected', 'provisioning_succeeded', "
+            "'provisioning_failed', 'provisioning_attention', "
+            "'lifecycle_warning', 'lifecycle_expired')",
+            name="ck_user_notifications_kind",
+        ),
+        UniqueConstraint(
+            "user_id", "dedup_key", name="uq_user_notifications_user_dedup"
+        ),
+        Index(
+            "ix_user_notifications_user_read_created",
+            "user_id",
+            "read_at",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        db.String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    user_id: Mapped[int] = mapped_column(
+        db.ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(db.String(32), nullable=False)
+    title: Mapped[str] = mapped_column(db.String(160), nullable=False)
+    message: Mapped[str] = mapped_column(db.String(1000), nullable=False)
+    target_type: Mapped[str | None] = mapped_column(db.String(32))
+    target_id: Mapped[str | None] = mapped_column(db.String(64))
+    dedup_key: Mapped[str] = mapped_column(db.String(160), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        db.DateTime(timezone=True), nullable=False, default=utcnow
+    )
+    read_at: Mapped[datetime | None] = mapped_column(db.DateTime(timezone=True))
+
+    user: Mapped[User] = relationship(back_populates="notifications")
+
+    def public_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "kind": self.kind,
+            "title": self.title,
+            "message": self.message,
+            "target_type": self.target_type,
+            "target_id": self.target_id,
+            "created_at": self.created_at.isoformat(),
+            "read_at": self.read_at.isoformat() if self.read_at is not None else None,
+        }
 
 
 class AuditEvent(db.Model):

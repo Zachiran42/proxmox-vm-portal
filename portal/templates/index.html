@@ -63,12 +63,26 @@
     </form>
   </dialog>
 
+  <dialog id="notifications-dialog" aria-labelledby="notifications-title">
+    <div class="dialog-heading">
+      <div><span class="eyebrow">Activité du portail</span><h2 id="notifications-title">Notifications</h2></div>
+      <button class="icon-button" type="button" id="close-notifications" aria-label="Fermer les notifications">×</button>
+    </div>
+    <div class="notification-toolbar">
+      <p id="notifications-summary">Chargement…</p>
+      <button class="text-button" type="button" id="read-all-notifications">Tout marquer comme lu</button>
+    </div>
+    <div class="notification-list" id="notification-list" aria-live="polite"></div>
+    <div class="empty-state compact" id="notifications-empty" hidden><span>✓</span><h3>Vous êtes à jour</h3><p>Les décisions et résultats de provisionnement apparaîtront ici.</p></div>
+  </dialog>
+
   <div class="app-shell" id="app-shell" hidden>
     <aside class="sidebar">
       <div class="sidebar-brand"><div class="brand-mark">P</div><div><strong>Portail</strong><span>Proxmox</span></div></div>
       <nav aria-label="Navigation principale">
         <a class="nav-link active" href="#machines" data-view="machines" aria-current="page"><span>▣</span> Machines</a>
         <a class="nav-link" href="#images" data-view="images"><span>◫</span> Images</a>
+        <a class="nav-link" id="operations-nav" href="#operations" data-view="operations" hidden><span>◎</span> Exploitation</a>
         <a class="nav-link" id="admin-nav" href="#admin" data-view="admin" hidden><span>⚙</span> Administration</a>
       </nav>
       <div class="sidebar-footer">
@@ -81,6 +95,7 @@
       <header class="topbar">
         <span class="mobile-title">Portail Proxmox</span>
         <div class="user-menu">
+          <button class="notification-button" type="button" id="notifications-button" aria-label="Ouvrir les notifications"><span aria-hidden="true">●</span><strong id="notification-badge" hidden>0</strong></button>
           <div class="avatar" id="user-avatar">A</div>
           <div class="user-copy"><strong id="user-name">—</strong><span id="user-role">—</span></div>
           <button class="text-button" type="button" id="logout-button">Déconnexion</button>
@@ -90,6 +105,7 @@
       <div class="mobile-tabs" aria-label="Navigation mobile">
         <button class="active" type="button" data-view="machines">Machines</button>
         <button type="button" data-view="images">Images</button>
+        <button id="operations-mobile-nav" type="button" data-view="operations" hidden>Exploitation</button>
         <button id="admin-mobile-nav" type="button" data-view="admin" hidden>Administration</button>
       </div>
 
@@ -141,11 +157,35 @@
         </section>
       </div>
 
-      <div class="page" id="admin-view" hidden>
+      <div class="page" id="operations-view" hidden>
         <div class="page-heading">
-          <div><span class="eyebrow">Gouvernance et exploitation</span><h1>Administration</h1><p>Surveillez les services, traitez les incidents et gérez les accès du portail.</p></div>
-          <button class="button button-primary" type="button" id="open-user-dialog">+ Nouvel utilisateur</button>
+          <div><span class="eyebrow">Supervision du parc</span><h1>Exploitation</h1><p>Consultez le parc global, la santé des services et les interventions requises.</p></div>
         </div>
+
+        <section class="catalogue-section fleet-section" aria-labelledby="fleet-title">
+          <div class="section-heading fleet-heading">
+            <div><h2 id="fleet-title">Inventaire des machines</h2><p id="fleet-count">Chargement du parc…</p></div>
+            <button class="icon-button" type="button" id="refresh-fleet" aria-label="Actualiser l’inventaire">↻</button>
+          </div>
+          <form class="fleet-filters" id="fleet-filters">
+            <label class="sr-only" for="fleet-search">Rechercher</label>
+            <input id="fleet-search" type="search" maxlength="80" placeholder="Nom, propriétaire ou adresse IP">
+            <label class="sr-only" for="fleet-status">État</label>
+            <select id="fleet-status"><option value="">Tous les états</option></select>
+            <label class="sr-only" for="fleet-node">Nœud</label>
+            <select id="fleet-node"><option value="">Tous les nœuds</option></select>
+            <label class="sr-only" for="fleet-scope">Périmètre</label>
+            <select id="fleet-scope"><option value="active">Parc actif</option><option value="archived">Archives</option><option value="all">Tout le parc</option></select>
+            <button class="button button-secondary compact-button" type="submit">Filtrer</button>
+          </form>
+          <div class="fleet-table-wrapper">
+            <table class="fleet-table">
+              <thead><tr><th>Machine</th><th>Propriétaire</th><th>Placement</th><th>Réseau</th><th>Ressources</th><th>État</th><th>Échéance</th></tr></thead>
+              <tbody id="fleet-list"></tbody>
+            </table>
+          </div>
+          <div class="empty-state compact" id="fleet-empty" hidden><span>□</span><h3>Aucune machine correspondante</h3><p>Modifiez les filtres pour élargir l’inventaire.</p></div>
+        </section>
 
         <section class="operations-panel" aria-labelledby="operations-title">
           <div class="section-heading">
@@ -153,6 +193,11 @@
             <button class="icon-button" type="button" id="refresh-operations" aria-label="Actualiser l’état opérationnel">↻</button>
           </div>
           <div class="service-grid" id="service-grid" aria-live="polite"></div>
+          <div class="incident-heading">
+            <div><h3>Demandes à approuver</h3><p id="approval-count">Chargement des demandes…</p></div>
+          </div>
+          <div class="incident-list" id="approval-list" aria-live="polite"></div>
+          <div class="empty-state compact" id="approval-empty" hidden><span>✓</span><h3>Aucune demande en attente</h3><p>Les demandes soumises au circuit d’approbation apparaîtront ici.</p></div>
           <div class="incident-heading">
             <div><h3>Interventions requises</h3><p id="incident-count">Chargement des incidents…</p></div>
             <span class="queue-count" id="queue-count">0 tâche active</span>
@@ -165,6 +210,13 @@
           <div class="incident-list" id="lifecycle-list" aria-live="polite"></div>
           <div class="empty-state compact" id="lifecycle-empty" hidden><span>✓</span><h3>Aucune échéance proche</h3><p>Les VM à prolonger apparaîtront ici avant leur expiration.</p></div>
         </section>
+      </div>
+
+      <div class="page" id="admin-view" hidden>
+        <div class="page-heading">
+          <div><span class="eyebrow">Gouvernance et configuration</span><h1>Administration</h1><p>Gérez les accès, les politiques et les intégrations sensibles du portail.</p></div>
+          <button class="button button-primary" type="button" id="open-user-dialog">+ Nouvel utilisateur</button>
+        </div>
 
         <section class="stats admin-stats" aria-label="Résumé des utilisateurs">
           <article><span class="stat-icon stat-green">●</span><div><strong id="stat-users-active">0</strong><span>Comptes actifs</span></div></article>
@@ -199,6 +251,10 @@
               <label for="expiration-warning-days">Préavis d’expiration (jours)</label>
               <input id="expiration-warning-days" type="number" min="1" max="3650" required>
             </div>
+            <label class="check-row" for="vm-approval-required">
+              <input id="vm-approval-required" type="checkbox">
+              <span><strong>Approbation administrative obligatoire</strong><small>Le worker ne contacte ni Proxmox ni NetBox avant validation. Les quotas restent réservés pendant l’attente.</small></span>
+            </label>
             <button class="button button-primary" type="submit" id="save-settings">Enregistrer</button>
           </form>
           <p class="form-error" id="settings-error" role="alert" hidden></p>

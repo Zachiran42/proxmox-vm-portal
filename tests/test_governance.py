@@ -382,6 +382,7 @@ def test_invalid_stored_guest_password_policy_falls_back_safely(app):
         "default_vm_lifetime_days": 90,
         "max_vm_lifetime_days": 365,
         "expiration_warning_days": 14,
+        "vm_approval_required": False,
     }
 
 

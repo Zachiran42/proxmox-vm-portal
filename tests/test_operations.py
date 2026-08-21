@@ -267,6 +267,64 @@ def test_non_resumable_unknown_and_forbidden_incidents_are_rejected(app):
     ).status_code == 403
 
 
+def test_operator_can_read_operations_and_filtered_fleet_without_sensitive_data(app):
+    seed_incidents(app)
+    with app.app_context():
+        operator = User(
+            username="night-operator",
+            password_hash=generate_password_hash("operator-password"),
+            role="operator",
+        )
+        db.session.add(operator)
+        db.session.commit()
+        operator_id = operator.id
+
+    client = app.test_client()
+    with client.session_transaction() as portal_session:
+        portal_session["user_id"] = operator_id
+        portal_session["authentication"] = "local"
+        portal_session["csrf_token"] = "operator-csrf"
+
+    assert client.get("/api/admin/operations").status_code == 200
+    response = client.get(
+        "/api/operations/vms?search=ambiguous&status=running&node=pve-a&scope=active"
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["count"] == 1
+    assert payload["items"][0]["name"] == "ambiguous-stop"
+    assert payload["items"][0]["owner"] == "admin"
+    assert payload["items"][0]["ipv4"] is None
+    assert "credential_url" not in payload["items"][0]
+    assert "guest_password" not in payload["items"][0]
+    assert client.post(
+        f"/api/admin/vms/{payload['items'][0]['id']}/approval",
+        json={"action": "approve"},
+        headers={"X-CSRF-Token": "operator-csrf"},
+    ).status_code == 403
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "status=unknown",
+        "scope=invalid",
+        "limit=0",
+        "limit=not-a-number",
+        "unexpected=true",
+        f"search={'x' * 81}",
+    ],
+)
+def test_operations_fleet_rejects_invalid_filters(app, query):
+    client = app.test_client()
+    login(client)
+
+    response = client.get(f"/api/operations/vms?{query}")
+
+    assert response.status_code == 400
+
+
 @pytest.mark.parametrize(
     ("payload", "field"),
     [

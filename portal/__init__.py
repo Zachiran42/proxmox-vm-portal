@@ -34,7 +34,7 @@ from flask import (
 )
 from flask_migrate import Migrate
 from requests import RequestException
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -65,12 +65,18 @@ from .models import (
     ProvisioningJob,
     ProxmoxConfiguration,
     User,
+    UserNotification,
     VMAllocation,
     VMOperation,
     WorkerHeartbeat,
     db,
 )
 from .netbox import NetBoxClient, NetBoxUnavailable
+from .notifications import (
+    create_notification,
+    notify_active_admins,
+    process_lifecycle_notifications,
+)
 from .observability import render_prometheus_metrics
 from .oidc import (
     OIDCIdentity,
@@ -445,7 +451,15 @@ def create_app(
     def worker_command(once: bool):
         """Exécute le worker de provisionnement PostgreSQL."""
         worker_id = f"{socket.gethostname()}:{os.getpid()}"
+        next_lifecycle_scan = 0.0
         while True:
+            monotonic_now = time.monotonic()
+            if monotonic_now >= next_lifecycle_scan:
+                process_lifecycle_notifications(
+                    warning_days=_expiration_warning_days()
+                )
+                db.session.commit()
+                next_lifecycle_scan = monotonic_now + 60
             processed = process_next_job(
                 _resolve_pve_client(app),
                 password_pusher,
@@ -783,6 +797,7 @@ def create_app(
                 "default_vm_lifetime_days": _default_vm_lifetime_days(),
                 "max_vm_lifetime_days": _max_vm_lifetime_days(),
                 "expiration_warning_days": _expiration_warning_days(),
+                "vm_approval_required": _vm_approval_required(),
             },
             csrf_token=session["csrf_token"],
         )
@@ -819,6 +834,79 @@ def create_app(
         )
         db.session.commit()
         return jsonify(status="password_changed", user=g.current_user.public_dict())
+
+    @app.get("/api/notifications")
+    @login_required
+    def list_notifications():
+        if set(request.args) - {"limit", "unread"}:
+            return jsonify(errors={"query": "Paramètre non autorisé."}), 400
+        try:
+            limit = int(request.args.get("limit", "50"))
+        except ValueError:
+            return jsonify(errors={"limit": "Valeur entière requise."}), 400
+        if not 1 <= limit <= 100:
+            return jsonify(errors={"limit": "Valeur requise entre 1 et 100."}), 400
+        unread_value = request.args.get("unread")
+        if unread_value not in {None, "true", "false"}:
+            return jsonify(errors={"unread": "Valeur booléenne requise."}), 400
+        statement = select(UserNotification).where(
+            UserNotification.user_id == g.current_user.id
+        )
+        if unread_value == "true":
+            statement = statement.where(UserNotification.read_at.is_(None))
+        elif unread_value == "false":
+            statement = statement.where(UserNotification.read_at.is_not(None))
+        notifications = db.session.scalars(
+            statement.order_by(UserNotification.created_at.desc()).limit(limit)
+        ).all()
+        unread_count = db.session.scalar(
+            select(func.count(UserNotification.id)).where(
+                UserNotification.user_id == g.current_user.id,
+                UserNotification.read_at.is_(None),
+            )
+        )
+        return jsonify(
+            notifications=[item.public_dict() for item in notifications],
+            unread_count=int(unread_count or 0),
+        )
+
+    @app.post("/api/notifications/<notification_id>/read")
+    @login_required
+    @csrf_protected
+    def mark_notification_read(notification_id: str):
+        notification = db.session.scalar(
+            select(UserNotification)
+            .where(
+                UserNotification.id == notification_id,
+                UserNotification.user_id == g.current_user.id,
+            )
+            .with_for_update()
+        )
+        if notification is None:
+            return jsonify(error="not_found"), 404
+        if notification.read_at is None:
+            notification.read_at = datetime.now(UTC)
+            db.session.commit()
+        return jsonify(notification=notification.public_dict())
+
+    @app.post("/api/notifications/read-all")
+    @login_required
+    @csrf_protected
+    def mark_all_notifications_read():
+        notifications = db.session.scalars(
+            select(UserNotification)
+            .where(
+                UserNotification.user_id == g.current_user.id,
+                UserNotification.read_at.is_(None),
+            )
+            .with_for_update()
+        ).all()
+        now = datetime.now(UTC)
+        for notification in notifications:
+            notification.read_at = now
+        if notifications:
+            db.session.commit()
+        return jsonify(status="read", updated=len(notifications))
 
     @app.get("/api/nodes")
     @login_required
@@ -1338,6 +1426,7 @@ def create_app(
                 "default_vm_lifetime_days": _default_vm_lifetime_days(),
                 "max_vm_lifetime_days": _max_vm_lifetime_days(),
                 "expiration_warning_days": _expiration_warning_days(),
+                "vm_approval_required": _vm_approval_required(),
             }
         )
 
@@ -1353,6 +1442,7 @@ def create_app(
             "default_vm_lifetime_days",
             "max_vm_lifetime_days",
             "expiration_warning_days",
+            "vm_approval_required",
         }
         if not isinstance(payload, dict) or not payload or set(payload) - allowed_settings:
             return jsonify(errors={"body": "Paramètre non autorisé."}), 400
@@ -1370,6 +1460,9 @@ def create_app(
         )
         warning_days = payload.get(
             "expiration_warning_days", _expiration_warning_days()
+        )
+        approval_required = payload.get(
+            "vm_approval_required", _vm_approval_required()
         )
         if type(minimum) is not int or not 1 <= minimum <= 256:
             return (
@@ -1393,6 +1486,8 @@ def create_app(
             return jsonify(errors={"default_vm_lifetime_days": "La durée par défaut ne peut pas dépasser la durée maximale."}), 400
         if warning_days > maximum_lifetime:
             return jsonify(errors={"expiration_warning_days": "Le préavis ne peut pas dépasser la durée maximale."}), 400
+        if type(approval_required) is not bool:
+            return jsonify(errors={"vm_approval_required": "Valeur booléenne requise."}), 400
         try:
             normalized_networks = _normalize_static_ipv4_networks(networks_text)
         except ValueError as error:
@@ -1420,6 +1515,16 @@ def create_app(
                 db.session.add(PortalSetting(key=key, value=str(value)))
             else:
                 lifecycle_setting.value = str(value)
+        approval_setting = db.session.get(PortalSetting, "vm_approval_required")
+        if approval_setting is None:
+            db.session.add(
+                PortalSetting(
+                    key="vm_approval_required",
+                    value="true" if approval_required else "false",
+                )
+            )
+        else:
+            approval_setting.value = "true" if approval_required else "false"
         _add_audit(
             action="settings.update",
             target_type="settings",
@@ -1431,6 +1536,7 @@ def create_app(
                 "current": minimum,
                 "static_ipv4_networks": normalized_networks.splitlines(),
                 **lifetime_values,
+                "vm_approval_required": approval_required,
             },
         )
         db.session.commit()
@@ -1439,6 +1545,7 @@ def create_app(
                 "guest_password_min_length": minimum,
                 "static_ipv4_networks": normalized_networks,
                 **lifetime_values,
+                "vm_approval_required": approval_required,
             }
         )
 
@@ -1618,7 +1725,7 @@ def create_app(
 
     @app.get("/api/admin/operations")
     @login_required
-    @role_required("admin")
+    @role_required("admin", "operator")
     def operations_overview():
         now = datetime.now(UTC)
         heartbeat = db.session.scalar(
@@ -1731,7 +1838,7 @@ def create_app(
             .where(
                 VMAllocation.expires_at.is_not(None),
                 VMAllocation.expires_at <= warning_cutoff,
-                VMAllocation.status.not_in(("deleted", "failed")),
+                VMAllocation.status.not_in(("deleted", "rejected", "failed")),
             )
             .order_by(VMAllocation.expires_at)
             .limit(50)
@@ -1749,6 +1856,35 @@ def create_app(
                 ),
             }
             for allocation in lifecycle_allocations
+        ]
+        pending_approvals = db.session.scalars(
+            select(VMAllocation)
+            .where(VMAllocation.approval_status == "pending")
+            .order_by(VMAllocation.approval_requested_at, VMAllocation.created_at)
+            .limit(50)
+        ).all()
+        approval_items = [
+            {
+                "id": allocation.id,
+                "name": allocation.name,
+                "owner": allocation.owner.username,
+                "node": allocation.node,
+                "profile": allocation.profile.slug
+                if allocation.profile is not None
+                else None,
+                "cpu": allocation.cpu,
+                "ram_mb": allocation.ram_mb,
+                "disk_gb": allocation.disk_gb,
+                "network_mode": allocation.network_mode,
+                "ipv4_cidr": allocation.ipv4_cidr,
+                "expires_at": allocation.expires_at.isoformat()
+                if allocation.expires_at is not None
+                else None,
+                "requested_at": allocation.approval_requested_at.isoformat()
+                if allocation.approval_requested_at is not None
+                else allocation.created_at.isoformat(),
+            }
+            for allocation in pending_approvals
         ]
         return jsonify(
             services={
@@ -1772,7 +1908,211 @@ def create_app(
                 "warning": sum(item["state"] == "warning" for item in lifecycle_items),
                 "items": lifecycle_items,
             },
+            approvals={"pending": len(approval_items), "items": approval_items},
             checked_at=now.isoformat(),
+        )
+
+    @app.get("/api/operations/vms")
+    @login_required
+    @role_required("admin", "operator")
+    def operations_vm_inventory():
+        allowed_parameters = {"search", "status", "node", "owner", "scope", "limit"}
+        unknown_parameters = set(request.args) - allowed_parameters
+        if unknown_parameters:
+            return jsonify(errors={"query": "Paramètre de recherche inconnu."}), 400
+
+        search = request.args.get("search", "").strip()
+        status = request.args.get("status", "").strip()
+        node = request.args.get("node", "").strip()
+        owner = request.args.get("owner", "").strip()
+        scope = request.args.get("scope", "active").strip()
+        try:
+            limit = int(request.args.get("limit", "100"))
+        except ValueError:
+            return jsonify(errors={"limit": "La limite doit être un entier."}), 400
+
+        inventory_statuses = {
+            "pending_approval",
+            "queued",
+            "provisioning",
+            "accepted",
+            "running",
+            "stopped",
+            "rejected",
+            "failed",
+            "deleted",
+        }
+        if len(search) > 80:
+            return jsonify(errors={"search": "Recherche limitée à 80 caractères."}), 400
+        if status and status not in inventory_statuses:
+            return jsonify(errors={"status": "État de machine invalide."}), 400
+        if scope not in {"active", "archived", "all"}:
+            return jsonify(errors={"scope": "Périmètre invalide."}), 400
+        if not 1 <= limit <= 200:
+            return jsonify(errors={"limit": "La limite doit être comprise entre 1 et 200."}), 400
+
+        statement = select(VMAllocation).join(User, VMAllocation.owner_id == User.id)
+        if scope == "active":
+            statement = statement.where(VMAllocation.archived_at.is_(None))
+        elif scope == "archived":
+            statement = statement.where(VMAllocation.archived_at.is_not(None))
+        if status:
+            statement = statement.where(VMAllocation.status == status)
+        if node:
+            statement = statement.where(VMAllocation.node == node)
+        if owner:
+            statement = statement.where(User.username == owner)
+        if search:
+            pattern = f"%{search}%"
+            statement = statement.where(
+                or_(
+                    VMAllocation.name.ilike(pattern),
+                    User.username.ilike(pattern),
+                    VMAllocation.last_ipv4.ilike(pattern),
+                )
+            )
+
+        allocations = db.session.scalars(
+            statement.order_by(VMAllocation.updated_at.desc()).limit(limit)
+        ).all()
+        warning_days = _expiration_warning_days()
+        items = [
+            {
+                "id": allocation.id,
+                "name": allocation.name,
+                "owner": allocation.owner.username,
+                "node": allocation.node,
+                "vmid": allocation.vmid,
+                "profile": allocation.profile.slug
+                if allocation.profile is not None
+                else None,
+                "status": allocation.status,
+                "cpu": allocation.cpu,
+                "ram_mb": allocation.ram_mb,
+                "disk_gb": allocation.disk_gb,
+                "network_mode": allocation.network_mode,
+                "ipv4": allocation.last_ipv4
+                or (
+                    allocation.ipv4_cidr.split("/", 1)[0]
+                    if allocation.ipv4_cidr
+                    else None
+                ),
+                "network_observed_at": allocation.network_observed_at.isoformat()
+                if allocation.network_observed_at is not None
+                else None,
+                "approval_status": allocation.approval_status,
+                "lifecycle": allocation.lifecycle_dict(warning_days=warning_days),
+                "created_at": allocation.created_at.isoformat(),
+                "updated_at": allocation.updated_at.isoformat(),
+                "archived_at": allocation.archived_at.isoformat()
+                if allocation.archived_at is not None
+                else None,
+            }
+            for allocation in allocations
+        ]
+        return jsonify(
+            items=items,
+            count=len(items),
+            limit=limit,
+            filters={
+                "statuses": sorted(inventory_statuses),
+                "nodes": sorted({item["node"] for item in items}),
+                "owners": sorted({item["owner"] for item in items}),
+            },
+        )
+
+    @app.post("/api/admin/vms/<vm_id>/approval")
+    @login_required
+    @role_required("admin")
+    @csrf_protected
+    def decide_vm_approval(vm_id: str):
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict) or set(payload) - {"action", "reason"}:
+            return jsonify(errors={"body": "Objet de décision invalide."}), 400
+        action = payload.get("action")
+        reason = payload.get("reason")
+        if action not in {"approve", "reject"}:
+            return jsonify(errors={"action": "Décision invalide."}), 400
+        if reason is not None and (not isinstance(reason, str) or len(reason) > 500):
+            return jsonify(errors={"reason": "Motif limité à 500 caractères."}), 400
+        normalized_reason = reason.strip() if isinstance(reason, str) else None
+        if action == "reject" and not normalized_reason:
+            return jsonify(errors={"reason": "Un motif de refus est requis."}), 400
+
+        allocation = db.session.scalar(
+            select(VMAllocation)
+            .where(VMAllocation.id == vm_id)
+            .with_for_update()
+        )
+        if allocation is None:
+            return jsonify(error="not_found"), 404
+        if allocation.approval_status != "pending" or allocation.job is None:
+            return jsonify(error="approval_already_decided"), 409
+
+        now = datetime.now(UTC)
+        allocation.approval_decided_at = now
+        allocation.approval_decided_by_id = g.current_user.id
+        allocation.approval_reason = normalized_reason
+        if action == "approve":
+            lifetime = (
+                allocation.expires_at - allocation.created_at
+                if allocation.expires_at is not None
+                else timedelta(days=_default_vm_lifetime_days())
+            )
+            allocation.expires_at = now + lifetime
+            allocation.approval_status = "approved"
+            allocation.status = "queued"
+            allocation.job.status = "queued"
+            allocation.job.available_at = now
+            audit_action = "vm.approval.approve"
+            response_status = "queued"
+            create_notification(
+                user_id=allocation.owner_id,
+                kind="approval_approved",
+                title="Demande approuvée",
+                message=(
+                    f"La demande {allocation.name} a été approuvée et placée "
+                    "dans la file de provisionnement."
+                ),
+                dedup_key=f"approval-decision:{allocation.id}",
+                target_type="vm",
+                target_id=allocation.id,
+            )
+        else:
+            allocation.approval_status = "rejected"
+            allocation.status = "rejected"
+            allocation.job.status = "failed"
+            allocation.job.error_code = "approval_rejected"
+            allocation.job.guest_password_ciphertext = None
+            allocation.job.completed_at = now
+            audit_action = "vm.approval.reject"
+            response_status = "rejected"
+            create_notification(
+                user_id=allocation.owner_id,
+                kind="approval_rejected",
+                title="Demande refusée",
+                message=f"La demande {allocation.name} a été refusée : {normalized_reason}",
+                dedup_key=f"approval-decision:{allocation.id}",
+                target_type="vm",
+                target_id=allocation.id,
+            )
+        _add_audit(
+            action=audit_action,
+            target_type="vm",
+            target_id=allocation.id,
+            outcome="success",
+            actor_user_id=g.current_user.id,
+            details={
+                "owner": allocation.owner.username,
+                "name": allocation.name,
+                "reason": normalized_reason,
+            },
+        )
+        db.session.commit()
+        return jsonify(
+            status=response_status,
+            vm_id=allocation.id,
+            job_id=allocation.job.id,
         )
 
     @app.patch("/api/admin/vms/<vm_id>/lifecycle")
@@ -1793,7 +2133,7 @@ def create_app(
         )
         if allocation is None:
             return jsonify(error="not_found"), 404
-        if allocation.status in {"deleted", "failed"}:
+        if allocation.status in {"deleted", "rejected", "failed"}:
             return jsonify(error="lifecycle_invalid_state"), 409
         now = datetime.now(UTC)
         previous = allocation.expires_at
@@ -2067,7 +2407,7 @@ def create_app(
             and g.current_user.role != "admin"
         ):
             return jsonify(error="not_found"), 404
-        if payload["archived"] and allocation.status not in {"failed", "deleted"}:
+        if payload["archived"] and allocation.status not in {"rejected", "failed", "deleted"}:
             return jsonify(error="archive_invalid_state"), 409
         if (allocation.archived_at is not None) != payload["archived"]:
             allocation.archived_at = datetime.now(UTC) if payload["archived"] else None
@@ -2204,22 +2544,44 @@ def create_app(
             profile,
             network_profile,
             automatic_ip=automatic_ip,
+            approval_required=_vm_approval_required(),
         )
         if reservation_error:
             error_code, errors = reservation_error
             return jsonify(error=error_code, errors=errors), 409
         if allocation is None or job is None:  # pragma: no cover - invariant interne
             raise RuntimeError("Réservation de VM incohérente.")
+        pending_approval = allocation.approval_status == "pending"
+        if pending_approval:
+            notify_active_admins(
+                kind="approval_requested",
+                title="Nouvelle demande à approuver",
+                message=(
+                    f"{g.current_user.username} demande la VM {allocation.name} "
+                    f"sur {allocation.node}."
+                ),
+                dedup_key=f"approval-request:{allocation.id}",
+                target_type="vm",
+                target_id=allocation.id,
+            )
         _add_audit(
-            action="vm.enqueue",
+            action="vm.approval.request" if pending_approval else "vm.enqueue",
             target_type="vm",
             target_id=allocation.id,
             outcome="success",
             actor_user_id=g.current_user.id,
-            details={"job_id": job.id, "profile": profile.slug},
+            details={
+                "job_id": job.id,
+                "profile": profile.slug,
+                "approval_required": pending_approval,
+            },
         )
         db.session.commit()
-        return jsonify(status="queued", job_id=job.id, vm_id=allocation.id), 202
+        return jsonify(
+            status="pending_approval" if pending_approval else "queued",
+            job_id=job.id,
+            vm_id=allocation.id,
+        ), 202
 
     @app.post("/api/vms/<vm_id>/actions")
     @login_required
@@ -2301,6 +2663,7 @@ def create_app(
         network_profile: NetworkProfile | None,
         *,
         automatic_ip: bool = False,
+        approval_required: bool = False,
     ) -> tuple[
         VMAllocation | None,
         ProvisioningJob | None,
@@ -2365,10 +2728,15 @@ def create_app(
             cpu=vm_request.cpu,
             ram_mb=vm_request.ram_mb,
             disk_gb=vm_request.disk_gb,
-            status="queued",
+            status="pending_approval" if approval_required else "queued",
+            approval_status="pending" if approval_required else "not_required",
+            approval_requested_at=datetime.now(UTC) if approval_required else None,
             expires_at=datetime.now(UTC) + timedelta(days=vm_request.lifetime_days or _default_vm_lifetime_days()),
         )
-        job = ProvisioningJob(allocation=allocation)
+        job = ProvisioningJob(
+            allocation=allocation,
+            status="approval_pending" if approval_required else "queued",
+        )
         if vm_request.guest_password is not None:
             job.guest_password_ciphertext = encrypt_guest_password(
                 vm_request.guest_password, app.config["PORTAL_SESSION_SECRET"]
@@ -2449,6 +2817,11 @@ def _max_vm_lifetime_days() -> int:
 
 def _expiration_warning_days() -> int:
     return _integer_portal_setting("expiration_warning_days", 14)
+
+
+def _vm_approval_required() -> bool:
+    setting = db.session.get(PortalSetting, "vm_approval_required")
+    return setting is not None and setting.value == "true"
 
 
 def _static_ipv4_networks_text() -> str:

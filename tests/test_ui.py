@@ -43,8 +43,17 @@ def test_portal_shell_loads_self_hosted_assets_and_strict_csp(app):
     assert 'id="vm-action-dialog"' in html
     assert 'id="vm-confirm-name"' in html
     assert 'id="service-grid"' in html
+    assert 'id="operations-view"' in html
+    assert 'id="operations-nav"' in html
+    assert 'id="fleet-filters"' in html
+    assert 'id="fleet-list"' in html
     assert 'id="incident-list"' in html
     assert 'id="lifecycle-list"' in html
+    assert 'id="approval-list"' in html
+    assert 'id="vm-approval-required"' in html
+    assert 'id="notifications-button"' in html
+    assert 'id="notifications-dialog"' in html
+    assert 'id="notification-list"' in html
     assert 'id="incident-dialog"' in html
     assert 'href="/api/admin/audit-events.csv"' in html
     assert 'id="job-list"' in html
