@@ -366,6 +366,32 @@ def test_lifecycle_methods_use_exact_proxmox_endpoints(client):
     }
 
 
+def test_guest_password_reset_uses_dedicated_agent_endpoint(client):
+    with patch.object(client, "_request", return_value={"result": {}}) as request:
+        client.set_guest_password(
+            node="pve-a", vmid=101, username="hugo", password="nouveau secret"
+        )
+
+    request.assert_called_once_with(
+        "/nodes/pve-a/qemu/101/agent/set-user-password",
+        method="POST",
+        payload={
+            "username": "hugo",
+            "password": "nouveau secret",
+            "crypted": 0,
+        },
+    )
+
+
+@pytest.mark.parametrize("response", [None, {}, "unexpected"])
+def test_guest_password_reset_rejects_invalid_proxmox_confirmation(client, response):
+    with patch.object(client, "_request", return_value=response):
+        with pytest.raises(PVEProtocolError, match="confirmation"):
+            client.set_guest_password(
+                node="pve-a", vmid=101, username="hugo", password="secret"
+            )
+
+
 def test_start_rejects_missing_upid(client):
     with patch.object(client, "_request", return_value=None):
         with pytest.raises(PVEProtocolError, match="tâche"):

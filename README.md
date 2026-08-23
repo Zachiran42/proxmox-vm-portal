@@ -58,6 +58,9 @@ stocké dans le dépôt.
   à traiter et les propriétaires des décisions et résultats de provisionnement,
   ainsi que des échéances proches ou atteintes, sans dépendance SMTP ni
   exposition de secret.
+- Un administrateur peut demander le renouvellement du mot de passe SSH d'une
+  VM cloud-init. Le propriétaire choisit lui-même le nouveau secret, transmis
+  directement au QEMU Guest Agent puis oublié ; sa valeur n'est jamais stockée.
 
 Le token de service PVE doit être limité par ACL aux nœuds, stockages et opérations requis. N'utilisez jamais `root@pam`.
 
@@ -158,19 +161,31 @@ Modèle de menaces et preuves de la revue :
 [`docs/SECURITY_REVIEW.md`](docs/SECURITY_REVIEW.md).
 Recette de qualification réelle : [`docs/PREPRODUCTION.md`](docs/PREPRODUCTION.md).
 Authentification LDAP/LDAPS native : [`docs/LDAP.md`](docs/LDAP.md).
-Profils réseau/VLAN et intégration NetBox : [`docs/NETWORKS_NETBOX.md`](docs/NETWORKS_NETBOX.md).
+Profils réseau/VLAN, politiques de connectivité, ouverture sur ticket et
+intégration NetBox : [`docs/NETWORKS_NETBOX.md`](docs/NETWORKS_NETBOX.md).
+Bac à sable par défaut, règles réseau minimales et catalogue logiciel interne :
+[`docs/SANDBOX.md`](docs/SANDBOX.md).
+Usage de test, confirmation d'absence de données patient réelles et limites du
+garde-fou : [`docs/DATA_USAGE.md`](docs/DATA_USAGE.md).
 Configuration Keycloak/OIDC et fédération LDAP : [`docs/KEYCLOAK.md`](docs/KEYCLOAK.md).
 Exploitation de la file de travaux : [`docs/JOBS.md`](docs/JOBS.md).
 Préparation sécurisée des templates et remise des accès : [`docs/GUEST_ACCESS.md`](docs/GUEST_ACCESS.md).
+Maintenance APT et isolement hyperviseur : [`docs/VM_MAINTENANCE.md`](docs/VM_MAINTENANCE.md).
+Versionnement, dépréciation et retrait des images :
+[`docs/IMAGE_LIFECYCLE.md`](docs/IMAGE_LIFECYCLE.md).
+Préparation de la supervision Proxmox et des VM avec Zabbix :
+[`docs/ZABBIX.md`](docs/ZABBIX.md).
 Construction reproductible des templates Debian depuis l'ISO :
 [`docs/IMAGE_FACTORY.md`](docs/IMAGE_FACTORY.md).
 Métriques, règles d’alerte et export d’audit :
 [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md).
+Collecte continue du journal d’audit par le SIEM/SOC :
+[`docs/SIEM.md`](docs/SIEM.md).
 Cycle de vie, échéances et procédures MCO : [`docs/MCO.md`](docs/MCO.md).
 Approbation administrative optionnelle : [`docs/APPROVALS.md`](docs/APPROVALS.md).
 Centre de notifications interne : [`docs/NOTIFICATIONS.md`](docs/NOTIFICATIONS.md).
 Inventaire global et rôle opérateur : [`docs/OPERATIONS.md`](docs/OPERATIONS.md).
-Notes de la version 0.24.0 : [`docs/RELEASE_0.24.0.md`](docs/RELEASE_0.24.0.md).
+Notes de la version 0.25.0 : [`docs/RELEASE_0.25.0.md`](docs/RELEASE_0.25.0.md).
 Publication, SBOM, provenance et vérification des signatures :
 [`docs/RELEASES.md`](docs/RELEASES.md).
 
@@ -182,10 +197,14 @@ Endpoints : `GET /healthz`, `GET /metrics`, `GET /`, `POST /login`, `POST /logou
 `POST /api/notifications/read-all`,
 `GET|POST /api/admin/users`, `PATCH /api/admin/users/<id>`,
 `GET /api/admin/audit-events`, `GET /api/admin/audit-events.csv`,
+`GET /api/admin/mco/report`, `GET /api/admin/mco/report.csv`,
 `GET /api/admin/operations`, `GET /api/operations/vms`, `POST /api/admin/incidents/<kind>/<id>/actions`,
 `POST /api/admin/vms/<id>/approval`,
 `PATCH /api/admin/vms/<id>/lifecycle`,
+`POST /api/admin/vms/<id>/guest-password-reset`,
+`POST /api/vms/<id>/guest-password`,
 `GET|POST /api/admin/image-profiles`, `PATCH /api/admin/image-profiles/<slug>`,
+`GET|PUT /api/admin/integrations/siem`, `GET /api/siem/events`,
 `GET /auth/oidc/login` et `GET /auth/oidc/callback`.
 
 Exemple de connexion :
@@ -211,7 +230,7 @@ Avant la première demande, un administrateur doit publier au moins un profil
 avec `POST /api/admin/image-profiles`, par exemple :
 
 ```json
-{"slug":"debian-12","label":"Debian 12","description":"ISO approuvée","source_type":"iso","iso":"local:iso/debian-12.iso"}
+{"slug":"debian-12","label":"Debian 12","description":"ISO approuvée","version":"12.12-2026.08","source_type":"iso","iso":"local:iso/debian-12.iso"}
 ```
 
 Un profil cloud-init utilise à la place `source_type: "cloud_init"`,

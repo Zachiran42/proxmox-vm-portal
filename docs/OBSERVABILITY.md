@@ -36,3 +36,7 @@ Un administrateur peut télécharger jusqu’à 5 000 événements via
 n’expose aucun mot de passe et neutralise les cellules pouvant être interprétées
 comme des formules par un tableur. Traitez néanmoins ce fichier comme une donnée
 sensible : stockage chiffré, accès restreint et durée de conservation définie.
+
+Pour une collecte continue par le SOC, utiliser le point NDJSON authentifié en
+mode pull décrit dans [`SIEM.md`](SIEM.md). L'export CSV reste destiné aux
+analyses humaines ponctuelles.

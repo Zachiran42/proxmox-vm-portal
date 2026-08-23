@@ -10,10 +10,12 @@ from portal.models import (
     AuditEvent,
     ProvisioningJob,
     User,
+    UserNotification,
     VMAllocation,
     VMOperation,
     db,
 )
+from portal.notifications import process_lifecycle_enforcement
 from portal.pve import FakePVEClient, PVEHTTPError, PVETransportError
 
 
@@ -208,6 +210,209 @@ def test_lifecycle_settings_are_consistent(app):
     assert client.patch(
         "/api/admin/settings", json={"default_vm_lifetime_days": "90"}
     ).status_code == 400
+    assert client.patch(
+        "/api/admin/settings",
+        json={"expiration_action": "delete", "expiration_grace_days": 7},
+    ).status_code == 200
+    assert client.patch(
+        "/api/admin/settings", json={"expiration_action": "destroy-now"}
+    ).status_code == 400
+    assert client.patch(
+        "/api/admin/settings", json={"expiration_grace_days": 0}
+    ).status_code == 400
+
+
+def test_expired_running_vm_is_quarantined_and_stopped_once(app, pve_client):
+    vm_id = seed_vm(app, status="running")
+    now = datetime(2026, 8, 21, 10, tzinfo=UTC)
+    pve_client.vm_statuses[("pve-a", 101)] = "running"
+    with app.app_context():
+        allocation = db.session.get(VMAllocation, vm_id)
+        allocation.expires_at = now - timedelta(minutes=1)
+        db.session.commit()
+
+        assert process_lifecycle_enforcement(
+            pve_client, action="quarantine", grace_days=7, now=now
+        ) == 1
+        allocation = db.session.get(VMAllocation, vm_id)
+        assert allocation.network_policy == "isolated"
+        assert allocation.lifecycle_quarantined_at.replace(tzinfo=UTC) == now
+        assert allocation.lifecycle_delete_after is None
+        assert db.session.scalar(
+            select(db.func.count(VMOperation.id)).where(VMOperation.action == "stop")
+        ) == 1
+        assert process_lifecycle_enforcement(
+            pve_client, action="quarantine", grace_days=7, now=now
+        ) == 0
+        assert db.session.scalar(
+            select(db.func.count(VMOperation.id)).where(VMOperation.action == "stop")
+        ) == 1
+
+    assert run_step(app, pve_client) is True
+    assert run_step(app, pve_client) is True
+    assert pve_client.stops == [("pve-a", 101)]
+    pve_client.vm_statuses[("pve-a", 101)] = "running"
+    with app.app_context():
+        assert process_lifecycle_enforcement(
+            pve_client, action="quarantine", grace_days=7, now=now
+        ) == 0
+        assert db.session.scalar(
+            select(db.func.count(VMOperation.id)).where(VMOperation.action == "stop")
+        ) == 1
+
+
+def test_expired_vm_is_deleted_only_after_grace_period(app, pve_client):
+    vm_id = seed_vm(app, status="stopped")
+    now = datetime(2026, 8, 21, 10, tzinfo=UTC)
+    pve_client.vm_statuses[("pve-a", 101)] = "stopped"
+    with app.app_context():
+        allocation = db.session.get(VMAllocation, vm_id)
+        allocation.expires_at = now - timedelta(days=1)
+        db.session.commit()
+        assert process_lifecycle_enforcement(
+            pve_client, action="delete", grace_days=3, now=now
+        ) == 1
+        assert db.session.scalar(
+            select(db.func.count(VMOperation.id)).where(VMOperation.action == "delete")
+        ) == 0
+        assert process_lifecycle_enforcement(
+            pve_client,
+            action="delete",
+            grace_days=3,
+            now=now + timedelta(days=3),
+        ) == 0
+        assert db.session.scalar(
+            select(db.func.count(VMOperation.id)).where(VMOperation.action == "delete")
+        ) == 1
+
+    assert run_step(app, pve_client) is True
+    assert run_step(app, pve_client) is True
+    with app.app_context():
+        allocation = db.session.get(VMAllocation, vm_id)
+        assert allocation.status == "deleted"
+        kinds = db.session.scalars(select(UserNotification.kind)).all()
+        assert "lifecycle_quarantined" in kinds
+        assert "lifecycle_deletion_scheduled" in kinds
+        assert "lifecycle_deleted" in kinds
+
+
+def test_lifecycle_enforcement_failure_is_deduplicated(app, pve_client):
+    vm_id = seed_vm(app, status="running")
+    now = datetime(2026, 8, 21, 10, tzinfo=UTC)
+    with app.app_context():
+        allocation = db.session.get(VMAllocation, vm_id)
+        allocation.expires_at = now - timedelta(minutes=1)
+        db.session.commit()
+        pve_client.set_vm_network_policy = lambda *_args: (_ for _ in ()).throw(
+            PVETransportError("offline")
+        )
+        assert process_lifecycle_enforcement(
+            pve_client, action="quarantine", grace_days=7, now=now
+        ) == 0
+        assert process_lifecycle_enforcement(
+            pve_client, action="quarantine", grace_days=7, now=now
+        ) == 0
+        allocation = db.session.get(VMAllocation, vm_id)
+        assert allocation.lifecycle_enforcement_error == "lifecycle_enforcement_unavailable"
+        assert db.session.scalar(
+            select(db.func.count(AuditEvent.id)).where(
+                AuditEvent.action == "vm.lifecycle.enforce"
+            )
+        ) == 1
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (PVEHTTPError(403, "denied"), "lifecycle_enforcement_forbidden"),
+        (PVEHTTPError(500, "failed"), "lifecycle_enforcement_rejected"),
+    ],
+)
+def test_lifecycle_enforcement_normalizes_proxmox_rejections(
+    app, pve_client, error, expected
+):
+    vm_id = seed_vm(app, status="running")
+    now = datetime(2026, 8, 21, 10, tzinfo=UTC)
+    with app.app_context():
+        allocation = db.session.get(VMAllocation, vm_id)
+        allocation.expires_at = now - timedelta(minutes=1)
+        db.session.commit()
+        pve_client.set_vm_network_policy = lambda *_args: (_ for _ in ()).throw(
+            error
+        )
+        assert process_lifecycle_enforcement(
+            pve_client, action="quarantine", grace_days=7, now=now
+        ) == 0
+        assert db.session.get(VMAllocation, vm_id).lifecycle_enforcement_error == expected
+
+
+def test_lifecycle_enforcement_handles_missing_vmid_and_unknown_status(
+    app, pve_client
+):
+    vm_id = seed_vm(app, status="running")
+    now = datetime(2026, 8, 21, 10, tzinfo=UTC)
+    with app.app_context():
+        allocation = db.session.get(VMAllocation, vm_id)
+        allocation.expires_at = now - timedelta(minutes=1)
+        allocation.vmid = None
+        db.session.commit()
+        assert process_lifecycle_enforcement(
+            pve_client, action="quarantine", grace_days=7, now=now
+        ) == 0
+        assert allocation.lifecycle_enforcement_error == "lifecycle_vmid_missing"
+
+        allocation.vmid = 101
+        allocation.lifecycle_enforcement_error = None
+        db.session.commit()
+        pve_client.get_vm_status = lambda *_args: (_ for _ in ()).throw(
+            PVETransportError("offline")
+        )
+        assert process_lifecycle_enforcement(
+            pve_client, action="quarantine", grace_days=7, now=now
+        ) == 1
+        assert allocation.lifecycle_quarantined_at is not None
+        assert allocation.lifecycle_enforcement_error == "lifecycle_status_unknown"
+
+
+def test_lifecycle_policy_changes_schedule_without_reisolating(app, pve_client):
+    vm_id = seed_vm(app, status="stopped")
+    now = datetime(2026, 8, 21, 10, tzinfo=UTC)
+    pve_client.vm_statuses[("pve-a", 101)] = "stopped"
+    with app.app_context():
+        allocation = db.session.get(VMAllocation, vm_id)
+        allocation.expires_at = now - timedelta(minutes=1)
+        allocation.lifecycle_quarantined_at = now - timedelta(days=1)
+        allocation.network_policy = "isolated"
+        db.session.commit()
+        assert process_lifecycle_enforcement(
+            pve_client, action="delete", grace_days=5, now=now
+        ) == 0
+        assert allocation.lifecycle_delete_after is not None
+        assert process_lifecycle_enforcement(
+            pve_client, action="quarantine", grace_days=5, now=now
+        ) == 0
+        assert allocation.lifecycle_delete_after is None
+
+
+def test_notify_only_does_not_contact_proxmox(app, pve_client):
+    with app.app_context():
+        assert process_lifecycle_enforcement(
+            pve_client, action="notify_only", grace_days=7
+        ) == 0
+        assert pve_client.network_policies == {}
+
+
+@pytest.mark.parametrize(
+    ("action", "grace_days"),
+    [("invalid", 7), ("notify_only", 0), ("notify_only", "7")],
+)
+def test_lifecycle_enforcement_rejects_invalid_policy(
+    app, pve_client, action, grace_days
+):
+    with app.app_context(), pytest.raises(ValueError):
+        process_lifecycle_enforcement(
+            pve_client, action=action, grace_days=grace_days
+        )
 
 
 @pytest.mark.parametrize(

@@ -139,6 +139,8 @@ def vm_payload(name="vm-alice-01"):
         "cpu": 2,
         "ram_mb": 4096,
         "disk_gb": 40,
+        "usage_purpose": "technical_test",
+        "no_patient_data_ack": True,
     }
 
 
@@ -382,8 +384,55 @@ def test_invalid_stored_guest_password_policy_falls_back_safely(app):
         "default_vm_lifetime_days": 90,
         "max_vm_lifetime_days": 365,
         "expiration_warning_days": 14,
+        "expiration_action": "notify_only",
+        "expiration_grace_days": 7,
         "vm_approval_required": False,
+        "flow_request_url": "",
     }
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "http://tickets.example.test",
+        "javascript:alert(1)",
+        "https://user:pass@example.test",
+        "https://tickets.example.test/a b",
+        "https://tickets.example.test:99999",
+        None,
+    ],
+)
+def test_flow_request_url_requires_safe_https_url(app, value):
+    client = app.test_client()
+    login(client)
+    response = client.patch("/api/admin/settings", json={"flow_request_url": value})
+    assert response.status_code == 400
+    assert "flow_request_url" in response.get_json()["errors"]
+
+
+def test_admin_can_publish_and_disable_flow_request_url(app):
+    client = app.test_client()
+    login(client)
+    url = "https://support.chu.test/portal/tickets?catalog=network"
+    response = client.patch("/api/admin/settings", json={"flow_request_url": url})
+    assert response.status_code == 200
+    assert response.get_json()["settings"]["flow_request_url"] == url
+    assert client.get("/api/me").get_json()["settings"]["flow_request_url"] == url
+    disabled = client.patch(
+        "/api/admin/settings", json={"flow_request_url": ""}
+    )
+    assert disabled.get_json()["settings"]["flow_request_url"] == ""
+
+
+def test_invalid_stored_flow_request_url_is_not_exposed(app):
+    client = app.test_client()
+    login(client)
+    with app.app_context():
+        db.session.add(
+            PortalSetting(key="flow_request_url", value="javascript:alert(1)")
+        )
+        db.session.commit()
+    assert client.get("/api/me").get_json()["settings"]["flow_request_url"] == ""
 
 
 def test_quota_is_reserved_before_second_proxmox_request(app, pve_client):
@@ -490,6 +539,8 @@ def test_initial_migration_and_bootstrap_admin(tmp_path, pve_client):
             "audit_events",
             "netbox_configuration",
             "proxmox_configuration",
+            "siem_configuration",
+            "software_modules",
             "alembic_version",
         } <= set(inspect(db.engine).get_table_names())
         assert "expires_at" in {

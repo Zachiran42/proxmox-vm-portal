@@ -10,7 +10,9 @@ from .guest_secrets import GuestSecretError, decrypt_guest_password
 from .models import (
     AuditEvent,
     ProvisioningJob,
+    SoftwareModule,
     VMAllocation,
+    VMMaintenanceJob,
     VMOperation,
     WorkerHeartbeat,
     db,
@@ -34,9 +36,17 @@ def process_next_job(
     _recover_stale_jobs(lease_seconds)
     claimed = _claim_job(worker_id)
     if claimed is None:
-        return _process_next_operation(
+        processed = _process_next_operation(
             pve_client,
             netbox_client=netbox_client,
+            worker_id=worker_id,
+            poll_seconds=poll_seconds,
+            lease_seconds=lease_seconds,
+        )
+        if processed:
+            return True
+        return _process_next_maintenance(
+            pve_client,
             worker_id=worker_id,
             poll_seconds=poll_seconds,
             lease_seconds=lease_seconds,
@@ -235,6 +245,9 @@ def _poll_job(pve_client, password_pusher, netbox_client, job_id: str, poll_seco
     if job is None:
         return
     allocation = job.allocation
+    if job.stage == "modules":
+        _poll_modules(pve_client, netbox_client, job, poll_seconds)
+        return
     if not allocation.upstream_request_id or not job.upstream_node:
         _attention(job, "missing_upstream_task")
         return
@@ -260,6 +273,10 @@ def _poll_job(pve_client, password_pusher, netbox_client, job_id: str, poll_seco
                 pve_client, password_pusher, job, poll_seconds
             )
         else:
+            if not _apply_initial_network_policy(pve_client, job, poll_seconds):
+                return
+            if not _submit_modules(pve_client, job, poll_seconds):
+                return
             _complete(job, netbox_client, poll_seconds)
         return
     if job.stage == "start":
@@ -340,6 +357,205 @@ def _retry_guest_access(
         _reschedule(job, "submitted", poll_seconds, error_code)
 
 
+def _apply_initial_network_policy(
+    pve_client, job: ProvisioningJob, poll_seconds: int
+) -> bool:
+    """Applique le confinement avant de déclarer la VM utilisable."""
+    allocation = job.allocation
+    network_profile = allocation.network_profile
+    if allocation.vmid is None:
+        _attention(job, "network_policy_invalid")
+        return False
+    try:
+        policy = (
+            "isolated"
+            if network_profile is not None
+            and network_profile.connectivity_mode in {"isolated", "ticket_required"}
+            else "sandbox"
+        )
+        if policy == "sandbox":
+            pve_client.set_vm_network_policy(
+                allocation.node,
+                allocation.vmid,
+                policy,
+                rules=build_sandbox_firewall_rules(allocation),
+            )
+        else:
+            pve_client.set_vm_network_policy(allocation.node, allocation.vmid, policy)
+    except PVETransportError:
+        _reschedule(job, "submitted", poll_seconds, "network_policy_unavailable")
+        return False
+    except (PVEHTTPError, PVEProtocolError):
+        _attention(job, "network_policy_failed")
+        return False
+    allocation.network_policy = policy
+    allocation.network_policy_revision = (
+        network_profile.sandbox_policy_revision if network_profile is not None else 1
+    )
+    allocation.network_policy_updated_at = datetime.now(UTC)
+    db.session.add(
+        AuditEvent(
+            actor_user_id=allocation.owner_id,
+            action="vm.network_policy.initial",
+            target_type="vm",
+            target_id=allocation.id,
+            outcome="success",
+            request_id=job.id,
+            details={
+                "policy": policy,
+                "revision": allocation.network_policy_revision,
+                "connectivity_mode": (
+                    network_profile.connectivity_mode
+                    if network_profile is not None
+                    else "sandbox"
+                ),
+            },
+        )
+    )
+    db.session.commit()
+    return True
+
+
+def build_sandbox_firewall_rules(allocation: VMAllocation) -> list[dict[str, str]]:
+    """Construit les seules autorisations réseau du bac à sable."""
+    profile = allocation.network_profile
+    rules: list[dict[str, str]] = []
+
+    def add(direction: str, label: str, address: str, proto: str, port: str) -> None:
+        endpoint = "source" if direction == "in" else "dest"
+        rules.append(
+            {
+                "type": direction,
+                "action": "ACCEPT",
+                endpoint: address,
+                "proto": proto,
+                "dport": port,
+                "comment": f"portal-sandbox:{label}:{len(rules) + 1}",
+            }
+        )
+
+    if allocation.network_mode == "dhcp":
+        add("out", "dhcp", "0.0.0.0/0", "udp", "67")
+        add("in", "dhcp", "0.0.0.0/0", "udp", "68")
+    if profile is not None:
+        for source in filter(None, profile.sandbox_ssh_sources.split(",")):
+            add("in", "ssh", source, "tcp", "22")
+        for server in filter(None, profile.dns_servers.split(",")):
+            add("out", "dns-udp", server, "udp", "53")
+            add("out", "dns-tcp", server, "tcp", "53")
+        for server in filter(None, profile.sandbox_ntp_servers.split(",")):
+            add("out", "ntp", server, "udp", "123")
+        for endpoint in filter(None, profile.sandbox_apt_endpoints.split(",")):
+            add("out", "apt", endpoint, "tcp", "443")
+        for endpoint in filter(None, profile.sandbox_registry_endpoints.split(",")):
+            add("out", "registry", endpoint, "tcp", "443")
+        for endpoint in filter(None, profile.sandbox_monitoring_endpoints.split(",")):
+            add("in", "zabbix-passive", endpoint, "tcp", "10050")
+            add("out", "zabbix-active", endpoint, "tcp", "10051")
+    if not rules:
+        add("out", "bootstrap", "255.255.255.255/32", "udp", "67")
+    return rules
+
+
+def _selected_modules(allocation: VMAllocation) -> list[SoftwareModule]:
+    selected = set(allocation.software_modules or [])
+    return list(
+        db.session.scalars(
+            select(SoftwareModule)
+            .where(
+                SoftwareModule.enabled.is_(True),
+                (SoftwareModule.required.is_(True) | SoftwareModule.slug.in_(selected)),
+            )
+            .order_by(SoftwareModule.slug)
+        ).all()
+    )
+
+
+def _module_command(modules: list[SoftwareModule]) -> list[str] | None:
+    preinstalled: list[str] = []
+    packages: list[str] = []
+    images: list[str] = []
+    for module in modules:
+        artifacts = [value for value in module.artifacts.split("\n") if value]
+        if module.install_mode == "preinstalled":
+            preinstalled.extend(artifacts)
+        elif module.install_mode == "apt":
+            packages.extend(artifacts)
+        else:
+            images.extend(artifacts)
+    commands = [
+        f"dpkg-query -W -f='${{Status}}' {package} | grep -q 'install ok installed'"
+        for package in preinstalled
+    ]
+    if packages:
+        commands.extend(
+            [
+                "apt-get update",
+                "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "
+                + " ".join(packages),
+            ]
+        )
+    if images:
+        commands.append("command -v docker >/dev/null")
+        commands.extend(
+            f"docker image inspect {image} >/dev/null 2>&1 || docker pull {image}"
+            for image in images
+        )
+    return ["/bin/sh", "-ceu", "; ".join(commands)] if commands else None
+
+
+def _submit_modules(pve_client, job: ProvisioningJob, poll_seconds: int) -> bool:
+    allocation = job.allocation
+    command = _module_command(_selected_modules(allocation))
+    if command is None:
+        return True
+    if allocation.vmid is None:
+        _attention(job, "module_install_invalid")
+        return False
+    job.module_attempts += 1
+    try:
+        job.guest_pid = pve_client.guest_exec(
+            allocation.node, allocation.vmid, command
+        )
+    except (PVETransportError, PVEHTTPError):
+        if job.module_attempts < 30:
+            _reschedule(job, "submitted", poll_seconds, "guest_agent_not_ready")
+        else:
+            _attention(job, "guest_agent_not_ready")
+        return False
+    except PVEProtocolError:
+        _attention(job, "module_install_submission_invalid")
+        return False
+    job.stage = "modules"
+    _reschedule(job, "submitted", poll_seconds)
+    return False
+
+
+def _poll_modules(
+    pve_client, netbox_client, job: ProvisioningJob, poll_seconds: int
+) -> None:
+    allocation = job.allocation
+    if allocation.vmid is None or job.guest_pid is None:
+        _attention(job, "module_install_invalid")
+        return
+    try:
+        result = pve_client.guest_exec_status(
+            allocation.node, allocation.vmid, job.guest_pid
+        )
+    except PVETransportError:
+        _reschedule(job, "submitted", poll_seconds, "guest_agent_unavailable")
+        return
+    except (PVEHTTPError, PVEProtocolError):
+        _attention(job, "module_install_status_unknown")
+        return
+    if not result["exited"]:
+        _reschedule(job, "submitted", poll_seconds)
+    elif result.get("exitcode") != 0:
+        _attention(job, "module_install_failed")
+    else:
+        _complete(job, netbox_client, poll_seconds)
+
+
 def _complete(job: ProvisioningJob, netbox_client=None, poll_seconds: int = 5) -> None:
     allocation = job.allocation
     if allocation.netbox_ip_id is not None:
@@ -356,7 +572,9 @@ def _complete(job: ProvisioningJob, netbox_client=None, poll_seconds: int = 5) -
     job.completed_at = datetime.now(UTC)
     job.locked_at = None
     job.locked_by = None
-    job.allocation.status = "running" if job.stage == "start" else "accepted"
+    job.allocation.status = (
+        "running" if job.stage in {"start", "modules"} else "accepted"
+    )
     _audit(job, "success", {"name": job.allocation.name})
     _notify_provisioning(job, "succeeded")
     db.session.commit()
@@ -642,6 +860,22 @@ def _complete_operation(
         "delete": "deleted",
     }[operation.action]
     if operation.action == "delete":
+        if (
+            operation.actor_user_id is None
+            and allocation.lifecycle_quarantined_at is not None
+        ):
+            create_notification(
+                user_id=allocation.owner_id,
+                kind="lifecycle_deleted",
+                title="Machine de test supprimée",
+                message=(
+                    f"La machine {allocation.name} a été supprimée automatiquement "
+                    "après son expiration et son délai de grâce."
+                ),
+                dedup_key=f"lifecycle-deleted:{allocation.id}",
+                target_type="vm",
+                target_id=allocation.id,
+            )
         allocation.credential_url = None
         allocation.credential_created_at = None
         allocation.credential_expire_days = None
@@ -718,4 +952,233 @@ def _recover_stale_operations(lease_seconds: int) -> None:
         operation.locked_at = None
         operation.locked_by = None
     if operations:
+        db.session.commit()
+
+
+_APT_COMMON = """set -eu
+export LC_ALL=C DEBIAN_FRONTEND=noninteractive
+apt-get -q -o DPkg::Lock::Timeout=60 update
+printf '__PORTAL_PENDING_BEGIN__\\n'
+apt list --upgradable 2>/dev/null || true
+printf '__PORTAL_PENDING_END__\\n'
+"""
+
+_APT_SCAN_SCRIPT = _APT_COMMON + """if test -e /run/reboot-required; then
+  printf '__PORTAL_REBOOT_REQUIRED__\\n'
+fi
+"""
+
+_APT_UPDATE_SCRIPT = _APT_COMMON + """apt-get -y -q \\
+  -o DPkg::Lock::Timeout=60 \\
+  -o Dpkg::Options::=--force-confold upgrade
+printf '__PORTAL_REMAINING_BEGIN__\\n'
+apt list --upgradable 2>/dev/null || true
+printf '__PORTAL_REMAINING_END__\\n'
+if test -e /run/reboot-required; then
+  printf '__PORTAL_REBOOT_REQUIRED__\\n'
+fi
+"""
+
+
+def _process_next_maintenance(
+    pve_client, *, worker_id: str, poll_seconds: int, lease_seconds: int
+) -> bool:
+    _recover_stale_maintenance(lease_seconds)
+    claimed = _claim_maintenance(worker_id)
+    if claimed is None:
+        return False
+    job_id, phase = claimed
+    if phase == "submitting":
+        _submit_maintenance(pve_client, job_id, poll_seconds)
+    else:
+        _poll_maintenance(pve_client, job_id, poll_seconds)
+    return True
+
+
+def _claim_maintenance(worker_id: str) -> tuple[str, str] | None:
+    now = datetime.now(UTC)
+    job = db.session.scalar(
+        select(VMMaintenanceJob)
+        .where(
+            VMMaintenanceJob.status.in_(("queued", "submitted")),
+            VMMaintenanceJob.available_at <= now,
+        )
+        .order_by(VMMaintenanceJob.available_at, VMMaintenanceJob.created_at)
+        .with_for_update(skip_locked=True)
+    )
+    if job is None:
+        db.session.rollback()
+        return None
+    job.status = "submitting" if job.status == "queued" else "submitted"
+    job.locked_at = now
+    job.locked_by = worker_id[:128]
+    db.session.commit()
+    return job.id, job.status
+
+
+def _submit_maintenance(pve_client, job_id: str, poll_seconds: int) -> None:
+    job = db.session.get(VMMaintenanceJob, job_id)
+    if job is None:
+        return
+    allocation = job.allocation
+    if allocation.vmid is None or allocation.status != "running":
+        _fail_maintenance(job, "maintenance_vm_not_running")
+        return
+    if allocation.network_policy == "isolated":
+        _fail_maintenance(job, "maintenance_network_isolated")
+        return
+    command = [
+        "/bin/sh",
+        "-c",
+        _APT_SCAN_SCRIPT if job.action == "scan" else _APT_UPDATE_SCRIPT,
+    ]
+    try:
+        job.guest_pid = pve_client.guest_exec(
+            allocation.node, allocation.vmid, command
+        )
+    except PVEHTTPError as error:
+        if error.status is not None and 400 <= error.status < 500:
+            _fail_maintenance(job, "maintenance_agent_rejected")
+        else:
+            _attention_maintenance(job, "maintenance_submission_unknown")
+        return
+    except (PVETransportError, PVEProtocolError):
+        _attention_maintenance(job, "maintenance_submission_unknown")
+        return
+    job.status = "submitted"
+    job.available_at = datetime.now(UTC) + timedelta(seconds=poll_seconds)
+    job.locked_at = None
+    job.locked_by = None
+    db.session.commit()
+
+
+def _poll_maintenance(pve_client, job_id: str, poll_seconds: int) -> None:
+    job = db.session.get(VMMaintenanceJob, job_id)
+    if job is None:
+        return
+    allocation = job.allocation
+    if allocation.vmid is None or job.guest_pid is None:
+        _attention_maintenance(job, "maintenance_guest_pid_missing")
+        return
+    try:
+        result = pve_client.guest_exec_status(
+            allocation.node, allocation.vmid, job.guest_pid
+        )
+    except PVETransportError:
+        _reschedule_maintenance(job, poll_seconds)
+        return
+    except (PVEHTTPError, PVEProtocolError):
+        _attention_maintenance(job, "maintenance_status_unknown")
+        return
+    if not result["exited"]:
+        _reschedule_maintenance(job, poll_seconds)
+        return
+    stdout = result.get("out-data", "")
+    stderr = result.get("err-data", "")
+    if result.get("exitcode") != 0:
+        job.output_excerpt = (stdout + "\n" + stderr).strip()[-8000:] or None
+        _fail_maintenance(job, "maintenance_command_failed")
+        return
+    job.output_excerpt = None
+    job.report = _parse_apt_report(stdout, action=job.action)
+    job.status = "succeeded"
+    job.error_code = None
+    job.completed_at = datetime.now(UTC)
+    job.locked_at = None
+    job.locked_by = None
+    _audit_maintenance(job, "success")
+    db.session.commit()
+
+
+def _parse_apt_report(output: str, *, action: str) -> dict[str, object]:
+    def section(start: str, end: str) -> list[str]:
+        if start not in output or end not in output:
+            return []
+        content = output.split(start, 1)[1].split(end, 1)[0]
+        packages: list[str] = []
+        for line in content.splitlines():
+            normalized = line.strip()
+            if not normalized or normalized == "Listing..." or "/" not in normalized:
+                continue
+            name = normalized.split("/", 1)[0]
+            if name and name not in packages:
+                packages.append(name[:255])
+        return packages[:500]
+
+    pending = section("__PORTAL_PENDING_BEGIN__", "__PORTAL_PENDING_END__")
+    remaining = section("__PORTAL_REMAINING_BEGIN__", "__PORTAL_REMAINING_END__")
+    return {
+        "available_count": len(pending),
+        "available_packages": pending,
+        "updated_count": len(set(pending) - set(remaining)) if action == "update" else 0,
+        "remaining_count": len(remaining) if action == "update" else len(pending),
+        "remaining_packages": remaining if action == "update" else pending,
+        "reboot_required": "__PORTAL_REBOOT_REQUIRED__" in output,
+    }
+
+
+def _reschedule_maintenance(job: VMMaintenanceJob, delay_seconds: int) -> None:
+    job.status = "submitted"
+    job.available_at = datetime.now(UTC) + timedelta(seconds=delay_seconds)
+    job.locked_at = None
+    job.locked_by = None
+    db.session.commit()
+
+
+def _fail_maintenance(job: VMMaintenanceJob, error_code: str) -> None:
+    job.status = "failed"
+    job.error_code = error_code
+    job.completed_at = datetime.now(UTC)
+    job.locked_at = None
+    job.locked_by = None
+    _audit_maintenance(job, "failure")
+    db.session.commit()
+
+
+def _attention_maintenance(job: VMMaintenanceJob, error_code: str) -> None:
+    job.status = "attention"
+    job.error_code = error_code
+    job.completed_at = datetime.now(UTC)
+    job.locked_at = None
+    job.locked_by = None
+    _audit_maintenance(job, "failure")
+    db.session.commit()
+
+
+def _audit_maintenance(job: VMMaintenanceJob, outcome: str) -> None:
+    report = job.report or {}
+    db.session.add(
+        AuditEvent(
+            actor_user_id=job.actor_user_id,
+            action=f"vm.maintenance.{job.action}",
+            target_type="vm",
+            target_id=job.allocation_id,
+            outcome=outcome,
+            request_id=job.id,
+            details={
+                "error_code": job.error_code,
+                "available_count": report.get("available_count"),
+                "updated_count": report.get("updated_count"),
+                "reboot_required": report.get("reboot_required"),
+            },
+        )
+    )
+
+
+def _recover_stale_maintenance(lease_seconds: int) -> None:
+    cutoff = datetime.now(UTC) - timedelta(seconds=lease_seconds)
+    jobs = db.session.scalars(
+        select(VMMaintenanceJob).where(
+            VMMaintenanceJob.status == "submitting",
+            VMMaintenanceJob.locked_at < cutoff,
+        )
+    ).all()
+    for job in jobs:
+        job.status = "attention"
+        job.error_code = "worker_crashed_during_maintenance"
+        job.completed_at = datetime.now(UTC)
+        job.locked_at = None
+        job.locked_by = None
+        _audit_maintenance(job, "failure")
+    if jobs:
         db.session.commit()

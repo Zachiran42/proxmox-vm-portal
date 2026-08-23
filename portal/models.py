@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 from flask_sqlalchemy import SQLAlchemy
@@ -101,12 +101,22 @@ class ImageProfile(db.Model):
             "iso IS NULL AND template_node IS NOT NULL AND template_vmid IS NOT NULL)",
             name="ck_image_profiles_source",
         ),
+        CheckConstraint(
+            "lifecycle_status IN ('active', 'deprecated', 'retired')",
+            name="ck_image_profiles_lifecycle_status",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     slug: Mapped[str] = mapped_column(db.String(63), unique=True, nullable=False)
     label: Mapped[str] = mapped_column(db.String(100), nullable=False)
     description: Mapped[str] = mapped_column(db.String(500), nullable=False, default="")
+    version: Mapped[str] = mapped_column(db.String(64), nullable=False, default="1.0.0")
+    lifecycle_status: Mapped[str] = mapped_column(
+        db.String(16), nullable=False, default="active"
+    )
+    supported_until: Mapped[date | None] = mapped_column(db.Date())
+    replacement_slug: Mapped[str | None] = mapped_column(db.String(63))
     source_type: Mapped[str] = mapped_column(
         db.String(16), nullable=False, default="iso"
     )
@@ -126,6 +136,12 @@ class ImageProfile(db.Model):
             "slug": self.slug,
             "label": self.label,
             "description": self.description,
+            "version": self.version,
+            "lifecycle_status": self.lifecycle_status,
+            "supported_until": self.supported_until.isoformat()
+            if self.supported_until is not None
+            else None,
+            "replacement_slug": self.replacement_slug,
             "source_type": self.source_type,
             "iso": self.iso,
             "template_node": self.template_node,
@@ -144,6 +160,10 @@ class NetworkProfile(db.Model):
             "allow_manual_ip = true OR allow_automatic_ip = true",
             name="ck_network_profiles_ip_assignment",
         ),
+        CheckConstraint(
+            "connectivity_mode IN ('sandbox', 'isolated', 'internal', 'internet', 'ticket_required')",
+            name="ck_network_profiles_connectivity_mode",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -161,6 +181,18 @@ class NetworkProfile(db.Model):
     excluded_ips: Mapped[str] = mapped_column(db.String(1024), nullable=False, default="")
     allow_manual_ip: Mapped[bool] = mapped_column(nullable=False, default=True)
     allow_automatic_ip: Mapped[bool] = mapped_column(nullable=False, default=False)
+    connectivity_mode: Mapped[str] = mapped_column(
+        db.String(32), nullable=False, default="sandbox"
+    )
+    connectivity_description: Mapped[str] = mapped_column(
+        db.String(300), nullable=False, default=""
+    )
+    sandbox_ssh_sources: Mapped[str] = mapped_column(db.Text, nullable=False, default="")
+    sandbox_ntp_servers: Mapped[str] = mapped_column(db.String(512), nullable=False, default="")
+    sandbox_apt_endpoints: Mapped[str] = mapped_column(db.String(512), nullable=False, default="")
+    sandbox_registry_endpoints: Mapped[str] = mapped_column(db.String(512), nullable=False, default="")
+    sandbox_monitoring_endpoints: Mapped[str] = mapped_column(db.String(512), nullable=False, default="")
+    sandbox_policy_revision: Mapped[int] = mapped_column(nullable=False, default=1)
     enabled: Mapped[bool] = mapped_column(nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(
         db.DateTime(timezone=True), nullable=False, default=utcnow
@@ -190,6 +222,48 @@ class NetworkProfile(db.Model):
             ],
             "allow_manual_ip": self.allow_manual_ip,
             "allow_automatic_ip": self.allow_automatic_ip,
+            "connectivity_mode": self.connectivity_mode,
+            "connectivity_description": self.connectivity_description,
+            "sandbox_ssh_sources": [value for value in self.sandbox_ssh_sources.split(",") if value],
+            "sandbox_ntp_servers": [value for value in self.sandbox_ntp_servers.split(",") if value],
+            "sandbox_apt_endpoints": [value for value in self.sandbox_apt_endpoints.split(",") if value],
+            "sandbox_registry_endpoints": [value for value in self.sandbox_registry_endpoints.split(",") if value],
+            "sandbox_monitoring_endpoints": [value for value in self.sandbox_monitoring_endpoints.split(",") if value],
+            "sandbox_policy_revision": self.sandbox_policy_revision,
+            "flow_request_required": self.connectivity_mode == "ticket_required",
+            "initially_isolated": True,
+            "enabled": self.enabled,
+        }
+
+
+class SoftwareModule(db.Model):
+    __tablename__ = "software_modules"
+    __table_args__ = (
+        CheckConstraint(
+            "install_mode IN ('preinstalled', 'apt', 'container')",
+            name="ck_software_modules_install_mode",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    slug: Mapped[str] = mapped_column(db.String(63), unique=True, nullable=False)
+    label: Mapped[str] = mapped_column(db.String(100), nullable=False)
+    description: Mapped[str] = mapped_column(db.String(500), nullable=False, default="")
+    install_mode: Mapped[str] = mapped_column(db.String(16), nullable=False)
+    artifacts: Mapped[str] = mapped_column(db.Text, nullable=False, default="")
+    required: Mapped[bool] = mapped_column(nullable=False, default=False)
+    enabled: Mapped[bool] = mapped_column(nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(db.DateTime(timezone=True), nullable=False, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(db.DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow)
+
+    def public_dict(self) -> dict[str, Any]:
+        return {
+            "slug": self.slug,
+            "label": self.label,
+            "description": self.description,
+            "install_mode": self.install_mode,
+            "artifacts": [value for value in self.artifacts.split("\n") if value],
+            "required": self.required,
             "enabled": self.enabled,
         }
 
@@ -233,6 +307,30 @@ class ProxmoxConfiguration(db.Model):
     )
 
 
+class SiemConfiguration(db.Model):
+    __tablename__ = "siem_configuration"
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_siem_configuration_singleton"),
+        CheckConstraint(
+            "minimum_outcome IN ('all', 'failure', 'denied')",
+            name="ck_siem_configuration_minimum_outcome",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    pull_token_ciphertext: Mapped[str] = mapped_column(db.Text, nullable=False)
+    minimum_outcome: Mapped[str] = mapped_column(
+        db.String(16), nullable=False, default="all"
+    )
+    enabled: Mapped[bool] = mapped_column(nullable=False, default=False)
+    updated_by_id: Mapped[int | None] = mapped_column(
+        db.ForeignKey("users.id", ondelete="SET NULL")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        db.DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow
+    )
+
+
 class VMAllocation(db.Model):
     __tablename__ = "vm_allocations"
     __table_args__ = (
@@ -248,6 +346,18 @@ class VMAllocation(db.Model):
         CheckConstraint(
             "network_mode IN ('dhcp', 'static')",
             name="ck_vm_allocations_network_mode",
+        ),
+        CheckConstraint(
+            "network_policy IN ('normal', 'sandbox', 'isolated')",
+            name="ck_vm_allocations_network_policy",
+        ),
+        CheckConstraint(
+            "sandbox_release_status IN ('not_requested', 'pending', 'approved', 'rejected')",
+            name="ck_vm_allocations_sandbox_release_status",
+        ),
+        CheckConstraint(
+            "usage_purpose IN ('technical_test', 'functional_test', 'training', 'security_test')",
+            name="ck_vm_allocations_usage_purpose",
         ),
         CheckConstraint(
             "(network_mode = 'dhcp' AND ipv4_cidr IS NULL AND gateway IS NULL "
@@ -273,6 +383,17 @@ class VMAllocation(db.Model):
         db.ForeignKey("network_profiles.id", ondelete="RESTRICT")
     )
     name: Mapped[str] = mapped_column(db.String(63), nullable=False)
+    image_profile_slug: Mapped[str | None] = mapped_column(db.String(63))
+    image_version: Mapped[str | None] = mapped_column(db.String(64))
+    usage_purpose: Mapped[str] = mapped_column(
+        db.String(32), nullable=False, default="technical_test"
+    )
+    data_policy_version: Mapped[str] = mapped_column(
+        db.String(40), nullable=False, default="no-real-patient-data-v1"
+    )
+    data_policy_acknowledged_at: Mapped[datetime | None] = mapped_column(
+        db.DateTime(timezone=True)
+    )
     node: Mapped[str] = mapped_column(db.String(63), nullable=False)
     iso: Mapped[str | None] = mapped_column(db.String(255))
     vmid: Mapped[int | None] = mapped_column()
@@ -286,6 +407,32 @@ class VMAllocation(db.Model):
     dns_servers: Mapped[str | None] = mapped_column(db.String(64))
     network_bridge: Mapped[str | None] = mapped_column(db.String(32))
     vlan_tag: Mapped[int | None] = mapped_column()
+    network_policy: Mapped[str] = mapped_column(
+        db.String(16), nullable=False, default="sandbox"
+    )
+    network_policy_revision: Mapped[int | None] = mapped_column()
+    network_policy_updated_at: Mapped[datetime | None] = mapped_column(
+        db.DateTime(timezone=True)
+    )
+    sandbox_release_status: Mapped[str] = mapped_column(
+        db.String(16), nullable=False, default="not_requested"
+    )
+    sandbox_release_requested_at: Mapped[datetime | None] = mapped_column(
+        db.DateTime(timezone=True)
+    )
+    sandbox_release_decided_at: Mapped[datetime | None] = mapped_column(
+        db.DateTime(timezone=True)
+    )
+    sandbox_release_decided_by_id: Mapped[int | None] = mapped_column(
+        db.ForeignKey("users.id", ondelete="SET NULL")
+    )
+    sandbox_release_reason: Mapped[str | None] = mapped_column(db.String(500))
+    sandbox_release_ticket: Mapped[str | None] = mapped_column(db.String(100))
+    sandbox_release_duration_hours: Mapped[int | None] = mapped_column()
+    sandbox_release_expires_at: Mapped[datetime | None] = mapped_column(
+        db.DateTime(timezone=True)
+    )
+    software_modules: Mapped[list[str]] = mapped_column(db.JSON, nullable=False, default=list)
     netbox_ip_id: Mapped[int | None] = mapped_column()
     netbox_prefix_id: Mapped[int | None] = mapped_column()
     netbox_vrf_id: Mapped[int | None] = mapped_column()
@@ -299,8 +446,20 @@ class VMAllocation(db.Model):
     network_observed_at: Mapped[datetime | None] = mapped_column(
         db.DateTime(timezone=True)
     )
+    guest_password_reset_requested_at: Mapped[datetime | None] = mapped_column(
+        db.DateTime(timezone=True)
+    )
     archived_at: Mapped[datetime | None] = mapped_column(db.DateTime(timezone=True))
     expires_at: Mapped[datetime | None] = mapped_column(db.DateTime(timezone=True))
+    lifecycle_quarantined_at: Mapped[datetime | None] = mapped_column(
+        db.DateTime(timezone=True)
+    )
+    lifecycle_delete_after: Mapped[datetime | None] = mapped_column(
+        db.DateTime(timezone=True)
+    )
+    lifecycle_enforcement_error: Mapped[str | None] = mapped_column(
+        db.String(80)
+    )
     approval_status: Mapped[str] = mapped_column(
         db.String(16), nullable=False, default="not_required"
     )
@@ -342,6 +501,11 @@ class VMAllocation(db.Model):
         cascade="all, delete-orphan",
         order_by="VMOperation.created_at",
     )
+    maintenance_jobs: Mapped[list[VMMaintenanceJob]] = relationship(
+        back_populates="allocation",
+        cascade="all, delete-orphan",
+        order_by="VMMaintenanceJob.created_at",
+    )
 
     def lifecycle_dict(
         self, *, warning_days: int = 14, now: datetime | None = None
@@ -364,6 +528,54 @@ class VMAllocation(db.Model):
             "state": state,
             "expires_at": expires_at.isoformat(),
             "days_remaining": days_remaining,
+            "quarantined_at": (
+                self.lifecycle_quarantined_at.isoformat()
+                if self.lifecycle_quarantined_at is not None
+                else None
+            ),
+            "delete_after": (
+                self.lifecycle_delete_after.isoformat()
+                if self.lifecycle_delete_after is not None
+                else None
+            ),
+            "enforcement_error": self.lifecycle_enforcement_error,
+        }
+
+    def image_lifecycle_dict(self, *, today: date | None = None) -> dict[str, Any]:
+        current_date = today or datetime.now(UTC).date()
+        profile = self.profile
+        if self.image_profile_slug is None or self.image_version is None:
+            return {
+                "state": "legacy",
+                "profile_slug": self.image_profile_slug,
+                "version": self.image_version,
+                "current_version": profile.version if profile is not None else None,
+                "supported_until": None,
+                "replacement_slug": None,
+            }
+        if profile is None:
+            state = "profile_removed"
+        elif profile.lifecycle_status == "retired":
+            state = "retired"
+        elif profile.supported_until is not None and profile.supported_until < current_date:
+            state = "unsupported"
+        elif profile.lifecycle_status == "deprecated":
+            state = "deprecated"
+        elif profile.version != self.image_version:
+            state = "superseded"
+        else:
+            state = "supported"
+        return {
+            "state": state,
+            "profile_slug": self.image_profile_slug,
+            "version": self.image_version,
+            "current_version": profile.version if profile is not None else None,
+            "supported_until": (
+                profile.supported_until.isoformat()
+                if profile is not None and profile.supported_until is not None
+                else None
+            ),
+            "replacement_slug": profile.replacement_slug if profile is not None else None,
         }
 
 
@@ -376,7 +588,7 @@ class ProvisioningJob(db.Model):
             name="ck_provisioning_jobs_status",
         ),
         CheckConstraint(
-            "stage IN ('create', 'start')", name="ck_provisioning_jobs_stage"
+            "stage IN ('create', 'start', 'modules')", name="ck_provisioning_jobs_stage"
         ),
         Index("ix_provisioning_jobs_status_available", "status", "available_at"),
     )
@@ -394,6 +606,8 @@ class ProvisioningJob(db.Model):
     stage: Mapped[str] = mapped_column(db.String(16), nullable=False, default="create")
     upstream_node: Mapped[str | None] = mapped_column(db.String(63))
     credential_attempts: Mapped[int] = mapped_column(nullable=False, default=0)
+    module_attempts: Mapped[int] = mapped_column(nullable=False, default=0)
+    guest_pid: Mapped[int | None] = mapped_column()
     guest_password_ciphertext: Mapped[str | None] = mapped_column(db.Text())
     available_at: Mapped[datetime] = mapped_column(
         db.DateTime(timezone=True), nullable=False, default=utcnow
@@ -435,6 +649,7 @@ class ProvisioningJob(db.Model):
                 "profile": self.allocation.profile.slug
                 if self.allocation.profile is not None
                 else None,
+                "image_lifecycle": self.allocation.image_lifecycle_dict(),
                 "cpu": self.allocation.cpu,
                 "ram_mb": self.allocation.ram_mb,
                 "disk_gb": self.allocation.disk_gb,
@@ -444,6 +659,34 @@ class ProvisioningJob(db.Model):
                 "network_profile": self.allocation.network_profile.slug
                 if self.allocation.network_profile is not None
                 else None,
+                "network_policy": self.allocation.network_policy,
+                "network_policy_revision": self.allocation.network_policy_revision,
+                "sandbox_release": {
+                    "status": self.allocation.sandbox_release_status,
+                    "requested_at": (
+                        self.allocation.sandbox_release_requested_at.isoformat()
+                        if self.allocation.sandbox_release_requested_at is not None
+                        else None
+                    ),
+                    "reason": self.allocation.sandbox_release_reason,
+                    "ticket_reference": self.allocation.sandbox_release_ticket,
+                    "duration_hours": self.allocation.sandbox_release_duration_hours,
+                    "expires_at": (
+                        self.allocation.sandbox_release_expires_at.isoformat()
+                        if self.allocation.sandbox_release_expires_at is not None
+                        else None
+                    ),
+                },
+                "software_modules": list(self.allocation.software_modules or []),
+                "usage_purpose": self.allocation.usage_purpose,
+                "data_policy": {
+                    "version": self.allocation.data_policy_version,
+                    "acknowledged_at": (
+                        self.allocation.data_policy_acknowledged_at.isoformat()
+                        if self.allocation.data_policy_acknowledged_at is not None
+                        else None
+                    ),
+                },
                 "ipv4_cidr": self.allocation.ipv4_cidr,
                 "gateway": self.allocation.gateway,
                 "dns_servers": self.allocation.dns_servers.split(",")
@@ -469,6 +712,13 @@ class ProvisioningJob(db.Model):
                 ),
             },
         }
+        if self.allocation.guest_password_reset_requested_at is not None:
+            result["vm"]["ssh_password_change"] = {
+                "requested": True,
+                "requested_at": (
+                    self.allocation.guest_password_reset_requested_at.isoformat()
+                ),
+            }
         if latest_operation is not None:
             result["operation"] = latest_operation.public_dict()
         if include_credentials and self.allocation.credential_url:
@@ -547,6 +797,83 @@ class VMOperation(db.Model):
         }
 
 
+class VMMaintenanceJob(db.Model):
+    """Inventaire APT ou mise à jour lancée depuis l'administration."""
+
+    __tablename__ = "vm_maintenance_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "action IN ('scan', 'update')",
+            name="ck_vm_maintenance_jobs_action",
+        ),
+        CheckConstraint(
+            "status IN ('queued', 'submitting', 'submitted', 'succeeded', "
+            "'failed', 'attention')",
+            name="ck_vm_maintenance_jobs_status",
+        ),
+        Index(
+            "ix_vm_maintenance_jobs_status_available",
+            "status",
+            "available_at",
+        ),
+        Index(
+            "uq_vm_maintenance_jobs_active_allocation",
+            "allocation_id",
+            unique=True,
+            postgresql_where=text(
+                "status IN ('queued', 'submitting', 'submitted')"
+            ),
+            sqlite_where=text(
+                "status IN ('queued', 'submitting', 'submitted')"
+            ),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        db.String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    allocation_id: Mapped[str] = mapped_column(
+        db.ForeignKey("vm_allocations.id", ondelete="CASCADE"), nullable=False
+    )
+    actor_user_id: Mapped[int | None] = mapped_column(
+        db.ForeignKey("users.id", ondelete="SET NULL")
+    )
+    action: Mapped[str] = mapped_column(db.String(16), nullable=False)
+    status: Mapped[str] = mapped_column(db.String(16), nullable=False, default="queued")
+    guest_pid: Mapped[int | None] = mapped_column()
+    report: Mapped[dict[str, Any] | None] = mapped_column(db.JSON())
+    output_excerpt: Mapped[str | None] = mapped_column(db.Text())
+    error_code: Mapped[str | None] = mapped_column(db.String(80))
+    available_at: Mapped[datetime] = mapped_column(
+        db.DateTime(timezone=True), nullable=False, default=utcnow
+    )
+    locked_at: Mapped[datetime | None] = mapped_column(db.DateTime(timezone=True))
+    locked_by: Mapped[str | None] = mapped_column(db.String(128))
+    created_at: Mapped[datetime] = mapped_column(
+        db.DateTime(timezone=True), nullable=False, default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        db.DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(db.DateTime(timezone=True))
+
+    allocation: Mapped[VMAllocation] = relationship(back_populates="maintenance_jobs")
+
+    def public_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "action": self.action,
+            "status": self.status,
+            "report": self.report,
+            "error_code": self.error_code,
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+            "completed_at": self.completed_at.isoformat()
+            if self.completed_at is not None
+            else None,
+        }
+
+
 class WorkerHeartbeat(db.Model):
     __tablename__ = "worker_heartbeats"
 
@@ -573,7 +900,13 @@ class UserNotification(db.Model):
             "kind IN ('approval_requested', 'approval_approved', "
             "'approval_rejected', 'provisioning_succeeded', "
             "'provisioning_failed', 'provisioning_attention', "
-            "'lifecycle_warning', 'lifecycle_expired')",
+            "'lifecycle_warning', 'lifecycle_expired', "
+            "'lifecycle_quarantined', 'lifecycle_deletion_scheduled', "
+            "'lifecycle_deleted', 'lifecycle_enforcement_failed', "
+            "'guest_password_reset_requested', "
+            "'guest_password_reset_completed', "
+            "'sandbox_release_requested', 'sandbox_release_decided', "
+            "'sandbox_release_expired')",
             name="ck_user_notifications_kind",
         ),
         UniqueConstraint(

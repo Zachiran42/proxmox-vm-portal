@@ -7,6 +7,7 @@ from typing import Any, cast
 from urllib.parse import urlsplit
 
 _NAME = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
+_IMAGE_VERSION = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$")
 _NODE = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 _ISO = re.compile(r"^[a-z][a-z0-9_-]*:iso/[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}\.iso$")
 _LINUX_USER = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
@@ -18,6 +19,8 @@ _FIELDS = {
     "cpu",
     "ram_mb",
     "disk_gb",
+    "usage_purpose",
+    "no_patient_data_ack",
     "lifetime_days",
     "guest_username",
     "guest_password",
@@ -26,6 +29,7 @@ _FIELDS = {
     "ipv4_cidr",
     "gateway",
     "dns_servers",
+    "software_modules",
 }
 _VM_REQUIRED_FIELDS = _FIELDS - {
     "guest_username",
@@ -35,26 +39,46 @@ _VM_REQUIRED_FIELDS = _FIELDS - {
     "ipv4_cidr",
     "gateway",
     "dns_servers",
+    "software_modules",
     "lifetime_days",
+}
+_USAGE_PURPOSES = {
+    "technical_test",
+    "functional_test",
+    "training",
+    "security_test",
 }
 _USER_FIELDS = {"username", "password", "role", "quota"}
 _USER_UPDATE_FIELDS = {"password", "role", "is_active", "quota"}
 _VM_ACTION_FIELDS = {"action", "confirm_name"}
 _INCIDENT_ACTION_FIELDS = {"action", "confirm_name"}
 _QUOTA_FIELDS = {"vms", "cpu", "ram_mb", "disk_gb"}
-_PROFILE_BASE_FIELDS = {"slug", "label", "description", "source_type"}
+_PROFILE_BASE_FIELDS = {"slug", "label", "description", "source_type", "version"}
 _PROFILE_FIELDS = _PROFILE_BASE_FIELDS | {"iso", "template_node", "template_vmid"}
 _NETWORK_PROFILE_FIELDS = {
     "slug", "label", "cidr", "gateway", "dns_servers", "bridge",
     "vlan_tag", "netbox_prefix_id", "pool_start", "pool_end", "excluded_ips",
-    "allow_manual_ip", "allow_automatic_ip", "enabled",
+    "allow_manual_ip", "allow_automatic_ip", "connectivity_mode",
+    "connectivity_description", "enabled",
+    "sandbox_ssh_sources", "sandbox_ntp_servers", "sandbox_apt_endpoints",
+    "sandbox_registry_endpoints", "sandbox_monitoring_endpoints",
 }
+_CONNECTIVITY_MODES = {"sandbox", "isolated", "internal", "internet", "ticket_required"}
+_SOFTWARE_MODULE_FIELDS = {
+    "slug", "label", "description", "install_mode", "artifacts", "required", "enabled"
+}
+_APT_PACKAGE = re.compile(r"^[a-z0-9][a-z0-9+.-]{0,127}$")
+_OCI_REFERENCE = re.compile(
+    r"^[a-z0-9.-]+(?::[0-9]{1,5})?/[a-z0-9][a-z0-9._/-]{0,220}"
+    r"(?:[:@][A-Za-z0-9][A-Za-z0-9._:+-]{0,127})$"
+)
 _NETBOX_CONFIGURATION_FIELDS = {
     "base_url", "api_token", "ca_certificate", "clear_ca", "enabled"
 }
 _PROXMOX_CONFIGURATION_FIELDS = {
     "api_url", "token_id", "token_secret", "ca_certificate", "clear_ca", "enabled"
 }
+_SIEM_CONFIGURATION_FIELDS = {"pull_token", "minimum_outcome", "enabled"}
 
 
 class ValidationError(Exception):
@@ -78,6 +102,8 @@ class VMRequest:
     cpu: int
     ram_mb: int
     disk_gb: int
+    usage_purpose: str
+    no_patient_data_ack: bool
     lifetime_days: int | None
     guest_username: str | None
     guest_password: str | None
@@ -86,6 +112,7 @@ class VMRequest:
     ipv4_cidr: str | None
     gateway: str | None
     dns_servers: list[str]
+    software_modules: list[str]
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> VMRequest:
@@ -120,6 +147,14 @@ class VMRequest:
             errors["guest_password"] = (  # nosec B105
                 "Le mot de passe SSH doit contenir entre 1 et 256 caractères."
             )
+        usage_purpose = data.get("usage_purpose")
+        if usage_purpose not in _USAGE_PURPOSES:
+            errors["usage_purpose"] = "Finalité de test invalide."
+        no_patient_data_ack = data.get("no_patient_data_ack")
+        if no_patient_data_ack is not True:
+            errors["no_patient_data_ack"] = (
+                "Confirmez qu’aucune donnée patient réelle ne sera utilisée."
+            )
 
         network_mode = data.get("network_mode", "dhcp")
         network_profile = data.get("network_profile")
@@ -130,6 +165,16 @@ class VMRequest:
         ipv4_cidr = data.get("ipv4_cidr")
         gateway = data.get("gateway")
         dns_servers = data.get("dns_servers", [])
+        software_modules = data.get("software_modules", [])
+        if (
+            not isinstance(software_modules, list)
+            or len(software_modules) > 32
+            or any(not isinstance(value, str) or not _NAME.fullmatch(value) for value in software_modules)
+        ):
+            errors["software_modules"] = "Liste de modules logiciels invalide."
+            software_modules = []
+        else:
+            software_modules = list(dict.fromkeys(software_modules))
         interface = None
         if network_mode not in {"dhcp", "static", "automatic"}:
             errors["network_mode"] = "Mode réseau invalide."
@@ -204,6 +249,7 @@ class VMRequest:
             ipv4_cidr=str(interface) if interface is not None else None,
             gateway=str(IPv4Address(gateway)) if network_mode == "static" else None,
             dns_servers=dns_servers if isinstance(dns_servers, list) else [],
+            software_modules=software_modules,
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -214,6 +260,8 @@ class VMRequest:
             "cpu": self.cpu,
             "ram_mb": self.ram_mb,
             "disk_gb": self.disk_gb,
+            "usage_purpose": self.usage_purpose,
+            "no_patient_data_ack": self.no_patient_data_ack,
             "lifetime_days": self.lifetime_days,
             "guest_username": self.guest_username,
             "network_mode": self.network_mode,
@@ -221,6 +269,7 @@ class VMRequest:
             "ipv4_cidr": self.ipv4_cidr,
             "gateway": self.gateway,
             "dns_servers": self.dns_servers,
+            "software_modules": self.software_modules,
         }
 
 
@@ -239,6 +288,13 @@ class NetworkProfileRequest:
     excluded_ips: list[str]
     allow_manual_ip: bool
     allow_automatic_ip: bool
+    connectivity_mode: str
+    connectivity_description: str
+    sandbox_ssh_sources: list[str]
+    sandbox_ntp_servers: list[str]
+    sandbox_apt_endpoints: list[str]
+    sandbox_registry_endpoints: list[str]
+    sandbox_monitoring_endpoints: list[str]
     enabled: bool
 
     @classmethod
@@ -299,6 +355,16 @@ class NetworkProfileRequest:
             errors["allow_automatic_ip"] = "Politique d'attribution automatique invalide."
         if allow_manual_ip is False and allow_automatic_ip is False:
             errors["allow_manual_ip"] = "Autorisez au moins un mode d'attribution fixe."
+        connectivity_mode = data.get("connectivity_mode", "sandbox")
+        if connectivity_mode not in _CONNECTIVITY_MODES:
+            errors["connectivity_mode"] = "Politique de connectivité invalide."
+        connectivity_description = data.get("connectivity_description", "")
+        if not isinstance(connectivity_description, str) or len(
+            connectivity_description.strip()
+        ) > 300:
+            errors["connectivity_description"] = (
+                "La portée réseau doit contenir 300 caractères maximum."
+            )
 
         pool_start = data.get("pool_start")
         pool_end = data.get("pool_end")
@@ -353,6 +419,36 @@ class NetworkProfileRequest:
         enabled = data.get("enabled", True)
         if type(enabled) is not bool:
             errors["enabled"] = "État invalide."
+        sandbox_values: dict[str, list[str]] = {}
+        for field in (
+            "sandbox_ssh_sources",
+            "sandbox_ntp_servers",
+            "sandbox_apt_endpoints",
+            "sandbox_registry_endpoints",
+            "sandbox_monitoring_endpoints",
+        ):
+            raw_values = data.get(field, [])
+            if not isinstance(raw_values, list) or len(raw_values) > 32:
+                errors[field] = "Liste réseau invalide (32 entrées maximum)."
+                sandbox_values[field] = []
+                continue
+            normalized_values: list[str] = []
+            try:
+                for value in raw_values:
+                    if not isinstance(value, str):
+                        raise ValueError
+                    if field == "sandbox_ssh_sources":
+                        normalized_values.append(str(IPv4Network(value, strict=False)))
+                    else:
+                        normalized_values.append(str(IPv4Address(value)))
+            except (TypeError, ValueError):
+                errors[field] = (
+                    "Des réseaux IPv4 CIDR sont requis."
+                    if field == "sandbox_ssh_sources"
+                    else "Des adresses IPv4 sont requises."
+                )
+                normalized_values = []
+            sandbox_values[field] = list(dict.fromkeys(normalized_values))
         if errors:
             raise ValidationError(errors)
         normalized_slug = cast(str, slug)
@@ -372,6 +468,77 @@ class NetworkProfileRequest:
             excluded_ips=normalized_excluded,
             allow_manual_ip=allow_manual_ip,
             allow_automatic_ip=allow_automatic_ip,
+            connectivity_mode=cast(str, connectivity_mode),
+            connectivity_description=cast(str, connectivity_description).strip(),
+            sandbox_ssh_sources=sandbox_values["sandbox_ssh_sources"],
+            sandbox_ntp_servers=sandbox_values["sandbox_ntp_servers"],
+            sandbox_apt_endpoints=sandbox_values["sandbox_apt_endpoints"],
+            sandbox_registry_endpoints=sandbox_values["sandbox_registry_endpoints"],
+            sandbox_monitoring_endpoints=sandbox_values["sandbox_monitoring_endpoints"],
+            enabled=enabled,
+        )
+
+
+@dataclass(frozen=True)
+class SoftwareModuleRequest:
+    slug: str
+    label: str
+    description: str
+    install_mode: str
+    artifacts: list[str]
+    required: bool
+    enabled: bool
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> SoftwareModuleRequest:
+        errors: dict[str, str] = {}
+        unknown = set(data) - _SOFTWARE_MODULE_FIELDS
+        if unknown:
+            errors["unknown"] = "Champs non autorisés: " + ", ".join(sorted(unknown))
+        slug = data.get("slug")
+        label = data.get("label")
+        description = data.get("description", "")
+        install_mode = data.get("install_mode")
+        artifacts = data.get("artifacts", [])
+        required = data.get("required", False)
+        enabled = data.get("enabled", True)
+        if not isinstance(slug, str) or not _NAME.fullmatch(slug):
+            errors["slug"] = "Identifiant de module invalide."
+        if not isinstance(label, str) or not 1 <= len(label.strip()) <= 100:
+            errors["label"] = "Libellé requis (100 caractères maximum)."
+        if not isinstance(description, str) or len(description.strip()) > 500:
+            errors["description"] = "Description limitée à 500 caractères."
+        if install_mode not in {"preinstalled", "apt", "container"}:
+            errors["install_mode"] = "Mode d’installation invalide."
+        if not isinstance(artifacts, list) or not 1 <= len(artifacts) <= 32:
+            errors["artifacts"] = "Un à 32 artefacts sont requis."
+            normalized_artifacts: list[str] = []
+        else:
+            normalized_artifacts = []
+            matcher = _OCI_REFERENCE if install_mode == "container" else _APT_PACKAGE
+            for value in artifacts:
+                if not isinstance(value, str) or not matcher.fullmatch(value.strip()):
+                    errors["artifacts"] = (
+                        "Références OCI immuables attendues."
+                        if install_mode == "container"
+                        else "Noms de paquets APT invalides."
+                    )
+                    break
+                normalized_artifacts.append(value.strip())
+            normalized_artifacts = list(dict.fromkeys(normalized_artifacts))
+        if type(required) is not bool:
+            errors["required"] = "Booléen requis."
+        if type(enabled) is not bool:
+            errors["enabled"] = "Booléen requis."
+        if errors:
+            raise ValidationError(errors)
+        return cls(
+            slug=cast(str, slug),
+            label=cast(str, label).strip(),
+            description=cast(str, description).strip(),
+            install_mode=cast(str, install_mode),
+            artifacts=normalized_artifacts,
+            required=required,
             enabled=enabled,
         )
 
@@ -492,6 +659,38 @@ class ProxmoxConfigurationRequest:
 
 
 @dataclass(frozen=True)
+class SiemConfigurationRequest:
+    pull_token: str | None
+    minimum_outcome: str
+    enabled: bool
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> SiemConfigurationRequest:
+        errors: dict[str, str] = {}
+        unknown = set(data) - _SIEM_CONFIGURATION_FIELDS
+        if unknown:
+            errors["unknown"] = "Champs non autorisés: " + ", ".join(sorted(unknown))
+        pull_token = data.get("pull_token")
+        if pull_token is not None and (
+            not isinstance(pull_token, str) or not 32 <= len(pull_token) <= 512
+        ):
+            errors["pull_token"] = "Jeton SIEM requis entre 32 et 512 caractères."  # nosec B105
+        minimum_outcome = data.get("minimum_outcome", "all")
+        if minimum_outcome not in {"all", "failure", "denied"}:
+            errors["minimum_outcome"] = "Filtre SIEM invalide."
+        enabled = data.get("enabled", False)
+        if type(enabled) is not bool:
+            errors["enabled"] = "État invalide."
+        if errors:
+            raise ValidationError(errors)
+        return cls(
+            pull_token=pull_token,
+            minimum_outcome=cast(str, minimum_outcome),
+            enabled=enabled,
+        )
+
+
+@dataclass(frozen=True)
 class VMActionRequest:
     action: str
     confirm_name: str | None
@@ -548,6 +747,7 @@ class ImageProfileCreateRequest:
     slug: str
     label: str
     description: str
+    version: str
     source_type: str
     iso: str | None
     template_node: str | None
@@ -564,6 +764,7 @@ class ImageProfileCreateRequest:
         slug = data.get("slug")
         label = data.get("label")
         description = data.get("description")
+        version = data.get("version")
         source_type = data.get("source_type")
         iso = data.get("iso")
         template_node = data.get("template_node")
@@ -574,6 +775,8 @@ class ImageProfileCreateRequest:
             errors["label"] = "Libellé requis (1 à 100 caractères)."
         if not isinstance(description, str) or len(description) > 500:
             errors["description"] = "Description invalide (500 caractères maximum)."
+        if not isinstance(version, str) or not _IMAGE_VERSION.fullmatch(version):
+            errors["version"] = "Version invalide (64 caractères maximum)."
         if source_type not in {"iso", "cloud_init"}:
             errors["source_type"] = "Type de profil invalide."
         elif source_type == "iso":
@@ -594,6 +797,7 @@ class ImageProfileCreateRequest:
             slug=cast(str, slug),
             label=cast(str, label).strip(),
             description=cast(str, description),
+            version=cast(str, version),
             source_type=cast(str, source_type),
             iso=iso,
             template_node=template_node,

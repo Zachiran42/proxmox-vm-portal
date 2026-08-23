@@ -4,12 +4,54 @@ Le portail propose aux utilisateurs uniquement les profils réseau activés par 
 administrateur. Un profil contient le CIDR IPv4, la passerelle, les DNS, le bridge
 Proxmox et, si nécessaire, le tag VLAN 802.1Q.
 
+Chaque profil porte aussi une politique de connectivité explicite :
+
+- **bac à sable** : mode initial normal de toute VM, avec `net0` actif, `DROP`
+  en entrée et en sortie et uniquement les services internes autorisés par le
+  profil ;
+- **isolée** : quarantaine renforcée qui conserve `DROP` et déconnecte aussi
+  `net0` ;
+- **interne contrôlé** et **Internet autorisé** : intentions de connectivité qui
+  restent initialement en bac à sable jusqu'à une approbation administrative ;
+- **ouverture sur ticket** : la VM naît isolée comme dans le premier mode. Une
+  URL HTTPS de demande de flux doit être configurée dans les paramètres avant
+  qu'un utilisateur puisse sélectionner le profil.
+
+La sortie du bac à sable ne peut pas être appliquée par l'utilisateur. Il
+dépose une demande motivée ; seul un administrateur peut l'approuver ou la
+refuser depuis l'inventaire. La décision et sa justification sont auditées. Les
+règles détaillées et le catalogue logiciel hors Internet sont documentés dans
+[`SANDBOX.md`](SANDBOX.md).
+
+Le champ **Portée autorisée** permet à l'administrateur d'afficher une consigne
+concrète, par exemple « réseau de test, sans accès au SI de production ». Ce
+texte est informatif : les restrictions doivent également être matérialisées
+sur le pare-feu, le VLAN ou la microsegmentation du CHU.
+
 Exemple CHU : `VLAN serveurs CHU`, `10.10.12.0/24`, passerelle
 `10.10.12.254`, DNS internes, bridge `vmbr0` et tag VLAN `12`.
 
 Le bridge doit exister sur tous les nœuds ciblés et transporter le VLAN indiqué.
 Le token Proxmox du portail doit conserver `VM.Config.Network` et `SDN.Use` sur
-le bridge concerné.
+le bridge concerné. Les profils isolés nécessitent également les droits de
+pare-feu documentés dans `docs/VM_MAINTENANCE.md` et l'activation du pare-feu
+Proxmox au niveau datacenter.
+
+## Procédure d'ouverture sur ticket
+
+1. L'administrateur configure l'URL HTTPS du formulaire GLPI dans
+   **Administration > Paramètres de provisionnement**.
+2. Il crée un profil avec la politique **Sur ticket** et décrit la portée
+   attendue.
+3. La VM est provisionnée et reste isolée, même si elle obtient une adresse IP.
+4. L'utilisateur ouvre GLPI depuis le détail de sa VM, crée son ticket puis
+   reporte sa référence, la durée et les flux attendus dans le portail.
+5. Après validation externe et mise en place des règles amont, un administrateur
+   prend la décision depuis la console du portail. L'ouverture approuvée expire
+   automatiquement et la VM retourne alors en sandbox.
+
+L'ouverture et la fermeture sont auditées. Le portail ne considère jamais la
+simple création d'un ticket comme une autorisation technique.
 
 ## Configurer NetBox depuis le portail
 

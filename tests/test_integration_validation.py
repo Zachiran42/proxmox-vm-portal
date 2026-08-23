@@ -55,6 +55,8 @@ def network_payload(**updates):
         ),
         ({"excluded_ips": "10.10.12.10"}, "excluded_ips"),
         ({"excluded_ips": ["10.10.13.10"]}, "excluded_ips"),
+        ({"connectivity_mode": "open"}, "connectivity_mode"),
+        ({"connectivity_description": "x" * 301}, "connectivity_description"),
         ({"enabled": "yes"}, "enabled"),
     ],
 )
@@ -75,6 +77,20 @@ def test_network_profile_normalizes_automatic_pool_and_exclusions():
     )
     assert request.pool_start == "10.10.12.50"
     assert request.excluded_ips == ["10.10.12.51"]
+
+
+@pytest.mark.parametrize(
+    "mode", ["isolated", "internal", "internet", "ticket_required"]
+)
+def test_network_profile_accepts_supported_connectivity_modes(mode):
+    request = NetworkProfileRequest.from_dict(
+        network_payload(
+            connectivity_mode=mode,
+            connectivity_description="  Réseau de test CHU  ",
+        )
+    )
+    assert request.connectivity_mode == mode
+    assert request.connectivity_description == "Réseau de test CHU"
 
 
 @pytest.mark.parametrize(
@@ -203,6 +219,24 @@ def test_proxmox_configuration_accepts_non_root_token():
 def test_image_profile_validation_rejects_incoherent_sources(payload):
     with pytest.raises(ValidationError):
         ImageProfileCreateRequest.from_dict(payload)
+
+
+def test_image_profile_validation_requires_a_safe_version():
+    with pytest.raises(ValidationError) as error:
+        ImageProfileCreateRequest.from_dict(
+            {
+                "slug": "debian-13",
+                "label": "Debian 13",
+                "description": "Image validée",
+                "version": "version avec espaces",
+                "source_type": "iso",
+                "iso": "local:iso/debian-13.iso",
+            }
+        )
+
+    assert error.value.errors == {
+        "version": "Version invalide (64 caractères maximum)."
+    }
 
 
 @pytest.mark.parametrize(

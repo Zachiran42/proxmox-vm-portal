@@ -160,7 +160,18 @@
       <div class="page" id="operations-view" hidden>
         <div class="page-heading">
           <div><span class="eyebrow">Supervision du parc</span><h1>Exploitation</h1><p>Consultez le parc global, la santé des services et les interventions requises.</p></div>
+          <a class="button button-secondary" href="/api/admin/mco/report.csv" download>Télécharger le rapport MCO</a>
         </div>
+
+        <section class="catalogue-section mco-section" aria-labelledby="mco-title">
+          <div class="section-heading">
+            <div><h2 id="mco-title">Synthèse MCO</h2><p id="mco-generated">Calcul du rapport…</p></div>
+            <button class="icon-button" type="button" id="refresh-mco" aria-label="Actualiser le rapport MCO">↻</button>
+          </div>
+          <div class="mco-summary" id="mco-summary"></div>
+          <div class="incident-list" id="mco-list" aria-live="polite"></div>
+          <div class="empty-state compact" id="mco-empty" hidden><span>✓</span><h3>Aucune action MCO prioritaire</h3><p>Le parc ne présente aucune anomalie dans les contrôles disponibles.</p></div>
+        </section>
 
         <section class="catalogue-section fleet-section" aria-labelledby="fleet-title">
           <div class="section-heading fleet-heading">
@@ -180,7 +191,7 @@
           </form>
           <div class="fleet-table-wrapper">
             <table class="fleet-table">
-              <thead><tr><th>Machine</th><th>Propriétaire</th><th>Placement</th><th>Réseau</th><th>Ressources</th><th>État</th><th>Échéance</th></tr></thead>
+              <thead><tr><th>Machine</th><th>Propriétaire</th><th>Placement</th><th>Réseau</th><th>Ressources</th><th>État</th><th>Mises à jour</th><th>Échéance</th><th>Actions</th></tr></thead>
               <tbody id="fleet-list"></tbody>
             </table>
           </div>
@@ -251,10 +262,28 @@
               <label for="expiration-warning-days">Préavis d’expiration (jours)</label>
               <input id="expiration-warning-days" type="number" min="1" max="3650" required>
             </div>
+            <div>
+              <label for="expiration-action">Action automatique à l’expiration</label>
+              <select id="expiration-action">
+                <option value="notify_only">Notifier et bloquer le redémarrage</option>
+                <option value="quarantine">Arrêter et isoler la VM</option>
+                <option value="delete">Arrêter, isoler puis supprimer</option>
+              </select>
+              <p class="field-help">Le mode suppression respecte toujours le délai de grâce ci-dessous.</p>
+            </div>
+            <div>
+              <label for="expiration-grace-days">Délai de grâce avant suppression (jours)</label>
+              <input id="expiration-grace-days" type="number" min="1" max="365" required>
+            </div>
             <label class="check-row" for="vm-approval-required">
               <input id="vm-approval-required" type="checkbox">
               <span><strong>Approbation administrative obligatoire</strong><small>Le worker ne contacte ni Proxmox ni NetBox avant validation. Les quotas restent réservés pendant l’attente.</small></span>
             </label>
+            <div>
+              <label for="flow-request-url">URL du formulaire GLPI d’ouverture de flux</label>
+              <input id="flow-request-url" type="url" maxlength="1024" placeholder="https://glpi.chu.fr/front/helpdesk.public.php?create_ticket=1">
+              <p class="field-help">URL HTTPS du formulaire officiel. Elle est ouverte avant l’enregistrement de la référence GLPI dans le portail.</p>
+            </div>
             <button class="button button-primary" type="submit" id="save-settings">Enregistrer</button>
           </form>
           <p class="form-error" id="settings-error" role="alert" hidden></p>
@@ -291,6 +320,18 @@
               <button class="button button-primary" type="submit" id="save-netbox-integration">Tester et enregistrer</button>
               <p class="form-error" id="netbox-integration-error" role="alert" hidden></p>
             </form>
+            <form id="siem-integration-form" class="integration-card">
+              <div><h3>SIEM / SOC</h3><p id="siem-integration-status" class="field-help">Chargement…</p></div>
+              <label for="siem-minimum-outcome">Événements exportés</label>
+              <select id="siem-minimum-outcome"><option value="all">Tous les événements d’audit</option><option value="failure">Échecs et refus uniquement</option><option value="denied">Refus de sécurité uniquement</option></select>
+              <label for="siem-pull-token">Nouveau jeton de collecte</label>
+              <input id="siem-pull-token" type="password" minlength="32" maxlength="512" autocomplete="new-password" placeholder="Laisser vide pour conserver le jeton">
+              <button class="button button-secondary" type="button" id="generate-siem-token">Générer un jeton</button>
+              <label class="active-checkbox"><input id="siem-enabled" type="checkbox"><span>Autoriser la collecte SIEM</span></label>
+              <p class="field-help">Le SIEM interroge <code>/api/siem/events</code> avec un Bearer token. Le portail n’initie aucune connexion sortante.</p>
+              <button class="button button-primary" type="submit" id="save-siem-integration">Enregistrer</button>
+              <p class="form-error" id="siem-integration-error" role="alert" hidden></p>
+            </form>
           </div>
         </section>
 
@@ -316,6 +357,19 @@
               <div><label for="network-profile-netbox">Préfixe NetBox ID (optionnel)</label><input id="network-profile-netbox" type="number" min="1" placeholder="42"><p class="field-help">Si renseigné, chaque IP fixe est réservée et suivie dans NetBox.</p></div>
             </div>
             <div class="form-row">
+              <div>
+                <label for="network-profile-connectivity">Connectivité initiale</label>
+                <select id="network-profile-connectivity">
+                  <option value="sandbox" selected>Bac à sable — services internes approuvés uniquement</option>
+                  <option value="isolated">Isolée — aucun réseau</option>
+                  <option value="internal">Interne — selon le VLAN</option>
+                  <option value="internet">Internet — selon le pare-feu amont</option>
+                  <option value="ticket_required">Sur ticket — isolée jusqu’à validation</option>
+                </select>
+              </div>
+              <div><label for="network-profile-connectivity-description">Portée autorisée</label><input id="network-profile-connectivity-description" maxlength="300" placeholder="Réseau de test, sans accès au SI de production"></div>
+            </div>
+            <div class="form-row">
               <div><label for="network-profile-pool-start">Début de plage automatique</label><input id="network-profile-pool-start" maxlength="15" placeholder="10.10.12.50"></div>
               <div><label for="network-profile-pool-end">Fin de plage automatique</label><input id="network-profile-pool-end" maxlength="15" placeholder="10.10.12.200"></div>
             </div>
@@ -323,6 +377,20 @@
               <label for="network-profile-excluded">Adresses exclues</label>
               <input id="network-profile-excluded" maxlength="1024" placeholder="10.10.12.100, 10.10.12.101">
             </div>
+            <fieldset class="sandbox-settings">
+              <legend>Services autorisés dans le bac à sable</legend>
+              <p class="field-help">Les politiques Proxmox restent en DROP entrée/sortie. Saisissez uniquement les adresses des services internes approuvés.</p>
+              <label for="network-profile-ssh-sources">Sources SSH autorisées (CIDR)</label>
+              <input id="network-profile-ssh-sources" maxlength="2048" placeholder="10.10.20.0/24, 10.10.30.15/32">
+              <div class="form-row">
+                <div><label for="network-profile-ntp">Serveurs NTP</label><input id="network-profile-ntp" maxlength="512" placeholder="10.10.1.20"></div>
+                <div><label for="network-profile-apt">Miroirs APT HTTPS</label><input id="network-profile-apt" maxlength="512" placeholder="10.10.1.30"></div>
+              </div>
+              <div class="form-row">
+                <div><label for="network-profile-registry">Registres OCI HTTPS</label><input id="network-profile-registry" maxlength="512" placeholder="10.10.1.40"></div>
+                <div><label for="network-profile-monitoring">Serveurs Zabbix</label><input id="network-profile-monitoring" maxlength="512" placeholder="10.10.1.50"></div>
+              </div>
+            </fieldset>
             <div class="form-row">
               <label class="active-checkbox"><input id="network-profile-manual" type="checkbox" checked><span>Autoriser la saisie manuelle</span></label>
               <label class="active-checkbox"><input id="network-profile-automatic" type="checkbox"><span>Autoriser l’attribution automatique</span></label>
@@ -331,6 +399,25 @@
           </form>
           <p class="form-error" id="network-profile-error" role="alert" hidden></p>
           <div class="user-list" id="network-profile-list" aria-live="polite"></div>
+        </section>
+
+        <section class="catalogue-section settings-section" aria-labelledby="software-modules-title">
+          <div class="section-heading"><div><h2 id="software-modules-title">Modules logiciels hors ligne</h2><p>Publiez uniquement des paquets et images disponibles sur les dépôts internes.</p></div></div>
+          <form id="software-module-form" class="settings-form">
+            <div class="form-row">
+              <div><label for="software-module-label">Nom affiché</label><input id="software-module-label" maxlength="100" placeholder="Docker Engine" required></div>
+              <div><label for="software-module-slug">Identifiant</label><input id="software-module-slug" maxlength="63" pattern="[a-z][a-z0-9-]{0,62}" placeholder="docker" required></div>
+            </div>
+            <label for="software-module-description">Description</label><input id="software-module-description" maxlength="500" placeholder="Moteur Docker validé pour les VM de test">
+            <label for="software-module-mode">Distribution</label>
+            <select id="software-module-mode"><option value="preinstalled">Déjà intégré au template</option><option value="apt">Paquets depuis le miroir APT interne</option><option value="container">Images depuis le registre OCI interne</option></select>
+            <label for="software-module-artifacts">Artefacts, un par ligne</label>
+            <textarea id="software-module-artifacts" rows="4" placeholder="docker-ce&#10;docker-ce-cli" required></textarea>
+            <label class="active-checkbox"><input id="software-module-required" type="checkbox"><span>Module obligatoire pour toutes les VM cloud-init</span></label>
+            <button class="button button-primary" type="submit" id="save-software-module">Ajouter le module</button>
+            <p class="form-error" id="software-module-error" role="alert" hidden></p>
+          </form>
+          <div class="user-list" id="software-module-list" aria-live="polite"></div>
         </section>
 
         <section class="catalogue-section admin-section" aria-labelledby="users-title">
@@ -378,6 +465,17 @@
           </div>
           <label for="vm-name">Nom de la machine</label>
           <input id="vm-name" name="name" maxlength="63" pattern="[a-z][a-z0-9-]{0,62}" placeholder="web-projet-01" required>
+          <label for="vm-usage-purpose">Finalité de cette VM</label>
+          <select id="vm-usage-purpose" name="usage_purpose" required>
+            <option value="technical_test">Test technique</option>
+            <option value="functional_test">Test fonctionnel</option>
+            <option value="training">Formation ou démonstration</option>
+            <option value="security_test">Test de sécurité autorisé</option>
+          </select>
+          <label class="data-policy-confirmation">
+            <input id="vm-no-patient-data-ack" name="no_patient_data_ack" type="checkbox" required>
+            <span><strong>Environnement de test uniquement</strong><small>Je confirme qu’aucune donnée patient réelle, donnée de santé nominative ou donnée issue de production ne sera importée dans cette VM.</small></span>
+          </label>
         </div>
       </section>
 
@@ -405,6 +503,7 @@
           <select id="vm-network-profile" name="network_profile">
             <option value="">Réseau par défaut du template</option>
           </select>
+          <div id="vm-connectivity-notice" class="connectivity-notice" hidden></div>
           <label for="vm-network-mode">Attribution IPv4</label>
           <select id="vm-network-mode" name="network_mode">
             <option value="dhcp">DHCP automatique</option>
@@ -434,6 +533,11 @@
             <div><label for="vm-guest-password-confirmation">Confirmation</label><input id="vm-guest-password-confirmation" type="password" maxlength="256" autocomplete="new-password"></div>
           </div>
           <p class="field-help" id="guest-password-help">Choisissez le mot de passe initial. Il sera chiffré seulement le temps du provisionnement puis supprimé du portail.</p>
+          <fieldset class="software-module-picker">
+            <legend>Modules logiciels</legend>
+            <p class="field-help">Les modules proviennent exclusivement du template ou des dépôts internes validés.</p>
+            <div id="vm-software-modules"></div>
+          </fieldset>
         </div>
       </section>
 
@@ -491,20 +595,77 @@
       <div><dt>État</dt><dd id="vm-details-status">—</dd></div>
       <div><dt>Emplacement</dt><dd id="vm-details-placement">—</dd></div>
       <div><dt>Image</dt><dd id="vm-details-profile">—</dd></div>
+      <div><dt>Finalité</dt><dd id="vm-details-usage">—</dd></div>
       <div><dt>Ressources</dt><dd id="vm-details-resources">—</dd></div>
       <div><dt>Compte SSH</dt><dd id="vm-details-ssh-user">—</dd></div>
       <div><dt>Dernière IPv4 connue</dt><dd id="vm-details-ipv4">—</dd></div>
       <div><dt>Observation réseau</dt><dd id="vm-details-observed">—</dd></div>
       <div><dt>Création</dt><dd id="vm-details-created">—</dd></div>
     </dl>
+    <div id="vm-image-lifecycle-warning" class="image-lifecycle-warning" hidden></div>
     <div class="vm-details-access" id="vm-details-access" hidden>
       <code id="vm-details-command"></code>
       <button class="button button-primary compact-button" type="button" id="copy-vm-ssh">Copier SSH</button>
+    </div>
+    <div class="vm-password-management" id="vm-password-management" hidden>
+      <div>
+        <strong id="vm-password-status">Mot de passe SSH</strong>
+        <span id="vm-password-help">Vous seul pouvez choisir le nouveau mot de passe. Le portail ne le conserve pas.</span>
+      </div>
+      <button class="button button-secondary compact-button" type="button" id="open-guest-password-dialog">Modifier</button>
+    </div>
+    <div class="vm-flow-request" id="vm-flow-request" hidden>
+      <div>
+        <strong>Besoin d’un accès réseau supplémentaire ?</strong>
+        <span>La demande sera traitée dans l’outil officiel de votre établissement.</span>
+      </div>
+      <a class="button button-secondary compact-button" id="open-flow-request" href="#" target="_blank" rel="noopener noreferrer">Demander une ouverture de flux</a>
+    </div>
+    <div class="vm-flow-request" id="vm-sandbox-release" hidden>
+      <div class="sandbox-release-copy"><strong>VM protégée par le bac à sable</strong><span id="vm-sandbox-release-status">Les accès hors des services internes approuvés sont bloqués.</span></div>
+      <div class="sandbox-release-form" id="sandbox-release-form">
+        <a class="button button-secondary compact-button" id="open-sandbox-glpi" href="#" target="_blank" rel="noopener noreferrer">1. Ouvrir le formulaire GLPI</a>
+        <label for="sandbox-ticket-reference">Référence du ticket GLPI</label>
+        <input id="sandbox-ticket-reference" maxlength="100" placeholder="INC0001234">
+        <label for="sandbox-duration-hours">Durée demandée</label>
+        <select id="sandbox-duration-hours">
+          <option value="4">4 heures</option>
+          <option value="8">8 heures</option>
+          <option value="24" selected>24 heures</option>
+          <option value="72">3 jours</option>
+          <option value="168">7 jours</option>
+          <option value="720">30 jours</option>
+        </select>
+        <label for="sandbox-release-reason">Justification et flux attendus</label>
+        <textarea id="sandbox-release-reason" maxlength="500" rows="3" placeholder="Accès HTTPS au service de recette…"></textarea>
+        <button class="button button-secondary compact-button" id="request-sandbox-release" type="button">2. Transmettre à l’administrateur</button>
+      </div>
     </div>
     <section class="vm-operation-history" aria-labelledby="vm-operation-history-title">
       <h3 id="vm-operation-history-title">Historique des opérations</h3>
       <div id="vm-operation-history"></div>
     </section>
+  </dialog>
+
+  <dialog id="guest-password-dialog" aria-labelledby="guest-password-title">
+    <form id="guest-password-form">
+      <input id="guest-password-vm-id" type="hidden">
+      <div class="dialog-heading">
+        <div><span class="eyebrow">Accès invité</span><h2 id="guest-password-title">Nouveau mot de passe SSH</h2></div>
+        <button class="close-button" type="button" id="close-guest-password-dialog" aria-label="Fermer">×</button>
+      </div>
+      <p class="dialog-intro" id="guest-password-intro"></p>
+      <label for="new-guest-password">Nouveau mot de passe</label>
+      <input id="new-guest-password" type="password" maxlength="256" autocomplete="new-password" required>
+      <label for="new-guest-password-confirmation">Confirmation</label>
+      <input id="new-guest-password-confirmation" type="password" maxlength="256" autocomplete="new-password" required>
+      <p class="field-help" id="guest-password-reset-help">Le secret est transmis directement à Proxmox via HTTPS et QEMU Guest Agent, puis oublié par le portail.</p>
+      <p class="form-error" id="guest-password-reset-error" role="alert" hidden></p>
+      <div class="dialog-actions">
+        <button class="button button-secondary" type="button" id="cancel-guest-password">Annuler</button>
+        <button class="button button-primary" type="submit" id="save-guest-password">Appliquer à la VM</button>
+      </div>
+    </form>
   </dialog>
 
   <dialog id="vm-action-dialog" aria-labelledby="vm-action-title">
@@ -527,6 +688,19 @@
         <button class="button button-primary" type="submit" id="submit-vm-action">Confirmer</button>
       </div>
     </form>
+  </dialog>
+
+  <dialog id="network-log-dialog" aria-labelledby="network-log-title">
+    <div class="dialog-heading">
+      <div><span class="eyebrow">Pare-feu hyperviseur</span><h2 id="network-log-title">Tentatives réseau</h2></div>
+      <button class="close-button" type="button" id="close-network-log" aria-label="Fermer">×</button>
+    </div>
+    <p class="dialog-intro" id="network-log-intro">Chargement du journal Proxmox…</p>
+    <div class="network-log-list" id="network-log-list" aria-live="polite"></div>
+    <div class="empty-state compact" id="network-log-empty" hidden><span>✓</span><h3>Aucune tentative journalisée</h3><p>Seuls les paquets refusés par le pare-feu Proxmox sont affichés.</p></div>
+    <div class="dialog-actions">
+      <button class="button button-secondary" type="button" id="close-network-log-action">Fermer</button>
+    </div>
   </dialog>
 
   <dialog id="incident-dialog" aria-labelledby="incident-dialog-title">
@@ -570,6 +744,8 @@
         <div><label for="profile-label">Nom affiché</label><input id="profile-label" name="label" maxlength="100" placeholder="Debian 13 Cloud" required></div>
         <div><label for="profile-slug">Identifiant</label><input id="profile-slug" name="slug" maxlength="63" pattern="[a-z0-9][a-z0-9-]{0,62}" placeholder="debian-13-cloud" required></div>
       </div>
+      <label for="profile-version">Version immuable de l’image</label>
+      <input id="profile-version" name="version" maxlength="64" pattern="[0-9A-Za-z][0-9A-Za-z._+\-]{0,63}" placeholder="13.6-2026.08" required>
       <label for="profile-description">Description</label>
       <textarea id="profile-description" name="description" maxlength="500" rows="3" placeholder="Template durci et validé"></textarea>
 
@@ -592,6 +768,33 @@
       <div class="dialog-actions">
         <button class="button button-secondary" type="button" id="cancel-profile">Annuler</button>
         <button class="button button-primary" type="submit" id="publish-profile">Vérifier et publier</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="image-lifecycle-dialog" aria-labelledby="image-lifecycle-title">
+    <form id="image-lifecycle-form">
+      <input id="image-lifecycle-slug" type="hidden">
+      <div class="dialog-heading">
+        <div><span class="eyebrow">Cycle de vie</span><h2 id="image-lifecycle-title">Gérer l’image</h2></div>
+        <button class="close-button" type="button" id="close-image-lifecycle" aria-label="Fermer">×</button>
+      </div>
+      <p class="dialog-intro" id="image-lifecycle-intro"></p>
+      <label for="image-lifecycle-status">État</label>
+      <select id="image-lifecycle-status">
+        <option value="active">Active et publiable</option>
+        <option value="deprecated">Dépréciée</option>
+        <option value="retired">Retirée</option>
+      </select>
+      <label for="image-supported-until">Fin de support</label>
+      <input id="image-supported-until" type="date">
+      <label for="image-replacement-slug">Image de remplacement</label>
+      <select id="image-replacement-slug"><option value="">Aucune</option></select>
+      <p class="field-help">Une image dépréciée ou retirée disparaît immédiatement des nouvelles demandes. Les VM existantes ne sont ni modifiées ni redémarrées.</p>
+      <p class="form-error" id="image-lifecycle-error" role="alert" hidden></p>
+      <div class="dialog-actions">
+        <button class="button button-secondary" type="button" id="cancel-image-lifecycle">Annuler</button>
+        <button class="button button-primary" type="submit" id="save-image-lifecycle">Enregistrer</button>
       </div>
     </form>
   </dialog>

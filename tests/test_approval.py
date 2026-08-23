@@ -43,6 +43,8 @@ def request_vm(client, name):
             "cpu": 2,
             "ram_mb": 4096,
             "disk_gb": 40,
+            "usage_purpose": "technical_test",
+            "no_patient_data_ack": True,
         },
     )
 

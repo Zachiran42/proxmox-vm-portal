@@ -49,7 +49,7 @@ x-portal-environment: &portal-environment
   PORTAL_SESSION_COOKIE_SECURE: "true"
 
 x-portal-service: &portal-service
-  image: ${PORTAL_IMAGE:-proxmox-vm-portal:0.24.0}
+  image: ${PORTAL_IMAGE:-proxmox-vm-portal:0.25.0}
   build:
     context: .
   restart: unless-stopped

@@ -8,7 +8,7 @@ import socket
 import time
 import uuid
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from functools import wraps
 from hashlib import sha256
 from hmac import compare_digest
@@ -16,6 +16,7 @@ from hmac import new as hmac_new
 from io import StringIO
 from ipaddress import IPv4Address, IPv4Interface, IPv4Network
 from typing import Any
+from urllib.parse import urlsplit
 
 import click
 from authlib.integrations.base_client.errors import OAuthError
@@ -34,7 +35,7 @@ from flask import (
 )
 from flask_migrate import Migrate
 from requests import RequestException
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -47,7 +48,7 @@ from .integration_secrets import (
     decrypt_integration_secret,
     encrypt_integration_secret,
 )
-from .jobs import process_next_job
+from .jobs import build_sandbox_firewall_rules, process_next_job
 from .ldap_auth import (
     LDAPAccessDenied,
     LDAPClient,
@@ -64,9 +65,12 @@ from .models import (
     PortalSetting,
     ProvisioningJob,
     ProxmoxConfiguration,
+    SiemConfiguration,
+    SoftwareModule,
     User,
     UserNotification,
     VMAllocation,
+    VMMaintenanceJob,
     VMOperation,
     WorkerHeartbeat,
     db,
@@ -75,7 +79,9 @@ from .netbox import NetBoxClient, NetBoxUnavailable
 from .notifications import (
     create_notification,
     notify_active_admins,
+    process_lifecycle_enforcement,
     process_lifecycle_notifications,
+    process_sandbox_release_expirations,
 )
 from .observability import render_prometheus_metrics
 from .oidc import (
@@ -92,6 +98,8 @@ from .validation import (
     NetBoxConfigurationRequest,
     NetworkProfileRequest,
     ProxmoxConfigurationRequest,
+    SiemConfigurationRequest,
+    SoftwareModuleRequest,
     UserCreateRequest,
     UserUpdateRequest,
     ValidationError,
@@ -458,6 +466,12 @@ def create_app(
                 process_lifecycle_notifications(
                     warning_days=_expiration_warning_days()
                 )
+                process_lifecycle_enforcement(
+                    _resolve_pve_client(app),
+                    action=_expiration_action(),
+                    grace_days=_expiration_grace_days(),
+                )
+                process_sandbox_release_expirations(_resolve_pve_client(app))
                 db.session.commit()
                 next_lifecycle_scan = monotonic_now + 60
             processed = process_next_job(
@@ -797,7 +811,10 @@ def create_app(
                 "default_vm_lifetime_days": _default_vm_lifetime_days(),
                 "max_vm_lifetime_days": _max_vm_lifetime_days(),
                 "expiration_warning_days": _expiration_warning_days(),
+                "expiration_action": _expiration_action(),
+                "expiration_grace_days": _expiration_grace_days(),
                 "vm_approval_required": _vm_approval_required(),
+                "flow_request_url": _flow_request_url(),
             },
             csrf_token=session["csrf_token"],
         )
@@ -927,7 +944,10 @@ def create_app(
     def list_image_profiles():
         profiles = db.session.scalars(
             select(ImageProfile)
-            .where(ImageProfile.enabled.is_(True))
+            .where(
+                ImageProfile.enabled.is_(True),
+                ImageProfile.lifecycle_status == "active",
+            )
             .order_by(ImageProfile.label)
         ).all()
         return jsonify(profiles=[profile.public_dict() for profile in profiles])
@@ -966,6 +986,7 @@ def create_app(
             slug=profile_request.slug,
             label=profile_request.label,
             description=profile_request.description,
+            version=profile_request.version,
             source_type=profile_request.source_type,
             iso=profile_request.iso,
             template_node=profile_request.template_node,
@@ -994,21 +1015,88 @@ def create_app(
     @csrf_protected
     def update_image_profile(slug: str):
         payload = request.get_json(silent=True)
-        if not isinstance(payload, dict) or set(payload) != {"enabled"} or type(payload.get("enabled")) is not bool:
-            return jsonify(errors={"enabled": "Booléen requis."}), 400
+        allowed = {
+            "enabled",
+            "lifecycle_status",
+            "supported_until",
+            "replacement_slug",
+        }
+        if not isinstance(payload, dict) or not payload or set(payload) - allowed:
+            return jsonify(errors={"body": "Politique d’image invalide."}), 400
         profile = db.session.scalar(
             select(ImageProfile).where(ImageProfile.slug == slug)
         )
         if profile is None:
             return jsonify(error="not_found"), 404
-        profile.enabled = payload["enabled"]
+        reactivating = (
+            payload.get("lifecycle_status") == "active"
+            and profile.lifecycle_status != "active"
+        )
+        enabled = payload.get("enabled", True if reactivating else profile.enabled)
+        if type(enabled) is not bool:
+            return jsonify(errors={"enabled": "Booléen requis."}), 400
+        lifecycle_status = payload.get("lifecycle_status", profile.lifecycle_status)
+        if lifecycle_status not in {"active", "deprecated", "retired"}:
+            return jsonify(errors={"lifecycle_status": "État d’image invalide."}), 400
+        supported_until = profile.supported_until
+        if "supported_until" in payload:
+            raw_date = payload["supported_until"]
+            try:
+                supported_until = date.fromisoformat(raw_date) if raw_date else None
+            except (TypeError, ValueError):
+                return jsonify(errors={"supported_until": "Date ISO AAAA-MM-JJ invalide."}), 400
+        if lifecycle_status == "deprecated" and supported_until is None:
+            return jsonify(errors={"supported_until": "Date de fin de support requise."}), 400
+        replacement_slug = payload.get("replacement_slug", profile.replacement_slug)
+        if replacement_slug == "":
+            replacement_slug = None
+        replacement = None
+        if replacement_slug is not None:
+            if not isinstance(replacement_slug, str) or replacement_slug == slug:
+                return jsonify(errors={"replacement_slug": "Image de remplacement invalide."}), 400
+            replacement = db.session.scalar(
+                select(ImageProfile).where(
+                    ImageProfile.slug == replacement_slug,
+                    ImageProfile.lifecycle_status == "active",
+                    ImageProfile.enabled.is_(True),
+                )
+            )
+            if replacement is None:
+                return jsonify(errors={"replacement_slug": "Image active introuvable."}), 400
+        previous_status = profile.lifecycle_status
+        profile.lifecycle_status = lifecycle_status
+        profile.supported_until = supported_until
+        profile.replacement_slug = replacement.slug if replacement is not None else None
+        if lifecycle_status == "active":
+            profile.enabled = enabled
+            profile.supported_until = None
+            profile.replacement_slug = None
+        else:
+            if enabled is True and "enabled" in payload:
+                return jsonify(errors={"enabled": "Une image obsolète ne peut pas être publiée."}), 400
+            profile.enabled = False
+        affected_vms = db.session.scalar(
+            select(func.count(VMAllocation.id)).where(
+                VMAllocation.image_profile_slug == profile.slug,
+                VMAllocation.status.not_in(("deleted", "rejected")),
+            )
+        )
         _add_audit(
             action="image_profile.update",
             target_type="image_profile",
             target_id=profile.slug,
             outcome="success",
             actor_user_id=g.current_user.id,
-            details={"enabled": profile.enabled},
+            details={
+                "enabled": profile.enabled,
+                "previous_status": previous_status,
+                "lifecycle_status": profile.lifecycle_status,
+                "supported_until": profile.supported_until.isoformat()
+                if profile.supported_until is not None
+                else None,
+                "replacement_slug": profile.replacement_slug,
+                "affected_vms": int(affected_vms or 0),
+            },
         )
         db.session.commit()
         return jsonify(profile=profile.public_dict())
@@ -1033,6 +1121,11 @@ def create_app(
                     "netbox_managed": profile.netbox_prefix_id is not None,
                     "allow_manual_ip": profile.allow_manual_ip,
                     "allow_automatic_ip": profile.allow_automatic_ip,
+                    "connectivity_mode": profile.connectivity_mode,
+                    "connectivity_description": profile.connectivity_description,
+                    "flow_request_required": profile.connectivity_mode
+                    == "ticket_required",
+                    "initially_isolated": True,
                 }
                 for profile in profiles
             ]
@@ -1328,6 +1421,13 @@ def create_app(
             excluded_ips=",".join(profile_request.excluded_ips),
             allow_manual_ip=profile_request.allow_manual_ip,
             allow_automatic_ip=profile_request.allow_automatic_ip,
+            connectivity_mode=profile_request.connectivity_mode,
+            connectivity_description=profile_request.connectivity_description,
+            sandbox_ssh_sources=",".join(profile_request.sandbox_ssh_sources),
+            sandbox_ntp_servers=",".join(profile_request.sandbox_ntp_servers),
+            sandbox_apt_endpoints=",".join(profile_request.sandbox_apt_endpoints),
+            sandbox_registry_endpoints=",".join(profile_request.sandbox_registry_endpoints),
+            sandbox_monitoring_endpoints=",".join(profile_request.sandbox_monitoring_endpoints),
             enabled=profile_request.enabled,
         )
         db.session.add(profile)
@@ -1337,7 +1437,11 @@ def create_app(
             target_id=profile.slug,
             outcome="success",
             actor_user_id=g.current_user.id,
-            details={"cidr": profile.cidr, "vlan_tag": profile.vlan_tag},
+            details={
+                "cidr": profile.cidr,
+                "vlan_tag": profile.vlan_tag,
+                "connectivity_mode": profile.connectivity_mode,
+            },
         )
         try:
             db.session.commit()
@@ -1362,6 +1466,9 @@ def create_app(
         current = profile.public_dict()
         current.pop("netbox_managed", None)
         current.pop("netbox_vrf_id", None)
+        current.pop("flow_request_required", None)
+        current.pop("initially_isolated", None)
+        current.pop("sandbox_policy_revision", None)
         merged = {**current, **payload, "slug": slug}
         try:
             profile_request = NetworkProfileRequest.from_dict(merged)
@@ -1391,6 +1498,25 @@ def create_app(
         profile.excluded_ips = ",".join(profile_request.excluded_ips)
         profile.allow_manual_ip = profile_request.allow_manual_ip
         profile.allow_automatic_ip = profile_request.allow_automatic_ip
+        profile.connectivity_mode = profile_request.connectivity_mode
+        profile.connectivity_description = profile_request.connectivity_description
+        sandbox_changed = any(
+            getattr(profile, field) != ",".join(getattr(profile_request, field))
+            for field in (
+                "sandbox_ssh_sources",
+                "sandbox_ntp_servers",
+                "sandbox_apt_endpoints",
+                "sandbox_registry_endpoints",
+                "sandbox_monitoring_endpoints",
+            )
+        )
+        profile.sandbox_ssh_sources = ",".join(profile_request.sandbox_ssh_sources)
+        profile.sandbox_ntp_servers = ",".join(profile_request.sandbox_ntp_servers)
+        profile.sandbox_apt_endpoints = ",".join(profile_request.sandbox_apt_endpoints)
+        profile.sandbox_registry_endpoints = ",".join(profile_request.sandbox_registry_endpoints)
+        profile.sandbox_monitoring_endpoints = ",".join(profile_request.sandbox_monitoring_endpoints)
+        if sandbox_changed:
+            profile.sandbox_policy_revision += 1
         profile.enabled = profile_request.enabled
         _add_audit(
             action="network_profile.update",
@@ -1398,10 +1524,106 @@ def create_app(
             target_id=profile.slug,
             outcome="success",
             actor_user_id=g.current_user.id,
-            details={"enabled": profile.enabled, "vlan_tag": profile.vlan_tag},
+            details={
+                "enabled": profile.enabled,
+                "vlan_tag": profile.vlan_tag,
+                "connectivity_mode": profile.connectivity_mode,
+            },
         )
         db.session.commit()
         return jsonify(profile=profile.public_dict())
+
+    @app.get("/api/software-modules")
+    @login_required
+    def list_software_modules():
+        modules = db.session.scalars(
+            select(SoftwareModule)
+            .where(SoftwareModule.enabled.is_(True))
+            .order_by(SoftwareModule.required.desc(), SoftwareModule.label)
+        ).all()
+        return jsonify(modules=[module.public_dict() for module in modules])
+
+    @app.get("/api/admin/software-modules")
+    @login_required
+    @role_required("admin")
+    def list_admin_software_modules():
+        modules = db.session.scalars(
+            select(SoftwareModule).order_by(SoftwareModule.label)
+        ).all()
+        return jsonify(modules=[module.public_dict() for module in modules])
+
+    @app.post("/api/admin/software-modules")
+    @login_required
+    @role_required("admin")
+    @csrf_protected
+    def create_software_module():
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify(errors={"body": "Un objet JSON est requis."}), 400
+        try:
+            module_request = SoftwareModuleRequest.from_dict(payload)
+        except ValidationError as error:
+            return jsonify(errors=error.errors), 400
+        module = SoftwareModule(
+            slug=module_request.slug,
+            label=module_request.label,
+            description=module_request.description,
+            install_mode=module_request.install_mode,
+            artifacts="\n".join(module_request.artifacts),
+            required=module_request.required,
+            enabled=module_request.enabled,
+        )
+        db.session.add(module)
+        _add_audit(
+            action="software_module.create",
+            target_type="software_module",
+            target_id=module.slug,
+            outcome="success",
+            actor_user_id=g.current_user.id,
+            details={"install_mode": module.install_mode, "required": module.required},
+        )
+        try:
+            db.session.commit()
+        except IntegrityError:
+            db.session.rollback()
+            return jsonify(errors={"slug": "Ce module existe déjà."}), 409
+        return jsonify(module=module.public_dict()), 201
+
+    @app.patch("/api/admin/software-modules/<slug>")
+    @login_required
+    @role_required("admin")
+    @csrf_protected
+    def update_software_module(slug: str):
+        module = db.session.scalar(
+            select(SoftwareModule).where(SoftwareModule.slug == slug).with_for_update()
+        )
+        if module is None:
+            return jsonify(error="not_found"), 404
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify(errors={"body": "Un objet JSON est requis."}), 400
+        try:
+            module_request = SoftwareModuleRequest.from_dict(
+                {**module.public_dict(), **payload, "slug": slug}
+            )
+        except ValidationError as error:
+            return jsonify(errors=error.errors), 400
+        module.label = module_request.label
+        module.description = module_request.description
+        module.install_mode = module_request.install_mode
+        module.artifacts = "\n".join(module_request.artifacts)
+        module.required = module_request.required
+        module.enabled = module_request.enabled
+        _add_audit(
+            action="software_module.update",
+            target_type="software_module",
+            target_id=module.slug,
+            outcome="success",
+            actor_user_id=g.current_user.id,
+            details={"enabled": module.enabled, "required": module.required},
+        )
+        db.session.commit()
+        return jsonify(module=module.public_dict())
 
     @app.get("/api/admin/users")
     @login_required
@@ -1426,7 +1648,10 @@ def create_app(
                 "default_vm_lifetime_days": _default_vm_lifetime_days(),
                 "max_vm_lifetime_days": _max_vm_lifetime_days(),
                 "expiration_warning_days": _expiration_warning_days(),
+                "expiration_action": _expiration_action(),
+                "expiration_grace_days": _expiration_grace_days(),
                 "vm_approval_required": _vm_approval_required(),
+                "flow_request_url": _flow_request_url(),
             }
         )
 
@@ -1442,7 +1667,10 @@ def create_app(
             "default_vm_lifetime_days",
             "max_vm_lifetime_days",
             "expiration_warning_days",
+            "expiration_action",
+            "expiration_grace_days",
             "vm_approval_required",
+            "flow_request_url",
         }
         if not isinstance(payload, dict) or not payload or set(payload) - allowed_settings:
             return jsonify(errors={"body": "Paramètre non autorisé."}), 400
@@ -1461,9 +1689,14 @@ def create_app(
         warning_days = payload.get(
             "expiration_warning_days", _expiration_warning_days()
         )
+        expiration_action = payload.get("expiration_action", _expiration_action())
+        expiration_grace_days = payload.get(
+            "expiration_grace_days", _expiration_grace_days()
+        )
         approval_required = payload.get(
             "vm_approval_required", _vm_approval_required()
         )
+        flow_request_url = payload.get("flow_request_url", _flow_request_url())
         if type(minimum) is not int or not 1 <= minimum <= 256:
             return (
                 jsonify(
@@ -1486,8 +1719,18 @@ def create_app(
             return jsonify(errors={"default_vm_lifetime_days": "La durée par défaut ne peut pas dépasser la durée maximale."}), 400
         if warning_days > maximum_lifetime:
             return jsonify(errors={"expiration_warning_days": "Le préavis ne peut pas dépasser la durée maximale."}), 400
+        if expiration_action not in {"notify_only", "quarantine", "delete"}:
+            return jsonify(errors={"expiration_action": "Action d'expiration invalide."}), 400
+        if type(expiration_grace_days) is not int or not 1 <= expiration_grace_days <= 365:
+            return jsonify(errors={"expiration_grace_days": "Valeur entière requise entre 1 et 365 jours."}), 400
         if type(approval_required) is not bool:
             return jsonify(errors={"vm_approval_required": "Valeur booléenne requise."}), 400
+        try:
+            normalized_flow_request_url = _normalize_flow_request_url(
+                flow_request_url
+            )
+        except ValueError as error:
+            return jsonify(errors={"flow_request_url": str(error)}), 400
         try:
             normalized_networks = _normalize_static_ipv4_networks(networks_text)
         except ValueError as error:
@@ -1515,6 +1758,16 @@ def create_app(
                 db.session.add(PortalSetting(key=key, value=str(value)))
             else:
                 lifecycle_setting.value = str(value)
+        expiration_values = {
+            "expiration_action": expiration_action,
+            "expiration_grace_days": str(expiration_grace_days),
+        }
+        for key, value in expiration_values.items():
+            expiration_setting = db.session.get(PortalSetting, key)
+            if expiration_setting is None:
+                db.session.add(PortalSetting(key=key, value=value))
+            else:
+                expiration_setting.value = value
         approval_setting = db.session.get(PortalSetting, "vm_approval_required")
         if approval_setting is None:
             db.session.add(
@@ -1525,6 +1778,15 @@ def create_app(
             )
         else:
             approval_setting.value = "true" if approval_required else "false"
+        flow_setting = db.session.get(PortalSetting, "flow_request_url")
+        if flow_setting is None:
+            db.session.add(
+                PortalSetting(
+                    key="flow_request_url", value=normalized_flow_request_url
+                )
+            )
+        else:
+            flow_setting.value = normalized_flow_request_url
         _add_audit(
             action="settings.update",
             target_type="settings",
@@ -1536,7 +1798,10 @@ def create_app(
                 "current": minimum,
                 "static_ipv4_networks": normalized_networks.splitlines(),
                 **lifetime_values,
+                "expiration_action": expiration_action,
+                "expiration_grace_days": expiration_grace_days,
                 "vm_approval_required": approval_required,
+                "flow_request_url_configured": bool(normalized_flow_request_url),
             },
         )
         db.session.commit()
@@ -1545,7 +1810,10 @@ def create_app(
                 "guest_password_min_length": minimum,
                 "static_ipv4_networks": normalized_networks,
                 **lifetime_values,
+                "expiration_action": expiration_action,
+                "expiration_grace_days": expiration_grace_days,
                 "vm_approval_required": approval_required,
+                "flow_request_url": normalized_flow_request_url,
             }
         )
 
@@ -1720,6 +1988,54 @@ def create_app(
             content_type="text/csv; charset=utf-8",
             headers={
                 "Content-Disposition": 'attachment; filename="portal-audit.csv"'
+            },
+        )
+
+    @app.get("/api/admin/mco/report")
+    @login_required
+    @role_required("admin", "operator")
+    def mco_report():
+        return jsonify(report=_build_mco_report())
+
+    @app.get("/api/admin/mco/report.csv")
+    @login_required
+    @role_required("admin", "operator")
+    def export_mco_report():
+        report = _build_mco_report()
+        output = StringIO(newline="")
+        writer = csv.writer(output, lineterminator="\n")
+        writer.writerow(
+            (
+                "severity",
+                "category",
+                "machine",
+                "owner",
+                "node",
+                "vmid",
+                "detail",
+                "observed_at",
+            )
+        )
+        for item in report["items"]:
+            writer.writerow(
+                _csv_safe_cell(value)
+                for value in (
+                    item["severity"],
+                    item["category"],
+                    item["name"],
+                    item["owner"],
+                    item["node"],
+                    item["vmid"],
+                    item["detail"],
+                    item["observed_at"],
+                )
+            )
+        return Response(
+            output.getvalue(),
+            content_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": 'attachment; filename="portal-mco-report.csv"',
+                "Cache-Control": "no-store",
             },
         )
 
@@ -1986,11 +2302,46 @@ def create_app(
                 "profile": allocation.profile.slug
                 if allocation.profile is not None
                 else None,
+                "image_lifecycle": allocation.image_lifecycle_dict(),
                 "status": allocation.status,
                 "cpu": allocation.cpu,
                 "ram_mb": allocation.ram_mb,
                 "disk_gb": allocation.disk_gb,
                 "network_mode": allocation.network_mode,
+                "network_policy": allocation.network_policy,
+                "network_policy_revision": allocation.network_policy_revision,
+                "sandbox_release": {
+                    "status": allocation.sandbox_release_status,
+                    "requested_at": (
+                        allocation.sandbox_release_requested_at.isoformat()
+                        if allocation.sandbox_release_requested_at is not None
+                        else None
+                    ),
+                    "reason": allocation.sandbox_release_reason,
+                    "ticket_reference": allocation.sandbox_release_ticket,
+                    "duration_hours": allocation.sandbox_release_duration_hours,
+                    "expires_at": (
+                        allocation.sandbox_release_expires_at.isoformat()
+                        if allocation.sandbox_release_expires_at is not None
+                        else None
+                    ),
+                },
+                "software_modules": list(allocation.software_modules or []),
+                "network_policy_updated_at": (
+                    allocation.network_policy_updated_at.isoformat()
+                    if allocation.network_policy_updated_at is not None
+                    else None
+                ),
+                "guest_username": allocation.guest_username,
+                "ssh_password_change": {
+                    "requested": allocation.guest_password_reset_requested_at
+                    is not None,
+                    "requested_at": (
+                        allocation.guest_password_reset_requested_at.isoformat()
+                        if allocation.guest_password_reset_requested_at is not None
+                        else None
+                    ),
+                },
                 "ipv4": allocation.last_ipv4
                 or (
                     allocation.ipv4_cidr.split("/", 1)[0]
@@ -2007,6 +2358,11 @@ def create_app(
                 "archived_at": allocation.archived_at.isoformat()
                 if allocation.archived_at is not None
                 else None,
+                "maintenance": (
+                    allocation.maintenance_jobs[-1].public_dict()
+                    if allocation.maintenance_jobs
+                    else None
+                ),
             }
             for allocation in allocations
         ]
@@ -2145,7 +2501,10 @@ def create_app(
         expires_at = base + timedelta(days=payload["extend_days"])
         if expires_at > now + timedelta(days=_max_vm_lifetime_days()):
             return jsonify(error="lifecycle_limit_exceeded"), 409
+        automatic_deletion_cancelled = allocation.lifecycle_delete_after is not None
         allocation.expires_at = expires_at
+        allocation.lifecycle_delete_after = None
+        allocation.lifecycle_enforcement_error = None
         _add_audit(
             action="vm.lifecycle.extend",
             target_type="vm",
@@ -2156,6 +2515,7 @@ def create_app(
                 "extend_days": payload["extend_days"],
                 "previous_expires_at": previous.isoformat() if previous else None,
                 "expires_at": expires_at.isoformat(),
+                "automatic_deletion_cancelled": automatic_deletion_cancelled,
                 "owner": allocation.owner.username,
             },
         )
@@ -2165,6 +2525,491 @@ def create_app(
                 warning_days=_expiration_warning_days(), now=now
             )
         )
+
+    @app.post("/api/admin/vms/<vm_id>/guest-password-reset")
+    @login_required
+    @role_required("admin")
+    @csrf_protected
+    def request_guest_password_reset(vm_id: str):
+        payload = request.get_json(silent=True)
+        if payload not in ({}, None):
+            return jsonify(errors={"body": "Aucun paramètre n’est attendu."}), 400
+        allocation = db.session.scalar(
+            select(VMAllocation).where(VMAllocation.id == vm_id).with_for_update()
+        )
+        if allocation is None:
+            return jsonify(error="not_found"), 404
+        if (
+            allocation.profile is None
+            or allocation.profile.source_type != "cloud_init"
+            or allocation.vmid is None
+            or not allocation.guest_username
+            or allocation.status in {"deleted", "rejected", "failed"}
+        ):
+            return jsonify(error="guest_password_reset_unavailable"), 409
+        if allocation.guest_password_reset_requested_at is not None:
+            return jsonify(
+                status="already_pending",
+                requested_at=allocation.guest_password_reset_requested_at.isoformat(),
+            )
+
+        requested_at = datetime.now(UTC)
+        allocation.guest_password_reset_requested_at = requested_at
+        create_notification(
+            user_id=allocation.owner_id,
+            kind="guest_password_reset_requested",
+            title="Nouveau mot de passe SSH à choisir",
+            message=(
+                f"Un administrateur vous demande de renouveler le mot de passe SSH "
+                f"de la machine {allocation.name}. Choisissez-le depuis votre espace."
+            ),
+            dedup_key=f"guest-password-reset:{allocation.id}:{requested_at.isoformat()}",
+            target_type="vm",
+            target_id=allocation.id,
+        )
+        _add_audit(
+            action="vm.guest_password_reset.request",
+            target_type="vm",
+            target_id=allocation.id,
+            outcome="success",
+            actor_user_id=g.current_user.id,
+            details={
+                "owner": allocation.owner.username,
+                "guest_username": allocation.guest_username,
+            },
+        )
+        db.session.commit()
+        return jsonify(status="pending", requested_at=requested_at.isoformat()), 202
+
+    @app.post("/api/admin/vms/<vm_id>/maintenance")
+    @login_required
+    @role_required("admin")
+    @csrf_protected
+    def queue_vm_maintenance(vm_id: str):
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict) or set(payload) != {"action"}:
+            return jsonify(errors={"body": "Une action de maintenance est requise."}), 400
+        action = payload.get("action")
+        if action not in {"scan", "update"}:
+            return jsonify(errors={"action": "Action de maintenance invalide."}), 400
+        allocation = db.session.scalar(
+            select(VMAllocation).where(VMAllocation.id == vm_id).with_for_update()
+        )
+        if allocation is None:
+            return jsonify(error="not_found"), 404
+        if (
+            allocation.profile is None
+            or allocation.profile.source_type != "cloud_init"
+            or allocation.vmid is None
+            or allocation.status != "running"
+        ):
+            return jsonify(error="maintenance_unavailable"), 409
+        if allocation.network_policy == "isolated":
+            return jsonify(error="maintenance_network_isolated"), 409
+        active = db.session.scalar(
+            select(VMMaintenanceJob.id).where(
+                VMMaintenanceJob.allocation_id == allocation.id,
+                VMMaintenanceJob.status.in_(("queued", "submitting", "submitted")),
+            )
+        )
+        if active is not None:
+            return jsonify(error="maintenance_already_active"), 409
+        maintenance = VMMaintenanceJob(
+            allocation_id=allocation.id,
+            actor_user_id=g.current_user.id,
+            action=action,
+            status="queued",
+        )
+        db.session.add(maintenance)
+        try:
+            db.session.commit()
+        except IntegrityError:
+            db.session.rollback()
+            return jsonify(error="maintenance_already_active"), 409
+        return jsonify(job=maintenance.public_dict()), 202
+
+    @app.get("/api/admin/vms/<vm_id>/maintenance")
+    @login_required
+    @role_required("admin", "operator")
+    def vm_maintenance_history(vm_id: str):
+        if db.session.get(VMAllocation, vm_id) is None:
+            return jsonify(error="not_found"), 404
+        jobs = db.session.scalars(
+            select(VMMaintenanceJob)
+            .where(VMMaintenanceJob.allocation_id == vm_id)
+            .order_by(VMMaintenanceJob.created_at.desc())
+            .limit(25)
+        ).all()
+        return jsonify(items=[job.public_dict() for job in jobs])
+
+    @app.post("/api/admin/vms/<vm_id>/network-policy")
+    @login_required
+    @role_required("admin")
+    @csrf_protected
+    def update_vm_network_policy(vm_id: str):
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict) or set(payload) != {"policy"}:
+            return jsonify(errors={"body": "Une politique réseau est requise."}), 400
+        policy = payload.get("policy")
+        if policy not in {"sandbox", "isolated"}:
+            return jsonify(errors={"policy": "Politique réseau invalide."}), 400
+        allocation = db.session.scalar(
+            select(VMAllocation).where(VMAllocation.id == vm_id).with_for_update()
+        )
+        if allocation is None:
+            return jsonify(error="not_found"), 404
+        if allocation.vmid is None or allocation.status in {
+            "deleted",
+            "rejected",
+            "failed",
+        }:
+            return jsonify(error="network_policy_unavailable"), 409
+        if allocation.network_policy == policy:
+            return jsonify(
+                policy=policy,
+                updated_at=(
+                    allocation.network_policy_updated_at.isoformat()
+                    if allocation.network_policy_updated_at is not None
+                    else None
+                ),
+            )
+        try:
+            rules = (
+                build_sandbox_firewall_rules(allocation) if policy == "sandbox" else None
+            )
+            if rules is not None:
+                _resolve_pve_client(app).set_vm_network_policy(
+                    allocation.node, allocation.vmid, policy, rules=rules
+                )
+            else:
+                _resolve_pve_client(app).set_vm_network_policy(
+                    allocation.node, allocation.vmid, policy
+                )
+        except PVEHTTPError as error:
+            error_code = (
+                "network_policy_forbidden" if error.status == 403 else "network_policy_rejected"
+            )
+            _add_audit(
+                action="vm.network_policy.update",
+                target_type="vm",
+                target_id=allocation.id,
+                outcome="failure",
+                actor_user_id=g.current_user.id,
+                details={"policy": policy, "error_code": error_code},
+            )
+            db.session.commit()
+            return jsonify(error=error_code), 403 if error.status == 403 else 502
+        except PVETransportError:
+            return jsonify(error="pve_temporarily_unavailable"), 503
+        except PVEProtocolError:
+            return jsonify(error="network_policy_not_enforced"), 409
+        now = datetime.now(UTC)
+        previous = allocation.network_policy
+        allocation.network_policy = policy
+        allocation.network_policy_updated_at = now
+        if policy == "sandbox":
+            allocation.network_policy_revision = (
+                allocation.network_profile.sandbox_policy_revision
+                if allocation.network_profile is not None
+                else 1
+            )
+        _add_audit(
+            action="vm.network_policy.update",
+            target_type="vm",
+            target_id=allocation.id,
+            outcome="success",
+            actor_user_id=g.current_user.id,
+            details={"previous": previous, "policy": policy},
+        )
+        db.session.commit()
+        return jsonify(policy=policy, updated_at=now.isoformat())
+
+    @app.post("/api/vms/<vm_id>/sandbox-release-request")
+    @login_required
+    @csrf_protected
+    def request_sandbox_release(vm_id: str):
+        if not _flow_request_url():
+            return jsonify(error="flow_request_url_missing"), 409
+        payload = request.get_json(silent=True)
+        reason = payload.get("reason") if isinstance(payload, dict) else None
+        ticket_reference = (
+            payload.get("ticket_reference") if isinstance(payload, dict) else None
+        )
+        duration_hours = (
+            payload.get("duration_hours") if isinstance(payload, dict) else None
+        )
+        if not isinstance(reason, str) or not 10 <= len(reason.strip()) <= 500:
+            return jsonify(errors={"reason": "Motif requis (10 à 500 caractères)."}), 400
+        if (
+            not isinstance(ticket_reference, str)
+            or not 3 <= len(ticket_reference.strip()) <= 100
+        ):
+            return jsonify(
+                errors={"ticket_reference": "Référence GLPI requise (3 à 100 caractères)."}
+            ), 400
+        if (
+            isinstance(duration_hours, bool)
+            or not isinstance(duration_hours, int)
+            or not 1 <= duration_hours <= 720
+        ):
+            return jsonify(
+                errors={"duration_hours": "Durée requise entre 1 et 720 heures."}
+            ), 400
+        allocation = db.session.scalar(
+            select(VMAllocation).where(VMAllocation.id == vm_id).with_for_update()
+        )
+        if allocation is None or allocation.owner_id != g.current_user.id:
+            return jsonify(error="not_found"), 404
+        if allocation.network_policy != "sandbox" or allocation.vmid is None:
+            return jsonify(error="sandbox_release_unavailable"), 409
+        if allocation.sandbox_release_status == "pending":
+            return jsonify(error="sandbox_release_already_pending"), 409
+        now = datetime.now(UTC)
+        allocation.sandbox_release_status = "pending"
+        allocation.sandbox_release_requested_at = now
+        allocation.sandbox_release_decided_at = None
+        allocation.sandbox_release_decided_by_id = None
+        allocation.sandbox_release_reason = reason.strip()
+        allocation.sandbox_release_ticket = ticket_reference.strip()
+        allocation.sandbox_release_duration_hours = duration_hours
+        allocation.sandbox_release_expires_at = None
+        notify_active_admins(
+            kind="sandbox_release_requested",
+            title="Demande de sortie du bac à sable",
+            message=f"{allocation.owner.username} demande une ouverture pour {allocation.name}.",
+            dedup_key=f"sandbox-release:{allocation.id}:{now.isoformat()}",
+            target_type="vm",
+            target_id=allocation.id,
+        )
+        _add_audit(
+            action="vm.sandbox_release.request",
+            target_type="vm",
+            target_id=allocation.id,
+            outcome="success",
+            actor_user_id=g.current_user.id,
+            details={
+                "reason": reason.strip(),
+                "ticket_reference": ticket_reference.strip(),
+                "duration_hours": duration_hours,
+            },
+        )
+        db.session.commit()
+        return jsonify(status="pending", requested_at=now.isoformat()), 202
+
+    @app.post("/api/admin/vms/<vm_id>/sandbox-release-decision")
+    @login_required
+    @role_required("admin")
+    @csrf_protected
+    def decide_sandbox_release(vm_id: str):
+        payload = request.get_json(silent=True)
+        action = payload.get("action") if isinstance(payload, dict) else None
+        reason = payload.get("reason") if isinstance(payload, dict) else None
+        if action not in {"approve", "reject"}:
+            return jsonify(errors={"action": "Décision invalide."}), 400
+        if not isinstance(reason, str) or not 5 <= len(reason.strip()) <= 500:
+            return jsonify(errors={"reason": "Justification requise (5 à 500 caractères)."}), 400
+        allocation = db.session.scalar(
+            select(VMAllocation).where(VMAllocation.id == vm_id).with_for_update()
+        )
+        if allocation is None:
+            return jsonify(error="not_found"), 404
+        if allocation.sandbox_release_status != "pending" or allocation.vmid is None:
+            return jsonify(error="sandbox_release_not_pending"), 409
+        if action == "approve":
+            try:
+                _resolve_pve_client(app).set_vm_network_policy(
+                    allocation.node, allocation.vmid, "normal"
+                )
+            except PVEHTTPError as error:
+                return jsonify(error="network_policy_forbidden"), 403 if error.status == 403 else 502
+            except PVETransportError:
+                return jsonify(error="pve_temporarily_unavailable"), 503
+            except PVEProtocolError:
+                return jsonify(error="network_policy_not_enforced"), 409
+            allocation.network_policy = "normal"
+        now = datetime.now(UTC)
+        allocation.sandbox_release_expires_at = (
+            now + timedelta(hours=allocation.sandbox_release_duration_hours)
+            if action == "approve"
+            and allocation.sandbox_release_duration_hours is not None
+            else None
+        )
+        allocation.network_policy_updated_at = now
+        allocation.sandbox_release_status = "approved" if action == "approve" else "rejected"
+        allocation.sandbox_release_decided_at = now
+        allocation.sandbox_release_decided_by_id = g.current_user.id
+        allocation.sandbox_release_reason = reason.strip()
+        create_notification(
+            user_id=allocation.owner_id,
+            kind="sandbox_release_decided",
+            title="Décision réseau pour votre VM",
+            message=(
+                f"La sortie du bac à sable de {allocation.name} a été "
+                + ("approuvée." if action == "approve" else "refusée.")
+            ),
+            dedup_key=f"sandbox-release-decision:{allocation.id}:{now.isoformat()}",
+            target_type="vm",
+            target_id=allocation.id,
+        )
+        _add_audit(
+            action="vm.sandbox_release.decide",
+            target_type="vm",
+            target_id=allocation.id,
+            outcome="success",
+            actor_user_id=g.current_user.id,
+            details={
+                "decision": action,
+                "reason": reason.strip(),
+                "ticket_reference": allocation.sandbox_release_ticket,
+                "expires_at": (
+                    allocation.sandbox_release_expires_at.isoformat()
+                    if allocation.sandbox_release_expires_at is not None
+                    else None
+                ),
+            },
+        )
+        db.session.commit()
+        return jsonify(
+            status=allocation.sandbox_release_status,
+            policy=allocation.network_policy,
+            decided_at=now.isoformat(),
+            expires_at=(
+                allocation.sandbox_release_expires_at.isoformat()
+                if allocation.sandbox_release_expires_at is not None
+                else None
+            ),
+        )
+
+    @app.get("/api/admin/vms/<vm_id>/network-log")
+    @login_required
+    @role_required("admin", "operator")
+    def vm_network_log(vm_id: str):
+        allocation = db.session.get(VMAllocation, vm_id)
+        if allocation is None:
+            return jsonify(error="not_found"), 404
+        if allocation.vmid is None:
+            return jsonify(error="network_log_unavailable"), 409
+        try:
+            entries = _resolve_pve_client(app).get_vm_firewall_log(
+                allocation.node, allocation.vmid, limit=100
+            )
+        except PVEHTTPError as error:
+            return jsonify(error="network_log_forbidden"), 403 if error.status == 403 else 502
+        except PVETransportError:
+            return jsonify(error="pve_temporarily_unavailable"), 503
+        except PVEProtocolError:
+            return jsonify(error="network_log_invalid"), 502
+        return jsonify(
+            policy=allocation.network_policy,
+            entries=entries,
+            source="proxmox_firewall",
+            checked_at=datetime.now(UTC).isoformat(),
+        )
+
+    @app.post("/api/vms/<vm_id>/guest-password")
+    @login_required
+    @csrf_protected
+    def change_guest_password(vm_id: str):
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict) or set(payload) != {"password"}:
+            return jsonify(errors={"body": "Un mot de passe est requis."}), 400
+        password = payload.get("password")
+        minimum = max(_guest_password_min_length(), 5)
+        if not isinstance(password, str) or not minimum <= len(password) <= 256:
+            return (
+                jsonify(
+                    errors={
+                        "password": (
+                            f"Le mot de passe SSH doit contenir entre {minimum} "
+                            "et 256 caractères."
+                        )
+                    }
+                ),
+                400,
+            )
+
+        allocation = db.session.scalar(
+            select(VMAllocation).where(VMAllocation.id == vm_id).with_for_update()
+        )
+        if allocation is None or allocation.owner_id != g.current_user.id:
+            return jsonify(error="not_found"), 404
+        if (
+            allocation.profile is None
+            or allocation.profile.source_type != "cloud_init"
+            or allocation.vmid is None
+            or not allocation.guest_username
+            or allocation.status in {"deleted", "rejected", "failed"}
+        ):
+            return jsonify(error="guest_password_reset_unavailable"), 409
+        if allocation.status != "running":
+            return jsonify(error="guest_password_reset_requires_running_vm"), 409
+
+        pending_since = allocation.guest_password_reset_requested_at
+        try:
+            _resolve_pve_client(app).set_guest_password(
+                node=allocation.node,
+                vmid=allocation.vmid,
+                username=allocation.guest_username,
+                password=password,
+            )
+        except PVEHTTPError as error:
+            error_code = (
+                "guest_password_reset_permission_denied"
+                if error.status == 403
+                else "guest_agent_unavailable"
+            )
+            _add_audit(
+                action="vm.guest_password_reset.apply",
+                target_type="vm",
+                target_id=allocation.id,
+                outcome="failure",
+                actor_user_id=g.current_user.id,
+                details={"error_code": error_code, "pve_status": error.status},
+            )
+            db.session.commit()
+            return jsonify(error=error_code), 503
+        except (PVETransportError, PVEProtocolError):
+            _add_audit(
+                action="vm.guest_password_reset.apply",
+                target_type="vm",
+                target_id=allocation.id,
+                outcome="failure",
+                actor_user_id=g.current_user.id,
+                details={"error_code": "pve_unavailable"},
+            )
+            db.session.commit()
+            return jsonify(error="pve_unavailable"), 503
+
+        completed_at = datetime.now(UTC)
+        allocation.guest_password_reset_requested_at = None
+        create_notification(
+            user_id=allocation.owner_id,
+            kind="guest_password_reset_completed",
+            title="Mot de passe SSH modifié",
+            message=(
+                f"Le nouveau mot de passe SSH de la machine {allocation.name} "
+                "a été appliqué. Sa valeur n’est pas conservée par le portail."
+            ),
+            dedup_key=(
+                f"guest-password-reset-completed:{allocation.id}:"
+                f"{(pending_since or completed_at).isoformat()}"
+            ),
+            target_type="vm",
+            target_id=allocation.id,
+        )
+        _add_audit(
+            action="vm.guest_password_reset.apply",
+            target_type="vm",
+            target_id=allocation.id,
+            outcome="success",
+            actor_user_id=g.current_user.id,
+            details={
+                "guest_username": allocation.guest_username,
+                "administrator_requested": pending_since is not None,
+            },
+        )
+        db.session.commit()
+        return jsonify(status="password_changed", completed_at=completed_at.isoformat())
 
     @app.post("/api/admin/incidents/<kind>/<incident_id>/actions")
     @login_required
@@ -2323,6 +3168,170 @@ def create_app(
             }
         )
 
+    @app.get("/api/admin/integrations/siem")
+    @login_required
+    @role_required("admin")
+    def get_siem_configuration():
+        configuration = db.session.get(SiemConfiguration, 1)
+        return jsonify(
+            integration={
+                "configured": configuration is not None,
+                "source": "portal" if configuration is not None else "none",
+                "token_configured": configuration is not None,
+                "minimum_outcome": configuration.minimum_outcome
+                if configuration is not None
+                else "all",
+                "enabled": configuration.enabled
+                if configuration is not None
+                else False,
+                "pull_endpoint": "/api/siem/events",
+            }
+        )
+
+    @app.put("/api/admin/integrations/siem")
+    @login_required
+    @role_required("admin")
+    @csrf_protected
+    def save_siem_configuration():
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify(errors={"body": "Un objet JSON est requis."}), 400
+        try:
+            integration_request = SiemConfigurationRequest.from_dict(payload)
+        except ValidationError as error:
+            return jsonify(errors=error.errors), 400
+        configuration = db.session.get(SiemConfiguration, 1)
+        try:
+            pull_token = integration_request.pull_token or (
+                decrypt_integration_secret(
+                    configuration.pull_token_ciphertext,
+                    app.config["PORTAL_SESSION_SECRET"],
+                    purpose="siem-pull-token",
+                )
+                if configuration is not None
+                else None
+            )
+        except IntegrationSecretError:
+            return jsonify(errors={"pull_token": "Le jeton enregistré est illisible; remplacez-le."}), 409  # nosec B105
+        if not pull_token:
+            return jsonify(errors={"pull_token": "Un jeton SIEM est requis."}), 400  # nosec B105
+        if configuration is None:
+            configuration = SiemConfiguration(id=1)
+            db.session.add(configuration)
+        configuration.pull_token_ciphertext = encrypt_integration_secret(
+            pull_token,
+            app.config["PORTAL_SESSION_SECRET"],
+            purpose="siem-pull-token",
+        )
+        configuration.minimum_outcome = integration_request.minimum_outcome
+        configuration.enabled = integration_request.enabled
+        configuration.updated_by_id = g.current_user.id
+        _add_audit(
+            action="integration.siem.update",
+            target_type="integration",
+            target_id="siem",
+            outcome="success",
+            actor_user_id=g.current_user.id,
+            details={
+                "enabled": configuration.enabled,
+                "minimum_outcome": configuration.minimum_outcome,
+                "token_rotated": integration_request.pull_token is not None,
+            },
+        )
+        db.session.commit()
+        return jsonify(
+            integration={
+                "configured": True,
+                "source": "portal",
+                "token_configured": True,  # nosec B105
+                "minimum_outcome": configuration.minimum_outcome,
+                "enabled": configuration.enabled,
+                "pull_endpoint": "/api/siem/events",
+            }
+        )
+
+    @app.get("/api/siem/events")
+    def pull_siem_events():
+        configuration = db.session.get(SiemConfiguration, 1)
+        if configuration is None or not configuration.enabled:
+            return jsonify(error="siem_disabled"), 404
+        authorization = request.headers.get("Authorization", "")
+        supplied_token = (
+            authorization[7:] if authorization.startswith("Bearer ") else ""
+        )
+        try:
+            expected_token = decrypt_integration_secret(
+                configuration.pull_token_ciphertext,
+                app.config["PORTAL_SESSION_SECRET"],
+                purpose="siem-pull-token",
+            )
+        except IntegrationSecretError:
+            return jsonify(error="siem_unavailable"), 503
+        if not supplied_token or not compare_digest(supplied_token, expected_token):
+            _, ip_key = _login_throttle_keys(app, "siem-pull")
+            if _siem_pull_is_throttled(ip_key):
+                response = jsonify(error="too_many_attempts")
+                response.headers["Retry-After"] = "900"
+                return response, 429
+            _add_audit(
+                action="integration.siem.pull",
+                target_type="integration",
+                target_id=ip_key,
+                outcome="denied",
+            )
+            db.session.commit()
+            return jsonify(error="invalid_credentials"), 401
+        if set(request.args) - {"limit", "after", "after_id"}:
+            return jsonify(errors={"query": "Paramètre de collecte inconnu."}), 400
+        try:
+            limit = int(request.args.get("limit", "500"))
+        except ValueError:
+            return jsonify(errors={"limit": "Entier requis."}), 400
+        if not 1 <= limit <= 1000:
+            return jsonify(errors={"limit": "Valeur requise entre 1 et 1000."}), 400
+        try:
+            after = _parse_siem_after(request.args.get("after"))
+        except ValueError as error:
+            return jsonify(errors={"after": str(error)}), 400
+        after_id = request.args.get("after_id", "").strip()
+        if after_id:
+            try:
+                uuid.UUID(after_id)
+            except ValueError:
+                return jsonify(errors={"after_id": "Identifiant de curseur invalide."}), 400
+            if after is None:
+                return jsonify(errors={"after": "Horodatage requis avec after_id."}), 400
+        statement = select(AuditEvent).order_by(AuditEvent.created_at, AuditEvent.id)
+        if after is not None:
+            statement = statement.where(
+                or_(
+                    AuditEvent.created_at > after,
+                    and_(
+                        AuditEvent.created_at == after,
+                        AuditEvent.id > after_id,
+                    ),
+                )
+                if after_id
+                else AuditEvent.created_at > after
+            )
+        if configuration.minimum_outcome == "failure":
+            statement = statement.where(AuditEvent.outcome.in_(("failure", "denied")))
+        elif configuration.minimum_outcome == "denied":
+            statement = statement.where(AuditEvent.outcome == "denied")
+        events = db.session.scalars(statement.limit(limit)).all()
+        payload = "".join(
+            json.dumps(_siem_event(event), ensure_ascii=False, sort_keys=True) + "\n"
+            for event in events
+        )
+        response = Response(payload, content_type="application/x-ndjson; charset=utf-8")
+        response.headers["Cache-Control"] = "no-store"
+        if events:
+            response.headers["X-Portal-SIEM-Next-After"] = _utc_iso(
+                events[-1].created_at
+            )
+            response.headers["X-Portal-SIEM-Next-After-ID"] = events[-1].id
+        return response
+
     @app.get("/api/vms/<vm_id>/network")
     @login_required
     def get_vm_network(vm_id: str):
@@ -2439,6 +3448,7 @@ def create_app(
             select(ImageProfile).where(
                 ImageProfile.slug == vm_request.profile,
                 ImageProfile.enabled.is_(True),
+                ImageProfile.lifecycle_status == "active",
             )
         )
         if profile is None:
@@ -2453,6 +3463,18 @@ def create_app(
             )
             if network_profile is None:
                 return jsonify(errors={"network_profile": "Réseau indisponible."}), 400
+            if (
+                network_profile.connectivity_mode == "ticket_required"
+                and not _flow_request_url()
+            ):
+                return jsonify(
+                    errors={
+                        "network_profile": (
+                            "Le formulaire d’ouverture de flux n’est pas configuré. "
+                            "Contactez un administrateur."
+                        )
+                    }
+                ), 409
         elif profile.source_type == "cloud_init" and db.session.scalar(
             select(func.count(NetworkProfile.id)).where(NetworkProfile.enabled.is_(True))
         ):
@@ -2482,6 +3504,27 @@ def create_app(
             return jsonify(
                 errors={"guest_password": "Mot de passe SSH requis."}  # nosec B105
             ), 400
+        if profile.source_type == "cloud_init":
+            requested_modules = set(vm_request.software_modules)
+            available_modules = db.session.scalars(
+                select(SoftwareModule).where(SoftwareModule.enabled.is_(True))
+            ).all()
+            available_slugs = {module.slug for module in available_modules}
+            unavailable_modules = sorted(requested_modules - available_slugs)
+            if unavailable_modules:
+                return jsonify(
+                    errors={
+                        "software_modules": "Modules indisponibles: "
+                        + ", ".join(unavailable_modules)
+                    }
+                ), 400
+            vm_request = replace(
+                vm_request,
+                software_modules=sorted(
+                    requested_modules
+                    | {module.slug for module in available_modules if module.required}
+                ),
+            )
         minimum = _guest_password_min_length()
         if (
             profile.source_type == "cloud_init"
@@ -2508,6 +3551,7 @@ def create_app(
             or vm_request.guest_password is not None
             or vm_request.network_mode != "dhcp"
             or vm_request.network_profile is not None
+            or vm_request.software_modules
         ):
             return (
                 jsonify(
@@ -2574,6 +3618,9 @@ def create_app(
                 "job_id": job.id,
                 "profile": profile.slug,
                 "approval_required": pending_approval,
+                "usage_purpose": allocation.usage_purpose,
+                "data_policy_version": allocation.data_policy_version,
+                "no_patient_data_ack": True,
             },
         )
         db.session.commit()
@@ -2709,6 +3756,11 @@ def create_app(
             profile_id=profile.id,
             network_profile_id=network_profile.id if network_profile else None,
             name=vm_request.name,
+            image_profile_slug=profile.slug,
+            image_version=profile.version,
+            usage_purpose=vm_request.usage_purpose,
+            data_policy_version="no-real-patient-data-v1",
+            data_policy_acknowledged_at=datetime.now(UTC),
             node=vm_request.node,
             iso=profile.iso,
             guest_username=vm_request.guest_username,
@@ -2719,6 +3771,11 @@ def create_app(
             dns_servers=",".join(vm_request.dns_servers) or None,
             network_bridge=network_profile.bridge if network_profile else None,
             vlan_tag=network_profile.vlan_tag if network_profile else None,
+            network_policy="sandbox",
+            network_policy_revision=(
+                network_profile.sandbox_policy_revision if network_profile else 1
+            ),
+            software_modules=vm_request.software_modules,
             netbox_prefix_id=network_profile.netbox_prefix_id
             if network_profile
             else None,
@@ -2819,9 +3876,54 @@ def _expiration_warning_days() -> int:
     return _integer_portal_setting("expiration_warning_days", 14)
 
 
+def _expiration_action() -> str:
+    setting = db.session.get(PortalSetting, "expiration_action")
+    if setting is None or setting.value not in {"notify_only", "quarantine", "delete"}:
+        return "notify_only"
+    return setting.value
+
+
+def _expiration_grace_days() -> int:
+    value = _integer_portal_setting("expiration_grace_days", 7)
+    return value if value <= 365 else 7
+
+
 def _vm_approval_required() -> bool:
     setting = db.session.get(PortalSetting, "vm_approval_required")
     return setting is not None and setting.value == "true"
+
+
+def _flow_request_url() -> str:
+    setting = db.session.get(PortalSetting, "flow_request_url")
+    if setting is None:
+        return ""
+    try:
+        return _normalize_flow_request_url(setting.value)
+    except ValueError:
+        return ""
+
+
+def _normalize_flow_request_url(value: object) -> str:
+    if not isinstance(value, str):
+        raise ValueError("URL HTTPS requise.")
+    normalized = value.strip()
+    if not normalized:
+        return ""
+    if len(normalized) > 1024 or any(character.isspace() for character in normalized):
+        raise ValueError("URL de demande de flux invalide.")
+    parsed = urlsplit(normalized)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise ValueError("Une URL HTTPS sans identifiants intégrés est requise.")
+    try:
+        parsed.port
+    except ValueError as error:
+        raise ValueError("Port de l'URL de demande de flux invalide.") from error
+    return normalized
 
 
 def _static_ipv4_networks_text() -> str:
@@ -2935,6 +4037,205 @@ def _csv_safe_cell(value: object) -> str:
     if text.startswith(("=", "+", "-", "@", "\t", "\r")):
         return "'" + text
     return text
+
+
+def _parse_siem_after(value: str | None) -> datetime | None:
+    if value is None or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError("Horodatage ISO 8601 invalide.") from error
+    if parsed.tzinfo is None:
+        raise ValueError("Le fuseau horaire est requis.")
+    return parsed.astimezone(UTC)
+
+
+def _siem_event(event: AuditEvent) -> dict[str, Any]:
+    return {
+        "@timestamp": _utc_iso(event.created_at),
+        "event": {
+            "action": event.action,
+            "category": "iam" if event.action.startswith("authentication.") else "configuration",
+            "id": event.id,
+            "outcome": event.outcome,
+        },
+        "observer": {"product": "proxmox-vm-portal", "type": "application"},
+        "portal": {
+            "actor_user_id": event.actor_user_id,
+            "details": event.details,
+            "request_id": event.request_id,
+            "target_id": event.target_id,
+            "target_type": event.target_type,
+        },
+    }
+
+
+def _siem_pull_is_throttled(ip_key: str) -> bool:
+    attempts = db.session.scalar(
+        select(func.count(AuditEvent.id)).where(
+            AuditEvent.action == "integration.siem.pull",
+            AuditEvent.target_id == ip_key,
+            AuditEvent.outcome == "denied",
+            AuditEvent.created_at >= datetime.now(UTC) - timedelta(minutes=15),
+        )
+    )
+    return int(attempts or 0) >= 20
+
+
+def _utc_iso(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _build_mco_report() -> dict[str, Any]:
+    now = datetime.now(UTC)
+    allocations = db.session.scalars(
+        select(VMAllocation)
+        .where(VMAllocation.status.not_in(("deleted", "rejected")))
+        .order_by(VMAllocation.name)
+    ).all()
+    summary = {
+        "machines": len(allocations),
+        "updates_available": 0,
+        "reboot_required": 0,
+        "never_scanned": 0,
+        "maintenance_failures": 0,
+        "expired": 0,
+        "lifecycle_warning": 0,
+        "isolated": 0,
+        "obsolete_images": 0,
+        "sandbox_release_requests": 0,
+    }
+    items: list[dict[str, Any]] = []
+
+    def add_item(
+        allocation: VMAllocation,
+        *,
+        severity: str,
+        category: str,
+        detail: str,
+        observed_at: datetime | None = None,
+    ) -> None:
+        items.append(
+            {
+                "severity": severity,
+                "category": category,
+                "vm_id": allocation.id,
+                "name": allocation.name,
+                "owner": allocation.owner.username,
+                "node": allocation.node,
+                "vmid": allocation.vmid,
+                "detail": detail,
+                "observed_at": _utc_iso(observed_at or now),
+            }
+        )
+
+    for allocation in allocations:
+        maintenance = (
+            allocation.maintenance_jobs[-1] if allocation.maintenance_jobs else None
+        )
+        if maintenance is None:
+            summary["never_scanned"] += 1
+            add_item(
+                allocation,
+                severity="warning",
+                category="maintenance_not_scanned",
+                detail="Aucune analyse APT enregistrée.",
+            )
+        elif maintenance.status in {"failed", "attention"}:
+            summary["maintenance_failures"] += 1
+            add_item(
+                allocation,
+                severity="critical" if maintenance.status == "attention" else "warning",
+                category="maintenance_failure",
+                detail=maintenance.error_code or "Maintenance à vérifier.",
+                observed_at=maintenance.completed_at or maintenance.updated_at,
+            )
+        elif maintenance.status == "succeeded":
+            report = maintenance.report or {}
+            available = int(report.get("remaining_count") or report.get("available_count") or 0)
+            if available:
+                summary["updates_available"] += 1
+                add_item(
+                    allocation,
+                    severity="warning",
+                    category="updates_available",
+                    detail=f"{available} paquet(s) à mettre à jour.",
+                    observed_at=maintenance.completed_at or maintenance.updated_at,
+                )
+            if report.get("reboot_required") is True:
+                summary["reboot_required"] += 1
+                add_item(
+                    allocation,
+                    severity="warning",
+                    category="reboot_required",
+                    detail="Redémarrage requis après maintenance.",
+                    observed_at=maintenance.completed_at or maintenance.updated_at,
+                )
+
+        lifecycle = allocation.lifecycle_dict(
+            warning_days=_expiration_warning_days(), now=now
+        )
+        if lifecycle["state"] == "expired":
+            summary["expired"] += 1
+            add_item(
+                allocation,
+                severity="critical",
+                category="vm_expired",
+                detail="Échéance de la VM dépassée.",
+            )
+        elif lifecycle["state"] == "warning":
+            summary["lifecycle_warning"] += 1
+            add_item(
+                allocation,
+                severity="warning",
+                category="vm_expiration_warning",
+                detail=f"Échéance dans {lifecycle['days_remaining']} jour(s).",
+            )
+
+        if allocation.network_policy == "isolated":
+            summary["isolated"] += 1
+        if allocation.sandbox_release_status == "pending":
+            summary["sandbox_release_requests"] += 1
+            add_item(
+                allocation,
+                severity="warning",
+                category="sandbox_release_requested",
+                detail="Une sortie du bac à sable attend une décision administrateur.",
+                observed_at=allocation.sandbox_release_requested_at,
+            )
+        image = allocation.image_lifecycle_dict(today=now.date())
+        if image["state"] != "supported":
+            summary["obsolete_images"] += 1
+            severity = (
+                "critical"
+                if image["state"] in {"retired", "unsupported", "profile_removed"}
+                else "warning"
+            )
+            replacement = (
+                f" Remplacement recommandé : {image['replacement_slug']}."
+                if image["replacement_slug"]
+                else ""
+            )
+            add_item(
+                allocation,
+                severity=severity,
+                category="image_lifecycle",
+                detail=f"État de l’image : {image['state']}.{replacement}",
+            )
+        if allocation.status == "failed":
+            add_item(
+                allocation,
+                severity="critical",
+                category="vm_failed",
+                detail="Provisionnement ou opération en échec.",
+            )
+
+    severity_order = {"critical": 0, "warning": 1, "info": 2}
+    items.sort(key=lambda item: (severity_order[item["severity"]], item["name"], item["category"]))
+    return {"generated_at": now.isoformat(), "summary": summary, "items": items}
 
 
 def _validate_identity_configuration(app: Flask) -> None:

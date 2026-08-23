@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
 from werkzeug.security import generate_password_hash
 
 from portal import create_app
-from portal.jobs import process_next_job
+from portal.jobs import _apply_initial_network_policy, process_next_job
 from portal.models import (
     AuditEvent,
     ImageProfile,
@@ -84,6 +84,8 @@ def vm_payload(name="worker-vm-01"):
         "cpu": 2,
         "ram_mb": 4096,
         "disk_gb": 40,
+        "usage_purpose": "technical_test",
+        "no_patient_data_ack": True,
     }
 
 
@@ -114,6 +116,7 @@ def create_cloud_profile(client):
             "slug": "debian-cloud",
             "label": "Debian Cloud",
             "description": "Template cloud-init validé",
+            "version": "13.6",
             "source_type": "cloud_init",
             "template_node": "pve-a",
             "template_vmid": 9000,
@@ -180,6 +183,7 @@ def test_owner_can_list_recent_jobs_with_safe_vm_details(app, pve_client):
 
     response = client.get("/api/jobs")
     lifecycle = response.get_json()["jobs"][0]["vm"]["lifecycle"]
+    data_policy = response.get_json()["jobs"][0]["vm"]["data_policy"]
 
     assert response.status_code == 200
     assert response.get_json()["jobs"] == [
@@ -197,13 +201,37 @@ def test_owner_can_list_recent_jobs_with_safe_vm_details(app, pve_client):
                 "node": "pve-a",
                 "vmid": None,
                 "profile": "debian-12",
+                "image_lifecycle": {
+                    "state": "supported",
+                    "profile_slug": "debian-12",
+                    "version": "1.0.0",
+                    "current_version": "1.0.0",
+                    "supported_until": None,
+                    "replacement_slug": None,
+                },
                 "cpu": 2,
                 "ram_mb": 4096,
                 "disk_gb": 40,
                 "guest_username": None,
                 "network_mode": "dhcp",
                 "automatic_ip": False,
-                "network_profile": None,
+                    "network_profile": None,
+                    "network_policy": "sandbox",
+                    "network_policy_revision": 1,
+                    "sandbox_release": {
+                        "status": "not_requested",
+                        "requested_at": None,
+                        "reason": None,
+                        "ticket_reference": None,
+                        "duration_hours": None,
+                        "expires_at": None,
+                    },
+                    "software_modules": [],
+                "usage_purpose": "technical_test",
+                "data_policy": {
+                    "version": "no-real-patient-data-v1",
+                    "acknowledged_at": data_policy["acknowledged_at"],
+                },
                 "ipv4_cidr": None,
                 "gateway": None,
                 "dns_servers": [],
@@ -220,6 +248,9 @@ def test_owner_can_list_recent_jobs_with_safe_vm_details(app, pve_client):
                     "state": "active",
                     "expires_at": lifecycle["expires_at"],
                     "days_remaining": 90,
+                    "quarantined_at": None,
+                    "delete_after": None,
+                    "enforcement_error": None,
                 },
             },
         }
@@ -455,6 +486,7 @@ def test_admin_manages_approved_image_profiles(app):
             "slug": "ubuntu-2404",
             "label": "Ubuntu 24.04",
             "description": "Installation approuvée",
+            "version": "24.04",
             "source_type": "iso",
             "iso": "local:iso/ubuntu-24.04.iso",
         },
@@ -471,6 +503,114 @@ def test_admin_manages_approved_image_profiles(app):
     assert len(client.get("/api/admin/image-profiles").get_json()["profiles"]) == 2
 
 
+def test_image_lifecycle_flags_existing_vms_and_blocks_new_requests(app):
+    client = app.test_client()
+    login(client)
+    created = client.post("/api/vms", json=vm_payload("versioned-vm"))
+    assert created.status_code == 202
+
+    replacement = client.post(
+        "/api/admin/image-profiles",
+        json={
+            "slug": "debian-13",
+            "label": "Debian 13",
+            "description": "Nouvelle référence",
+            "version": "13.6",
+            "source_type": "iso",
+            "iso": "local:iso/debian-12.iso",
+        },
+    )
+    assert replacement.status_code == 201
+
+    deprecated = client.patch(
+        "/api/admin/image-profiles/debian-12",
+        json={
+            "lifecycle_status": "deprecated",
+            "supported_until": "2099-12-31",
+            "replacement_slug": "debian-13",
+        },
+    )
+    assert deprecated.status_code == 200
+    deprecated_profile = deprecated.get_json()["profile"]
+    assert deprecated_profile["enabled"] is False
+    assert deprecated_profile["lifecycle_status"] == "deprecated"
+    assert deprecated_profile["supported_until"] == "2099-12-31"
+    assert deprecated_profile["replacement_slug"] == "debian-13"
+    assert [
+        profile["slug"]
+        for profile in client.get("/api/image-profiles").get_json()["profiles"]
+    ] == ["debian-13"]
+
+    rejected = client.post("/api/vms", json=vm_payload("blocked-old-image"))
+    assert rejected.status_code == 400
+    inventory = client.get("/api/operations/vms").get_json()["items"]
+    tracked = next(item for item in inventory if item["name"] == "versioned-vm")
+    assert tracked["image_lifecycle"] == {
+        "state": "deprecated",
+        "profile_slug": "debian-12",
+        "version": "1.0.0",
+        "current_version": "1.0.0",
+        "supported_until": "2099-12-31",
+        "replacement_slug": "debian-13",
+    }
+
+    reactivated = client.patch(
+        "/api/admin/image-profiles/debian-12",
+        json={"lifecycle_status": "active"},
+    )
+    assert reactivated.status_code == 200
+    assert reactivated.get_json()["profile"]["enabled"] is True
+    assert reactivated.get_json()["profile"]["supported_until"] is None
+
+
+def test_image_lifecycle_rejects_invalid_admin_policy(app):
+    client = app.test_client()
+    login(client)
+
+    assert client.patch(
+        "/api/admin/image-profiles/debian-12",
+        json={"lifecycle_status": "deprecated"},
+    ).status_code == 400
+    assert client.patch(
+        "/api/admin/image-profiles/debian-12",
+        json={"lifecycle_status": "retired", "enabled": True},
+    ).status_code == 400
+    assert client.patch(
+        "/api/admin/image-profiles/debian-12",
+        json={"supported_until": "31/12/2099"},
+    ).status_code == 400
+    assert client.patch(
+        "/api/admin/image-profiles/debian-12",
+        json={"replacement_slug": "debian-12"},
+    ).status_code == 400
+
+
+def test_image_lifecycle_detects_unsupported_and_superseded_versions(app):
+    with app.app_context():
+        profile = db.session.scalar(
+            select(ImageProfile).where(ImageProfile.slug == "debian-12")
+        )
+        allocation = VMAllocation(
+            owner_id=profile.created_by_id,
+            profile=profile,
+            image_profile_slug=profile.slug,
+            image_version=profile.version,
+            name="lifecycle-unit",
+            node="pve-a",
+            cpu=2,
+            ram_mb=2048,
+            disk_gb=20,
+            usage_purpose="technical_test",
+            data_policy_acknowledged_at=datetime.now(UTC),
+            status="stopped",
+        )
+        profile.supported_until = date(2026, 1, 1)
+        assert allocation.image_lifecycle_dict(today=date(2026, 1, 2))["state"] == "unsupported"
+        profile.supported_until = None
+        profile.version = "2.0.0"
+        assert allocation.image_lifecycle_dict(today=date(2026, 1, 2))["state"] == "superseded"
+
+
 def test_admin_cannot_publish_an_unavailable_cloud_init_template(app):
     client = app.test_client()
     login(client)
@@ -481,6 +621,7 @@ def test_admin_cannot_publish_an_unavailable_cloud_init_template(app):
             "slug": "unverified-template",
             "label": "Unverified template",
             "description": "Must be rejected",
+            "version": "13.6",
             "source_type": "cloud_init",
             "template_node": "pve-a",
             "template_vmid": 9130,
@@ -706,6 +847,8 @@ def test_admin_network_profile_crud_and_validation(app, netbox_client):
         "bridge": "vmbr0",
         "vlan_tag": 12,
         "netbox_prefix_id": 42,
+        "connectivity_mode": "ticket_required",
+        "connectivity_description": "Ouverture après validation RSSI",
         "enabled": True,
     }
     assert client.post("/api/admin/network-profiles", json=payload).status_code == 201
@@ -713,6 +856,8 @@ def test_admin_network_profile_crud_and_validation(app, netbox_client):
     listed = client.get("/api/admin/network-profiles").get_json()
     assert listed["netbox_enabled"] is True
     assert listed["profiles"][0]["netbox_prefix_id"] == 42
+    assert listed["profiles"][0]["flow_request_required"] is True
+    assert listed["profiles"][0]["initially_isolated"] is True
     assert client.patch("/api/admin/network-profiles/missing", json={}).status_code == 404
     assert client.patch(
         "/api/admin/network-profiles/chu-vlan-12", data="bad"
@@ -730,6 +875,149 @@ def test_admin_network_profile_crud_and_validation(app, netbox_client):
     assert client.patch(
         "/api/admin/network-profiles/chu-vlan-12", json={"enabled": True}
     ).status_code == 502
+
+
+def test_isolated_profile_is_enforced_before_vm_becomes_ready(app, pve_client):
+    client = app.test_client()
+    login(client)
+    pve_client.templates.add(("pve-a", 9000))
+    create_cloud_profile(client)
+    profile = client.post(
+        "/api/admin/network-profiles",
+        json={
+            "slug": "sandbox-isolated",
+            "label": "Bac à sable isolé",
+            "cidr": "10.10.12.0/24",
+            "gateway": "10.10.12.254",
+            "dns_servers": ["10.10.1.10"],
+            "bridge": "vmbr0",
+            "vlan_tag": 12,
+            "netbox_prefix_id": None,
+            "connectivity_mode": "isolated",
+            "connectivity_description": "Aucun flux réseau",
+            "enabled": True,
+        },
+    )
+    assert profile.status_code == 201
+    created = client.post(
+        "/api/vms",
+        json={
+            **vm_payload("isolated-vm"),
+            "profile": "debian-cloud",
+            "guest_username": "hugo",
+            "guest_password": "password",
+            "network_profile": "sandbox-isolated",
+            "network_mode": "dhcp",
+        },
+    )
+    assert created.status_code == 202
+    run_step(app, pve_client)
+    run_step(app, pve_client)
+    run_step(app, pve_client)
+    with app.app_context():
+        allocation = db.session.get(VMAllocation, created.get_json()["vm_id"])
+        assert allocation.status == "running"
+        assert allocation.network_policy == "isolated"
+        assert allocation.network_profile.connectivity_mode == "isolated"
+    assert pve_client.network_policies[("pve-a", 100)] == "isolated"
+
+
+def test_ticket_profile_requires_configured_flow_form(app, pve_client):
+    client = app.test_client()
+    login(client)
+    pve_client.templates.add(("pve-a", 9000))
+    create_cloud_profile(client)
+    assert client.post(
+        "/api/admin/network-profiles",
+        json={
+            "slug": "on-ticket",
+            "label": "Ouverture sur ticket",
+            "cidr": "10.10.12.0/24",
+            "gateway": "10.10.12.254",
+            "dns_servers": ["10.10.1.10"],
+            "bridge": "vmbr0",
+            "vlan_tag": 12,
+            "netbox_prefix_id": None,
+            "connectivity_mode": "ticket_required",
+            "enabled": True,
+        },
+    ).status_code == 201
+    payload = {
+        **vm_payload("ticket-vm"),
+        "profile": "debian-cloud",
+        "guest_username": "hugo",
+        "guest_password": "password",
+        "network_profile": "on-ticket",
+        "network_mode": "dhcp",
+    }
+    blocked = client.post("/api/vms", json=payload)
+    assert blocked.status_code == 409
+    assert "formulaire" in blocked.get_json()["errors"]["network_profile"]
+    assert client.patch(
+        "/api/admin/settings",
+        json={"flow_request_url": "https://tickets.chu.example/flow"},
+    ).status_code == 200
+    assert client.post("/api/vms", json=payload).status_code == 202
+
+
+def test_initial_isolation_fails_closed_on_invalid_or_unavailable_pve(
+    app, pve_client
+):
+    client = app.test_client()
+    login(client)
+    pve_client.templates.add(("pve-a", 9000))
+    create_cloud_profile(client)
+    assert client.post(
+        "/api/admin/network-profiles",
+        json={
+            "slug": "fail-closed",
+            "label": "Fail closed",
+            "cidr": "10.10.12.0/24",
+            "gateway": "10.10.12.254",
+            "dns_servers": ["10.10.1.10"],
+            "bridge": "vmbr0",
+            "vlan_tag": 12,
+            "netbox_prefix_id": None,
+            "connectivity_mode": "isolated",
+            "enabled": True,
+        },
+    ).status_code == 201
+    created = client.post(
+        "/api/vms",
+        json={
+            **vm_payload("fail-closed-vm"),
+            "profile": "debian-cloud",
+            "guest_username": "hugo",
+            "guest_password": "password",
+            "network_profile": "fail-closed",
+            "network_mode": "dhcp",
+        },
+    )
+    with app.app_context():
+        job = db.session.get(ProvisioningJob, created.get_json()["job_id"])
+        assert _apply_initial_network_policy(pve_client, job, 0) is False
+        assert job.status == "attention"
+        assert job.error_code == "network_policy_invalid"
+        job.allocation.vmid = 100
+        job.status = "submitted"
+        db.session.commit()
+
+        original = pve_client.set_vm_network_policy
+        pve_client.set_vm_network_policy = lambda *_args, **_kwargs: (
+            _ for _ in ()
+        ).throw(PVETransportError("offline"))
+        assert _apply_initial_network_policy(pve_client, job, 0) is False
+        assert job.status == "submitted"
+        assert job.error_code == "network_policy_unavailable"
+
+        job.status = "submitted"
+        pve_client.set_vm_network_policy = lambda *_args, **_kwargs: (
+            _ for _ in ()
+        ).throw(PVEHTTPError(403, "forbidden"))
+        assert _apply_initial_network_policy(pve_client, job, 0) is False
+        assert job.status == "attention"
+        assert job.error_code == "network_policy_failed"
+        pve_client.set_vm_network_policy = original
 
 
 def test_netbox_outages_retry_without_replaying_proxmox(
@@ -1392,7 +1680,10 @@ def test_admin_controls_guest_password_minimum_without_complexity_rules(
         "default_vm_lifetime_days": 90,
         "max_vm_lifetime_days": 365,
         "expiration_warning_days": 14,
+        "expiration_action": "notify_only",
+        "expiration_grace_days": 7,
         "vm_approval_required": False,
+        "flow_request_url": "",
     }
     changed_again = client.patch(
         "/api/admin/settings", json={"guest_password_min_length": 10}
@@ -1404,7 +1695,10 @@ def test_admin_controls_guest_password_minimum_without_complexity_rules(
         "default_vm_lifetime_days": 90,
         "max_vm_lifetime_days": 365,
         "expiration_warning_days": 14,
+        "expiration_action": "notify_only",
+        "expiration_grace_days": 7,
         "vm_approval_required": False,
+        "flow_request_url": "",
     }
     pve_client.templates.add(("pve-a", 9000))
     create_cloud_profile(client)

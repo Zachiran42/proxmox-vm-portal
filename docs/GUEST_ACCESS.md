@@ -13,6 +13,46 @@ cloud-init. Une rotation de la clé applicative invalide volontairement tout
 secret encore en attente. L'administrateur choisit une longueur minimale de 1 à
 256 caractères ; aucune classe de caractères n'est imposée.
 
+## Réinitialisation après provisionnement
+
+Dans l'inventaire global, un administrateur peut demander au propriétaire de
+renouveler le mot de passe SSH d'une VM cloud-init. Le portail crée une
+notification privée, mais ne crée pas le nouveau secret : le propriétaire le
+choisit dans son espace. Il peut également lancer lui-même cette modification
+sans attendre une demande lorsqu'il a oublié son mot de passe.
+
+La VM doit être démarrée et QEMU Guest Agent doit répondre. Le portail transmet
+le secret de façon synchrone à l'endpoint Proxmox
+`agent/set-user-password`, puis l'oublie immédiatement. Le secret n'est écrit ni
+en base, ni dans l'audit, ni dans une notification. Le minimum effectif est le
+plus grand entre la politique du portail et les 5 caractères exigés par l'API
+Proxmox.
+
+Sur Proxmox VE 9, l'endpoint requiert `VM.GuestAgent.Unrestricted`. Ce droit
+permet d'autres opérations invitées sensibles : accordez-le uniquement au pool
+des VM gérées par le portail, idéalement via un token de service séparé :
+
+```bash
+pveum role add PortalGuestPasswordReset \
+  --privs "VM.GuestAgent.Unrestricted" 2>/dev/null ||
+pveum role modify PortalGuestPasswordReset \
+  --privs "VM.GuestAgent.Unrestricted"
+
+pveum acl modify /pool/portal-vms \
+  --user portal@pve \
+  --role PortalGuestPasswordReset
+
+pveum acl modify /pool/portal-vms \
+  --token 'portal@pve!provisioning' \
+  --role PortalGuestPasswordReset
+
+pveum user token permissions portal@pve provisioning |
+grep VM.GuestAgent.Unrestricted
+```
+
+Remplacez `portal-vms` par le pool réellement dédié au portail. N'accordez pas
+ce rôle sur `/` ou sur les templates de construction.
+
 ## Préparer un template cloud-init
 
 La recette Packer versionnée transforme automatiquement l'ISO Debian en template

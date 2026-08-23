@@ -5,7 +5,7 @@ from sqlalchemy import select
 from werkzeug.security import generate_password_hash
 
 from portal import create_app
-from portal.models import VMAllocation, db
+from portal.models import AuditEvent, VMAllocation, db
 from portal.pve import FakePVEClient, PVEClient, PVEProtocolError
 
 
@@ -93,6 +93,8 @@ def test_valid_vm_request_is_accepted_and_sent_to_client(authenticated_client, p
             "cpu": 2,
             "ram_mb": 4096,
             "disk_gb": 40,
+            "usage_purpose": "technical_test",
+            "no_patient_data_ack": True,
         },
     )
 
@@ -101,6 +103,63 @@ def test_valid_vm_request_is_accepted_and_sent_to_client(authenticated_client, p
     assert response.get_json()["job_id"]
     assert response.get_json()["vm_id"]
     assert pve_client.requests == []
+
+
+@pytest.mark.parametrize(
+    ("updates", "field"),
+    [
+        ({"no_patient_data_ack": False}, "no_patient_data_ack"),
+        ({"no_patient_data_ack": "yes"}, "no_patient_data_ack"),
+        ({"usage_purpose": "production"}, "usage_purpose"),
+    ],
+)
+def test_vm_request_requires_test_usage_and_patient_data_confirmation(
+    authenticated_client, updates, field
+):
+    payload = {
+        "name": "data-policy-vm",
+        "node": "pve-a",
+        "profile": "debian-12",
+        "cpu": 2,
+        "ram_mb": 4096,
+        "disk_gb": 40,
+        "usage_purpose": "technical_test",
+        "no_patient_data_ack": True,
+        **updates,
+    }
+    response = authenticated_client.post("/api/vms", json=payload)
+    assert response.status_code == 400
+    assert field in response.get_json()["errors"]
+
+
+def test_vm_creation_records_data_policy_evidence(app, authenticated_client):
+    response = authenticated_client.post(
+        "/api/vms",
+        json={
+            "name": "policy-evidence-vm",
+            "node": "pve-a",
+            "profile": "debian-12",
+            "cpu": 2,
+            "ram_mb": 4096,
+            "disk_gb": 40,
+            "usage_purpose": "functional_test",
+            "no_patient_data_ack": True,
+        },
+    )
+    assert response.status_code == 202
+    with app.app_context():
+        allocation = db.session.get(VMAllocation, response.get_json()["vm_id"])
+        assert allocation.usage_purpose == "functional_test"
+        assert allocation.data_policy_version == "no-real-patient-data-v1"
+        assert allocation.data_policy_acknowledged_at is not None
+        event = db.session.scalar(
+            select(AuditEvent).where(
+                AuditEvent.target_id == allocation.id,
+                AuditEvent.action == "vm.enqueue",
+            )
+        )
+        assert event.details["no_patient_data_ack"] is True
+        assert event.details["data_policy_version"] == "no-real-patient-data-v1"
 
 
 def test_vm_lifetime_policy_is_applied_to_new_requests(app, authenticated_client):
@@ -116,6 +175,8 @@ def test_vm_lifetime_policy_is_applied_to_new_requests(app, authenticated_client
         "cpu": 2,
         "ram_mb": 4096,
         "disk_gb": 40,
+        "usage_purpose": "functional_test",
+        "no_patient_data_ack": True,
     }
     rejected = authenticated_client.post(
         "/api/vms", json={**payload, "lifetime_days": 31}
@@ -179,6 +240,8 @@ def test_profile_must_be_enabled(authenticated_client, pve_client):
             "cpu": 2,
             "ram_mb": 4096,
             "disk_gb": 40,
+            "usage_purpose": "technical_test",
+            "no_patient_data_ack": True,
         },
     )
 

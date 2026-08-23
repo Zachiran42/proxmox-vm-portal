@@ -11,6 +11,13 @@ Le navigateur ne communique jamais directement avec Proxmox, Password Pusher ou
 la base de données. L'API du portail applique l'authentification, l'autorisation,
 les quotas et la validation avant de créer un travail asynchrone.
 
+Toute VM libre-service naît en mode `sandbox`. Son interface reste active pour
+DHCP et les seuls services internes explicitement autorisés par son profil,
+mais le pare-feu Proxmox applique `DROP` par défaut en entrée et en sortie. Une
+sortie de ce mode exige une demande utilisateur et une décision administrative
+auditée. Le mode `isolated`, qui déconnecte aussi l'interface virtuelle, reste
+réservé à la quarantaine et aux profils volontairement sans réseau.
+
 ```text
 Utilisateur -> reverse proxy TLS -> portail -> file de travaux -> worker
                                       |                         |
@@ -38,6 +45,10 @@ L'interface doit donc distinguer :
 - les ISO découvertes en lecture seule dans Proxmox ;
 - les images publiées et installables, associées à un profil versionné ;
 - les images désactivées ou non approuvées, impossibles à provisionner.
+- le cycle de vie `active`, `deprecated`, `retired`, copié avec la version dans
+  chaque allocation afin de signaler les VM obsolètes sans mutation automatique.
+- une synthèse MCO calculée à la demande et un export d'audit SIEM en mode pull,
+  désactivé par défaut et protégé par un jeton chiffré distinct des sessions Web.
 
 ## Identité et autorisations
 
@@ -75,6 +86,11 @@ Le choix interne/externe de Password Pusher est une configuration
 d'administrateur, jamais une URL libre fournie par un utilisateur.
 
 ## Contrôles de sécurité obligatoires
+
+- Toute nouvelle VM possède une finalité de test et une preuve horodatée de
+  l'interdiction des données patient réelles. La validation intervient avant
+  les réservations et appels d'infrastructure ; les VM historiques restent
+  explicitement non acquittées.
 
 - TLS vérifié entre tous les composants, avec autorité interne configurable.
 - Secrets injectés par fichiers Docker secrets ou gestionnaire de secrets, jamais
@@ -146,3 +162,15 @@ d'administrateur, jamais une URL libre fournie par un utilisateur.
 17. Prévenir les propriétaires avant les échéances. **Livré : balayage périodique
     par le worker, rappels privés dédupliqués au début du préavis et à
     l'expiration, recalculés après prolongation sans action automatique sur la VM.**
+18. Permettre la récupération autonome de l'accès invité. **Livré : demande
+    administrateur, notification privée, choix du nouveau mot de passe par le
+    propriétaire et application synchrone via QEMU Guest Agent sans persistance
+    du secret.**
+19. Raccorder la supervision Zabbix. **Conception documentée : template officiel
+    Proxmox avec token de lecture séparé, Agent 2 actif dans les VM, proxy par
+    zone et future réconciliation idempotente via l'API Zabbix. L'implémentation
+    reste à qualifier avec l'infrastructure Zabbix cible.**
+20. Administrer les VM de test sans SSH central. **Livré : inventaire et mise à
+    jour APT asynchrones via QEMU Guest Agent, rapport normalisé, historique
+    audité, isolement `DROP` entrée/sortie au niveau Proxmox et consultation des
+    paquets refusés sans inspection interne de la VM.**

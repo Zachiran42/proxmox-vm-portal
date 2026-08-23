@@ -36,7 +36,11 @@ def app(pve_client):
 
 
 def payload():
-    return {"name": "web-01", "node": "pve-a", "profile": "debian-12", "cpu": 2, "ram_mb": 4096, "disk_gb": 40}
+    return {
+        "name": "web-01", "node": "pve-a", "profile": "debian-12",
+        "cpu": 2, "ram_mb": 4096, "disk_gb": 40,
+        "usage_purpose": "technical_test", "no_patient_data_ack": True,
+    }
 
 
 def login(client):

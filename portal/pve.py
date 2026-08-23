@@ -313,6 +313,188 @@ class PVEClient:
     def start_vm(self, node: str, vmid: int) -> str:
         return self._vm_task(node, vmid, "status/start", method="POST", payload={})
 
+    def set_guest_password(
+        self, *, node: str, vmid: int, username: str, password: str
+    ) -> None:
+        """Change un secret invité via QEMU Guest Agent, sans l'écrire sur disque."""
+        result = self._request(
+            f"/nodes/{quote(node, safe='')}/qemu/{vmid}/agent/set-user-password",
+            method="POST",
+            payload={
+                "username": username,
+                "password": password,
+                "crypted": 0,
+            },
+        )
+        if not isinstance(result, dict) or "result" not in result:
+            raise PVEProtocolError(
+                "La confirmation de changement de mot de passe PVE est invalide."
+            )
+
+    def guest_exec(self, node: str, vmid: int, command: list[str]) -> int:
+        """Lance une commande fixe via QEMU Guest Agent et retourne son PID."""
+        if (
+            not command
+            or len(command) > 16
+            or any(not isinstance(part, str) or not part or len(part) > 8192 for part in command)
+        ):
+            raise ValueError("Commande invitée invalide.")
+        result = self._request(
+            f"/nodes/{quote(node, safe='')}/qemu/{vmid}/agent/exec",
+            method="POST",
+            payload={"command": command},
+        )
+        pid = result.get("pid") if isinstance(result, dict) else None
+        if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+            raise PVEProtocolError("Le PID retourné par QEMU Guest Agent est invalide.")
+        return pid
+
+    def guest_exec_status(self, node: str, vmid: int, pid: int) -> dict[str, Any]:
+        if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+            raise ValueError("PID invité invalide.")
+        result = self._request(
+            f"/nodes/{quote(node, safe='')}/qemu/{vmid}/agent/exec-status?pid={pid}"
+        )
+        if not isinstance(result, dict) or not isinstance(result.get("exited"), (bool, int)):
+            raise PVEProtocolError("Le statut QEMU Guest Agent est invalide.")
+        normalized: dict[str, Any] = {"exited": bool(result["exited"])}
+        for key in ("exitcode", "signal"):
+            if key in result:
+                if isinstance(result[key], bool) or not isinstance(result[key], int):
+                    raise PVEProtocolError("Le résultat QEMU Guest Agent est invalide.")
+                normalized[key] = result[key]
+        for key in ("out-data", "err-data"):
+            value = result.get(key)
+            if value is not None:
+                if not isinstance(value, str):
+                    raise PVEProtocolError("La sortie QEMU Guest Agent est invalide.")
+                normalized[key] = value
+        return normalized
+
+    def set_vm_network_policy(
+        self,
+        node: str,
+        vmid: int,
+        policy: str,
+        *,
+        rules: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """Applique une frontière réseau hyperviseur, avec vérification fail-closed."""
+        if policy not in {"normal", "sandbox", "isolated"}:
+            raise ValueError("Politique réseau invalide.")
+        if policy == "sandbox" and not rules:
+            raise ValueError("Le sandbox requiert au moins une règle autorisée.")
+        cluster = self._request("/cluster/firewall/options")
+        if not isinstance(cluster, dict) or cluster.get("enable") not in {1, "1", True}:
+            raise PVEProtocolError("Le pare-feu Datacenter Proxmox n'est pas activé.")
+        base = f"/nodes/{quote(node, safe='')}/qemu/{vmid}"
+        config = self._request(f"{base}/config")
+        net0 = config.get("net0") if isinstance(config, dict) else None
+        if not isinstance(net0, str) or "firewall=1" not in net0.split(","):
+            raise PVEProtocolError("Le pare-feu de l'interface net0 n'est pas activé.")
+
+        pve_policy = "DROP" if policy in {"sandbox", "isolated"} else "ACCEPT"
+        link_down = "1" if policy == "isolated" else "0"
+        self._request(
+            f"{base}/firewall/options",
+            method="PUT",
+            payload={
+                "enable": 1,
+                "policy_in": pve_policy,
+                "policy_out": pve_policy,
+                "log_level_in": "info",
+                "log_level_out": "info",
+            },
+        )
+        verified_firewall = self._request(f"{base}/firewall/options")
+        if (
+            not isinstance(verified_firewall, dict)
+            or verified_firewall.get("enable") not in {1, "1", True}
+            or verified_firewall.get("policy_in", "ACCEPT") != pve_policy
+            or verified_firewall.get("policy_out", "ACCEPT") != pve_policy
+        ):
+            raise PVEProtocolError("La politique pare-feu Proxmox n'a pas été confirmée.")
+
+        if policy == "sandbox":
+            firewall_path = f"{base}/firewall/rules"
+            existing_rules = self._request(firewall_path)
+            if not isinstance(existing_rules, list):
+                raise PVEProtocolError("Les règles pare-feu Proxmox sont invalides.")
+            managed_positions: list[int] = []
+            for item in existing_rules:
+                if not isinstance(item, dict):
+                    continue
+                position = item.get("pos")
+                comment = item.get("comment")
+                if (
+                    isinstance(position, int)
+                    and isinstance(comment, str)
+                    and comment.startswith("portal-sandbox:")
+                ):
+                    managed_positions.append(position)
+            managed_positions.sort(reverse=True)
+            for position in managed_positions:
+                self._request(f"{firewall_path}/{position}", method="DELETE")
+            expected_comments: set[str] = set()
+            for rule in rules or []:
+                comment = rule.get("comment")
+                if not isinstance(comment, str) or not comment.startswith("portal-sandbox:"):
+                    raise ValueError("Commentaire de règle sandbox invalide.")
+                payload = {
+                    key: value
+                    for key, value in rule.items()
+                    if key in {"type", "action", "source", "dest", "proto", "sport", "dport", "comment"}
+                    and value not in {None, ""}
+                }
+                payload["enable"] = 1
+                payload["log"] = "nolog"
+                self._request(firewall_path, method="POST", payload=payload)
+                expected_comments.add(comment)
+            verified_rules = self._request(firewall_path)
+            if not isinstance(verified_rules, list) or not expected_comments.issubset(
+                {
+                    item.get("comment")
+                    for item in verified_rules
+                    if isinstance(item, dict) and item.get("enable") in {1, "1", True}
+                }
+            ):
+                raise PVEProtocolError("Les autorisations sandbox n'ont pas été confirmées.")
+        net0_parts = [part for part in net0.split(",") if not part.startswith("link_down=")]
+        configured_net0 = ",".join([*net0_parts, f"link_down={link_down}"])
+        self._request(
+            f"{base}/config",
+            method="PUT",
+            payload={"net0": configured_net0},
+        )
+        verified_config = self._request(f"{base}/config")
+        verified_net0 = (
+            verified_config.get("net0") if isinstance(verified_config, dict) else None
+        )
+        if not isinstance(verified_net0, str) or f"link_down={link_down}" not in verified_net0.split(","):
+            raise PVEProtocolError("L'état du lien réseau Proxmox n'a pas été confirmé.")
+
+    def get_vm_firewall_log(
+        self, node: str, vmid: int, *, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
+            raise ValueError("Limite de journal invalide.")
+        result = self._request(
+            f"/nodes/{quote(node, safe='')}/qemu/{vmid}/firewall/log?limit={limit}"
+        )
+        if not isinstance(result, list):
+            raise PVEProtocolError("Le journal pare-feu Proxmox est invalide.")
+        entries: list[dict[str, Any]] = []
+        for item in result:
+            if not isinstance(item, dict) or not isinstance(item.get("t"), str):
+                continue
+            entries.append(
+                {
+                    "line": item.get("n") if isinstance(item.get("n"), int) else None,
+                    "message": item["t"][:2048],
+                }
+            )
+        return entries
+
     def stop_vm(self, node: str, vmid: int) -> str:
         return self._vm_task(node, vmid, "status/shutdown", method="POST", payload={})
 
@@ -402,6 +584,15 @@ class FakePVEClient:
     deletions: list[tuple[str, int]] = field(default_factory=list)
     vm_statuses: dict[tuple[str, int], str] = field(default_factory=dict)
     vm_ipv4_addresses: dict[tuple[str, int], list[str]] = field(default_factory=dict)
+    guest_password_resets: list[tuple[str, int, str, str]] = field(
+        default_factory=list
+    )
+    guest_exec_requests: list[tuple[str, int, list[str]]] = field(default_factory=list)
+    guest_exec_results: list[dict[str, Any]] = field(default_factory=list)
+    network_policies: dict[tuple[str, int], str] = field(default_factory=dict)
+    network_policy_rules: dict[tuple[str, int], list[dict[str, Any]]] = field(default_factory=dict)
+    firewall_logs: dict[tuple[str, int], list[dict[str, Any]]] = field(default_factory=dict)
+    next_guest_pid: int = 1000
 
     def is_iso_available(self, node: str, iso: str) -> bool:
         return iso in self.accessible_isos.get(node, set())
@@ -432,6 +623,40 @@ class FakePVEClient:
 
     def configure_cloud_init_vm(self, **configuration: Any) -> None:
         self.configurations.append(configuration)
+
+    def set_guest_password(
+        self, *, node: str, vmid: int, username: str, password: str
+    ) -> None:
+        self.guest_password_resets.append((node, vmid, username, password))
+
+    def guest_exec(self, node: str, vmid: int, command: list[str]) -> int:
+        self.guest_exec_requests.append((node, vmid, list(command)))
+        pid = self.next_guest_pid
+        self.next_guest_pid += 1
+        return pid
+
+    def guest_exec_status(self, node: str, vmid: int, pid: int) -> dict[str, Any]:
+        if self.guest_exec_results:
+            if len(self.guest_exec_results) > 1:
+                return self.guest_exec_results.pop(0)
+            return self.guest_exec_results[0]
+        return {"exited": True, "exitcode": 0, "out-data": ""}
+
+    def set_vm_network_policy(
+        self,
+        node: str,
+        vmid: int,
+        policy: str,
+        *,
+        rules: list[dict[str, Any]] | None = None,
+    ) -> None:
+        self.network_policies[(node, vmid)] = policy
+        self.network_policy_rules[(node, vmid)] = list(rules or [])
+
+    def get_vm_firewall_log(
+        self, node: str, vmid: int, *, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        return list(self.firewall_logs.get((node, vmid), []))[:limit]
 
     def start_vm(self, node: str, vmid: int) -> str:
         self.starts.append((node, vmid))
