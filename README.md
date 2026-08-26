@@ -1,250 +1,231 @@
-# Portail Proxmox VM
+<p align="right"><a href="README.fr.md">🇫🇷 Français</a></p>
 
-Portail Web Flask de provisionnement de VM Proxmox, avec catalogue d'images,
-comptes locaux, rôles, quotas et journal d'audit PostgreSQL. Aucun secret n'est
-stocké dans le dépôt.
+# Proxmox VM Portal
 
-## Sécurité intégrée
+A self-service web portal for provisioning secure Proxmox virtual machines from
+approved ISO and cloud-init templates.
 
-- Authentification locale obligatoire pour `POST /api/vms`, par session signée HttpOnly et SameSite=Lax.
-- Le mot de passe administrateur est fourni uniquement sous forme de hash Werkzeug (`PORTAL_ADMIN_PASSWORD_HASH`) ; aucun mot de passe clair n'est accepté en configuration.
-- Le cookie de session est `Secure` par défaut. `PORTAL_SESSION_COOKIE_SECURE=false` est réservé au développement HTTP local isolé.
-- La configuration PVE et les secrets d'authentification sont lus depuis l'environnement. L'application refuse de démarrer s'il manque un secret d'authentification.
-- En conteneur, les valeurs sensibles sont montées comme secrets et lues via
-  les variantes `*_FILE`; elles ne figurent ni dans Git ni dans l'environnement
-  inspectable du conteneur.
-- Taille maximale des requêtes : 64 KiB.
-- Les erreurs de transport, TLS, JSON invalide et HTTP PVE sont converties en JSON 502/503 sans détail PVE ni traceback.
-- Authentification PVE par API token dédié : les tokens `root@…` sont explicitement refusés ; HTTPS est obligatoire.
-- Validation stricte en liste blanche : nom, nœud, profil d'image approuvé, CPU (1–32), RAM (512–131072 MiB, pas de 256), disque (8–2048 GiB).
-- Avant toute création, le worker vérifie que le profil est actif et que son ISO exacte est présente sur le nœud choisi.
-- Les rôles `admin`, `operator` et `user` ainsi que les quotas CPU, RAM, disque
-  et nombre de VM sont appliqués côté serveur.
-- Une réservation en base précède l'appel Proxmox afin de rendre les quotas sûrs
-  face aux demandes concurrentes.
-- Les connexions, refus d'autorisation, créations d'utilisateurs et demandes de
-  VM alimentent un journal d'audit sans mot de passe ni secret Proxmox.
-- Keycloak peut authentifier les utilisateurs par OIDC Authorization Code avec
-  PKCE S256 ; les rôles externes sont mappés strictement et les jetons ne sont
-  pas conservés.
-- PostgreSQL porte une file de travaux verrouillée par worker. Le suivi du UPID
-  Proxmox distingue réussite, échec et résultat ambigu nécessitant une revue.
-- Le démarrage, l’arrêt propre, le redémarrage et la suppression suivent la même
-  file persistante. Une seule opération peut être active par VM et les quotas ne
-  sont libérés qu’après confirmation de suppression par Proxmox.
-- L’administration expose la santé de PostgreSQL, du worker et de Proxmox ainsi
-  que les travaux ambigus. Un suivi ne peut être repris qu’avec son UPID existant
-  et une clôture en échec exige la confirmation exacte du nom de la VM.
-- Les métriques Prometheus utilisent un jeton Bearer dédié et ne contiennent
-  aucun identifiant individuel. Les alertes email/webhook sont déléguées à
-  Alertmanager afin de ne jamais bloquer le worker.
-- Les tags de release construisent une image GHCR signée par identité OIDC, avec
-  provenance `mode=max`, SBOM SPDX, manifeste signé et sommes SHA-256. Aucune clé
-  de signature longue durée n'est stockée dans GitHub.
-- Le mode de déploiement `release` refuse les tags d'image mutables, vérifie la
-  signature et l'identité OIDC avec Cosign, puis exécute uniquement le digest
-  GHCR approuvé sans reconstruire le code local.
-- Les profils cloud-init clonés créent un compte nominatif non-root. L'utilisateur
-  choisit son mot de passe SSH selon une longueur minimale administrable, sans
-  règle de complexité imposée. Le secret reste chiffré pendant le travail puis
-  est supprimé dès son injection dans cloud-init.
-- Chaque nouvelle VM reçoit une échéance administrable. Le portail avertit avant
-  expiration et bloque ensuite uniquement son démarrage ou redémarrage jusqu'à
-  prolongation par un administrateur. Il ne supprime jamais automatiquement une VM.
-- Un circuit d'approbation peut être activé par l'administrateur. Une demande
-  attend alors une décision auditée avant tout appel à Proxmox ou NetBox ; un
-  refus motivé efface le secret invité et libère les quotas.
-- Un centre de notifications interne informe les administrateurs des demandes
-  à traiter et les propriétaires des décisions et résultats de provisionnement,
-  ainsi que des échéances proches ou atteintes, sans dépendance SMTP ni
-  exposition de secret.
-- Un administrateur peut demander le renouvellement du mot de passe SSH d'une
-  VM cloud-init. Le propriétaire choisit lui-même le nouveau secret, transmis
-  directement au QEMU Guest Agent puis oublié ; sa valeur n'est jamais stockée.
+Users can request a ready-to-use VM without accessing Proxmox directly. The
+portal applies quotas, lifecycle rules, network isolation, SSH access, audit
+logging, and optional approval workflows. Administrators manage the cluster,
+images, VLANs, integrations, users, and maintenance from the web interface.
 
-Le token de service PVE doit être limité par ACL aux nœuds, stockages et opérations requis. N'utilisez jamais `root@pam`.
+[![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
+![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB)
+![Debian](https://img.shields.io/badge/Target-Debian%2013-A81D33)
+![Proxmox VE](https://img.shields.io/badge/Proxmox-VE-E57000)
 
-## Configuration et lancement local
+## Screenshots
+
+### Sign in
+
+![Secure sign-in screen](docs/screenshots/login.jpg)
+
+### Self-service machines
+
+![User machine dashboard with quotas, IP addresses and SSH actions](docs/screenshots/machines.jpg)
+
+### Approved image catalogue
+
+![Approved cloud-init image catalogue](docs/screenshots/catalogue.jpg)
+
+The screenshots use a local demonstration dataset. They contain no production
+credentials, infrastructure identifiers, or patient data.
+
+## What it provides
+
+- Cloud-init cloning for immediately usable Debian and Ubuntu test VMs.
+- A non-root sudo account chosen by the requester, with SSH credentials handled
+  without storing the clear-text password.
+- DHCP or static IPv4 assignment from administrator-approved VLAN profiles.
+- NetBox validation and IP reservation.
+- Sandbox networking by default: Proxmox firewall policy is deny-by-default and
+  only approved internal services are reachable.
+- A GLPI link and audited workflow for temporary sandbox release requests.
+- Local, LDAP/LDAPS, or Keycloak/OIDC authentication.
+- Per-user quotas, optional administrative approval, and VM expiration rules.
+- Start, stop, reboot, delete, SSH password reset, APT maintenance, and fleet
+  reporting from the portal.
+- PostgreSQL-backed jobs, notifications, audit records, Prometheus metrics,
+  SIEM export, and optional Zabbix integration.
+- Signed release images, SBOM, provenance, encrypted backups, and a fully
+  autonomous Debian 13 offline bundle.
+
+## Quick installation on Debian 13
+
+The autonomous bundle is the simplest and recommended installation method. It
+contains the application and every required container image. The target VM does
+not need a GitHub token and does not need Internet access after the two release
+files have been transferred.
+
+Minimum recommended VM size:
+
+- Debian 13 amd64
+- 2 vCPU
+- 4 GiB RAM
+- 30 GiB disk
+- one reachable IPv4 address
+
+### 1. Download and install
+
+Run the following as a sudo-capable user on a fresh Debian 13 VM:
+
+```bash
+version=0.25.0
+base="https://github.com/Zachiran42/proxmox-vm-portal/releases/download/v${version}"
+bundle="proxmox-vm-portal-offline-${version}-amd64.tar.gz"
+
+curl --proto '=https' --tlsv1.2 --fail --location --remote-name "${base}/${bundle}"
+curl --proto '=https' --tlsv1.2 --fail --location --remote-name "${base}/${bundle}.sha256"
+sha256sum --check "${bundle}.sha256"
+tar -xzf "${bundle}"
+sudo bash "proxmox-vm-portal-offline-${version}-amd64/install-offline.sh"
+```
+
+The installer automatically:
+
+1. verifies the complete bundle;
+2. installs Docker and the required Debian packages;
+3. starts PostgreSQL, the API, the worker, and Caddy;
+4. detects the VM IPv4 address;
+5. creates a local self-signed TLS authority;
+6. generates the application secrets and encrypted-backup identity; and
+7. starts the portal at `https://SERVER_IP`.
+
+No Proxmox, LDAP, NetBox, DNS, or public certificate information is requested
+during this first installation.
+
+### 2. Open the portal
+
+The initial administrator credentials are written to a root-only file:
+
+```bash
+sudo cat /root/proxmox-vm-portal-initial-credentials.txt
+```
+
+Open the displayed HTTPS URL. The browser will warn about the local certificate
+until you trust the generated CA or replace it with your internal PKI
+certificate. The portal requires the temporary administrator password to be
+changed on first sign-in.
+
+Check the installation at any time:
 
 ```bash
 cd /opt/proxmox-vm-portal
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -e '.[dev]'
-cp .env.example .env
-# Renseigner uniquement .env local, non versionné, puis générer hash et secret selon les commandes commentées.
-set -a; . ./.env; set +a
-flask --app 'portal:create_app' db upgrade
-flask --app 'portal:create_app' bootstrap-admin  # uniquement sur une base vide
-flask --app 'portal:create_app' run
-# Dans un second service/processus :
-flask --app 'portal:create_app' worker
+sudo bash deploy/scripts/compose.sh ps
+curl --insecure --fail --silent https://SERVER_IP/healthz
 ```
 
-Récupération d'un administrateur local existant (saisie masquée, sans
-modifier les autres comptes ni la base) :
+### 3. Connect Proxmox
 
-```bash
-sudo /opt/proxmox-vm-portal/deploy/scripts/reset-admin-password.sh
-```
+In the portal, open **Administration → Infrastructure integrations** and enter:
 
-Une installation plug-and-play neuve utilise temporairement `admin/admin`.
-Après cette première authentification, le portail bloque toutes les fonctions
-jusqu'au choix d'un nouveau mot de passe. Sa longueur est laissée à la politique
-de l'administrateur ; l'interface refuse uniquement une valeur vide et une
-réutilisation du mot de passe temporaire.
+- the Proxmox API URL, for example
+  `https://pve.example.internal:8006/api2/json`;
+- a dedicated non-root token ID such as
+  `portal@pve!provisioning`;
+- the token secret; and
+- the Proxmox CA certificate when it is not already trusted.
 
-Le raccordement Proxmox et l'intégration NetBox sont administrables directement
-dans `Administration > Intégrations d'infrastructure`. L'interface teste l'URL,
-la CA et le token avant de chiffrer le secret en base. Les scripts suivants
-restent disponibles pour l'installation initiale et la récupération :
+The portal tests TLS, the token, and visible cluster nodes before saving the
+encrypted secret. Never use `root@pam`.
+
+The recovery CLI remains available:
 
 ```bash
 sudo /opt/proxmox-vm-portal/deploy/scripts/configure-proxmox.sh
 sudo /opt/proxmox-vm-portal/deploy/scripts/check-proxmox.sh
-sudo /opt/proxmox-vm-portal/deploy/scripts/configure-netbox.sh
 ```
 
-Avec une CA Proxmox historique, le client conserve la validation de chaîne, du
-nom d'hôte et `CERT_REQUIRED`, mais désactive uniquement `X509_STRICT` pour
-accepter l'absence ancienne de l'extension `keyUsage`.
+See [Deployment](docs/DEPLOYMENT.md) for firewall rules, DNS, certificates,
+Proxmox ACLs, and production hardening. See [Air-gapped installation](docs/AIRGAP.md)
+for controlled transfer and CMDB checksum procedures.
 
-L'interface Web est disponible sur `/`. Un administrateur peut y publier,
-contrôler, suspendre et réactiver les profils d'images ; les autres rôles voient
-le catalogue actif en lecture seule. Chaque utilisateur dispose d'un assistant
-de création de VM, d'une vue de ses quotas et d'un historique privé actualisé
-automatiquement. L'identifiant SSH apparaît seulement dans l'espace du propriétaire.
-Les machines prêtes peuvent être démarrées, arrêtées et redémarrées depuis cette
-vue. La suppression définitive exige de saisir le nom exact de la VM.
-L'espace Administration permet de créer et suspendre les comptes locaux,
-d'ajuster leurs rôles et quotas et de consulter les 100 derniers événements
-d'audit. Il centralise aussi l’état des services et les interventions manuelles
-sur les travaux ambigus. Les rôles des identités OIDC restent gérés dans Keycloak.
-Le journal d’audit peut être exporté en CSV neutralisé pour les tableurs.
-La même page permet de définir la durée de vie par défaut, la durée maximale et
-le préavis, puis de prolonger de façon auditée les VM arrivant à échéance.
+## Updates
 
-En production, servez l'application derrière TLS avec un serveur WSGI et conservez `PORTAL_SESSION_COOKIE_SECURE=true`. N'activez pas le mode debug.
-
-## Déploiement Debian avec Docker
-
-La stack de production fournit PostgreSQL 17, un service de migration, l'API
-Gunicorn non-root, le worker et Caddy. Keycloak et Password Pusher sont des
-profils Compose optionnels. Après configuration de `.env.production` :
+For an installation created from an autonomous bundle, download the newer
+bundle and run:
 
 ```bash
-sudo bash deploy/scripts/install-debian.sh
-sudo deploy/scripts/compose.sh ps
+cd proxmox-vm-portal-offline-NEW_VERSION-amd64
+sudo bash install-offline.sh --update
 ```
 
-Guide complet : [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md). Sauvegarde,
-restauration et mises à jour :
-[`docs/BACKUP_RESTORE.md`](docs/BACKUP_RESTORE.md).
-Pour un réseau autonome sans accès GitHub/GHCR depuis le serveur, utilisez le
-bundle vérifiable décrit dans [`docs/AIRGAP.md`](docs/AIRGAP.md).
+The updater creates an encrypted backup before replacing the application,
+preserves configuration and secrets, runs database migrations, waits for
+health checks, and retains rollback material until the update succeeds.
 
-Pour tester la release privée sur une Debian vierge avec une commande `curl`
-épinglée au tag, utilisez la procédure d'installation rapide de
-[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md#installation-rapide-de-la-release-privée).
+Read [Backup and restore](docs/BACKUP_RESTORE.md) before the first production
+deployment.
+
+## Security model
+
+The service is designed for on-premises environments, including isolated
+healthcare infrastructure:
+
+- secrets are mounted as root-managed files and never committed to Git;
+- application containers run read-only as UID 10001 with all capabilities
+  dropped;
+- Proxmox access uses a least-privilege API token and HTTPS only;
+- new VMs start in an enforced sandbox policy;
+- passwords and Proxmox error details are excluded from audit records;
+- sessions use secure, HttpOnly, SameSite cookies and CSRF protection;
+- provisioning is asynchronous and safely reconciles ambiguous Proxmox tasks;
+- release images are immutable, signed through GitHub OIDC, and published with
+  SBOM and provenance evidence.
+
+Security controls do not replace local risk assessment, network ACLs, trusted
+PKI, off-site backups, or the CHU change-management process. Start with the
+[threat model](docs/THREAT_MODEL.md) and [security review](docs/SECURITY_REVIEW.md).
+
+## Main documentation
+
+| Topic | Guide |
+|---|---|
+| Production deployment | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
+| Autonomous/offline installation | [docs/AIRGAP.md](docs/AIRGAP.md) |
+| Proxmox architecture and ACLs | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| Debian cloud-init image factory | [docs/IMAGE_FACTORY.md](docs/IMAGE_FACTORY.md) |
+| Guest SSH access | [docs/GUEST_ACCESS.md](docs/GUEST_ACCESS.md) |
+| VLANs, NetBox, and connectivity | [docs/NETWORKS_NETBOX.md](docs/NETWORKS_NETBOX.md) |
+| Sandbox firewall policy | [docs/SANDBOX.md](docs/SANDBOX.md) |
+| LDAP/LDAPS | [docs/LDAP.md](docs/LDAP.md) |
+| Keycloak/OIDC | [docs/KEYCLOAK.md](docs/KEYCLOAK.md) |
+| VM maintenance and lifecycle | [docs/VM_MAINTENANCE.md](docs/VM_MAINTENANCE.md), [docs/MCO.md](docs/MCO.md) |
+| Monitoring and SIEM | [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md), [docs/ZABBIX.md](docs/ZABBIX.md), [docs/SIEM.md](docs/SIEM.md) |
+| Release verification | [docs/RELEASES.md](docs/RELEASES.md) |
+
+## Local development
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -e '.[dev]'
+cp .env.example .env
+# Fill only the local, ignored .env file.
+set -a
+. ./.env
+set +a
+flask --app 'portal:create_app' db upgrade
+flask --app 'portal:create_app' bootstrap-admin
+flask --app 'portal:create_app' run
+```
+
+Run the worker in a second terminal:
+
+```bash
+flask --app 'portal:create_app' worker
+```
 
 ## Tests
 
-Les tests n'appellent aucun PVE réel et n'utilisent aucun secret réel :
+Tests use fake Proxmox and integration clients; they do not contact a real
+cluster or require real secrets.
 
 ```bash
-.venv/bin/pytest -q
+pytest -q
 ```
 
-Architecture cible et étapes de livraison : [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
-Modèle de menaces et preuves de la revue :
-[`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) et
-[`docs/SECURITY_REVIEW.md`](docs/SECURITY_REVIEW.md).
-Recette de qualification réelle : [`docs/PREPRODUCTION.md`](docs/PREPRODUCTION.md).
-Authentification LDAP/LDAPS native : [`docs/LDAP.md`](docs/LDAP.md).
-Profils réseau/VLAN, politiques de connectivité, ouverture sur ticket et
-intégration NetBox : [`docs/NETWORKS_NETBOX.md`](docs/NETWORKS_NETBOX.md).
-Bac à sable par défaut, règles réseau minimales et catalogue logiciel interne :
-[`docs/SANDBOX.md`](docs/SANDBOX.md).
-Usage de test, confirmation d'absence de données patient réelles et limites du
-garde-fou : [`docs/DATA_USAGE.md`](docs/DATA_USAGE.md).
-Configuration Keycloak/OIDC et fédération LDAP : [`docs/KEYCLOAK.md`](docs/KEYCLOAK.md).
-Exploitation de la file de travaux : [`docs/JOBS.md`](docs/JOBS.md).
-Préparation sécurisée des templates et remise des accès : [`docs/GUEST_ACCESS.md`](docs/GUEST_ACCESS.md).
-Maintenance APT et isolement hyperviseur : [`docs/VM_MAINTENANCE.md`](docs/VM_MAINTENANCE.md).
-Versionnement, dépréciation et retrait des images :
-[`docs/IMAGE_LIFECYCLE.md`](docs/IMAGE_LIFECYCLE.md).
-Préparation de la supervision Proxmox et des VM avec Zabbix :
-[`docs/ZABBIX.md`](docs/ZABBIX.md).
-Construction reproductible des templates Debian depuis l'ISO :
-[`docs/IMAGE_FACTORY.md`](docs/IMAGE_FACTORY.md).
-Métriques, règles d’alerte et export d’audit :
-[`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md).
-Collecte continue du journal d’audit par le SIEM/SOC :
-[`docs/SIEM.md`](docs/SIEM.md).
-Cycle de vie, échéances et procédures MCO : [`docs/MCO.md`](docs/MCO.md).
-Approbation administrative optionnelle : [`docs/APPROVALS.md`](docs/APPROVALS.md).
-Centre de notifications interne : [`docs/NOTIFICATIONS.md`](docs/NOTIFICATIONS.md).
-Inventaire global et rôle opérateur : [`docs/OPERATIONS.md`](docs/OPERATIONS.md).
-Notes de la version 0.25.0 : [`docs/RELEASE_0.25.0.md`](docs/RELEASE_0.25.0.md).
-Publication, SBOM, provenance et vérification des signatures :
-[`docs/RELEASES.md`](docs/RELEASES.md).
+## License
 
-Endpoints : `GET /healthz`, `GET /metrics`, `GET /`, `POST /login`, `POST /logout`,
-`GET /api/me`, `POST /api/me/password`, `GET /api/nodes`, `GET /api/nodes/<node>/isos`,
-`GET /api/image-profiles`, `POST /api/vms`, `POST /api/vms/<id>/actions`,
-`GET /api/jobs`, `GET /api/jobs/<id>`,
-`GET /api/notifications`, `POST /api/notifications/<id>/read`,
-`POST /api/notifications/read-all`,
-`GET|POST /api/admin/users`, `PATCH /api/admin/users/<id>`,
-`GET /api/admin/audit-events`, `GET /api/admin/audit-events.csv`,
-`GET /api/admin/mco/report`, `GET /api/admin/mco/report.csv`,
-`GET /api/admin/operations`, `GET /api/operations/vms`, `POST /api/admin/incidents/<kind>/<id>/actions`,
-`POST /api/admin/vms/<id>/approval`,
-`PATCH /api/admin/vms/<id>/lifecycle`,
-`POST /api/admin/vms/<id>/guest-password-reset`,
-`POST /api/vms/<id>/guest-password`,
-`GET|POST /api/admin/image-profiles`, `PATCH /api/admin/image-profiles/<slug>`,
-`GET|PUT /api/admin/integrations/siem`, `GET /api/siem/events`,
-`GET /auth/oidc/login` et `GET /auth/oidc/callback`.
-
-Exemple de connexion :
-
-```json
-{"username":"admin","password":"votre-mot-de-passe-local"}
-```
-
-La réponse contient un jeton CSRF à envoyer dans l'en-tête `X-CSRF-Token` pour
-`POST /api/vms`, `POST /api/vms/<id>/actions` et `POST /logout`.
-
-Exemple de demande authentifiée (avec cet en-tête) :
-
-```json
-{"name":"web-01","node":"pve-a","profile":"debian-12","cpu":2,"ram_mb":4096,"disk_gb":40,"lifetime_days":90}
-```
-
-La réponse HTTP 202 contient `job_id`. Consultez ensuite
-`GET /api/jobs/<job_id>` jusqu'à l'état terminal `succeeded`, `failed` ou
-`attention`.
-
-Avant la première demande, un administrateur doit publier au moins un profil
-avec `POST /api/admin/image-profiles`, par exemple :
-
-```json
-{"slug":"debian-12","label":"Debian 12","description":"ISO approuvée","version":"12.12-2026.08","source_type":"iso","iso":"local:iso/debian-12.iso"}
-```
-
-Un profil cloud-init utilise à la place `source_type: "cloud_init"`,
-`template_node` et `template_vmid`. La demande de VM doit alors inclure un
-`guest_username` Linux non-root et un `guest_password` choisi par l'utilisateur.
-Le mot de passe n'est jamais retourné par l'API. Lors de la publication, le portail
-vérifie immédiatement que le VMID désigne bien un template Proxmox disponible.
-Le réseau est en DHCP par défaut. Une demande peut choisir `network_mode: "static"`
-avec `ipv4_cidr`, `gateway` et `dns_servers`, uniquement dans les CIDR autorisés
-par l'administrateur.
-
-La recette `images/packer/debian-13.pkr.hcl` construit automatiquement le
-template Debian 13.6 durci depuis l'ISO officielle vérifiée. Après sa promotion,
-un utilisateur choisit simplement « Debian 13 Cloud », ses ressources et son
-nom de compte : le portail clone le système déjà installé, configure cloud-init,
-démarre la VM. Voir `docs/IMAGE_FACTORY.md` et
-`docs/GUEST_ACCESS.md`.
+[GPL-3.0](LICENSE)
